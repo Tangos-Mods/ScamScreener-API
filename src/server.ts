@@ -2,7 +2,6 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import type Database from "better-sqlite3";
 import Fastify, { type FastifyInstance } from "fastify";
-import pino from "pino";
 
 import { type AppConfig, loadConfig, resolveConfig } from "./config";
 import { initDatabase } from "./db";
@@ -27,19 +26,17 @@ export async function buildServer(
   const db = options.db ?? initDatabase(config.sqlitePath);
   const discordForwarder = options.discordForwarder ?? forwardUploadToDiscord;
 
-  const logger = pino({
-    level: config.logLevel,
-    transport:
-      config.nodeEnv === "production"
-        ? undefined
-        : {
-            target: "pino-pretty",
-            options: { translateTime: "SYS:standard", ignore: "pid,hostname" }
-          }
-  });
-
   const app = Fastify({
-    logger,
+    logger: {
+      level: config.logLevel,
+      transport:
+        config.nodeEnv === "production"
+          ? undefined
+          : {
+              target: "pino-pretty",
+              options: { translateTime: "SYS:standard", ignore: "pid,hostname" }
+            }
+    },
     bodyLimit: config.maxUploadBytes
   });
 
