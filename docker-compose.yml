@@ -1,13 +1,56 @@
 services:
-  relay:
-    build: .
+  mailpit:
+    image: axllent/mailpit:v1.18.5
+    container_name: scamscreener-training-hub-mailpit
+    restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8025:8025"
+
+  mariadb:
+    image: mariadb:11.4
+    container_name: scamscreener-training-hub-db
+    environment:
+      MARIADB_DATABASE: ${TRAINING_HUB_DB_NAME:-scamscreener_hub}
+      MARIADB_USER: ${TRAINING_HUB_DB_USER:-scamscreener}
+      MARIADB_PASSWORD: ${TRAINING_HUB_DB_PASSWORD:-change-me-hub-password}
+      MARIADB_ROOT_PASSWORD: ${TRAINING_HUB_DB_ROOT_PASSWORD:-change-me-root-password}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${TRAINING_HUB_DB_ROOT_PASSWORD:-change-me-root-password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  training-hub:
+    build: .
+    container_name: scamscreener-training-hub
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - .env
+    environment:
+      TRAINING_HUB_PROJECT_ROOT: /workspace
+      TRAINING_HUB_DB_DRIVER: mariadb
+      TRAINING_HUB_DB_HOST: mariadb
+      TRAINING_HUB_DB_PORT: 3306
+      TRAINING_HUB_SMTP_HOST: mailpit
+      TRAINING_HUB_SMTP_PORT: 1025
+    ports:
+      - "8080:8080"
     volumes:
-      - relay-data:/app/data
+      - ./data:/app/data
+      - ../:/workspace:ro
     restart: unless-stopped
 
 volumes:
-  relay-data:
+  mariadb_data:

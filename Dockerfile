@@ -1,31 +1,23 @@
-FROM node:22-alpine AS build
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY tsconfig.json ./tsconfig.json
-COPY src ./src
-COPY migrations ./migrations
+COPY . .
 
-RUN npm run build
-RUN npm prune --omit=dev
+RUN addgroup --system app && \
+    adduser --system --ingroup app --home /app app && \
+    mkdir -p /app/data && \
+    chown -R app:app /app
 
-FROM node:22-alpine
-
-WORKDIR /app
-ENV NODE_ENV=production
-
-RUN addgroup -S relay && adduser -S relay -G relay
-
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/migrations ./migrations
-COPY package*.json ./
-
-USER relay
+USER app
 
 EXPOSE 8080
 
-CMD ["node", "dist/server.js"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

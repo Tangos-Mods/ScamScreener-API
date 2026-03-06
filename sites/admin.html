@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}Training Hub Admin{% endblock %}
+
+{% block content %}
+<section class="glass hero">
+    <p class="eyebrow">Admin</p>
+    <h1>Bundle Control</h1>
+    <p class="lead">Build merged training bundles and monitor operational changes.</p>
+    <div class="action-row">
+        <form method="post" action="/admin/train" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit">Build Training Bundle</button>
+        </form>
+        <form method="post" action="/admin/retention/run" class="inline-form" onsubmit="return confirm('Run retention cleanup now?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="button-small alt">Run Retention Cleanup</button>
+        </form>
+        <form method="post" action="/admin/backups/create" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="button-small alt">Create Backup</button>
+        </form>
+    </div>
+    <form method="post" action="/admin/backups/restore" enctype="multipart/form-data" class="upload-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="backup_file">Restore Backup Archive (.tar.gz)</label>
+        <input id="backup_file" type="file" name="backup_file" accept=".tar,.tar.gz,.tgz,application/gzip" required>
+        <button type="submit" class="button-small alt" onclick="return confirm('Restore backup now? This overwrites current hub data.')">Restore Backup</button>
+    </form>
+    {% if notice %}
+        <div class="message ok">{{ notice }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="message error">{{ error }}</div>
+    {% endif %}
+</section>
+
+<section class="glass card">
+    <h2>Monitoring</h2>
+    <p>Prometheus endpoint: <a href="/api/v1/metrics">/api/v1/metrics</a></p>
+    <div class="stats-grid">
+        <div class="stat glass-soft"><span>Users</span><strong>{{ monitoring.totals.users }}</strong></div>
+        <div class="stat glass-soft"><span>Uploads</span><strong>{{ monitoring.totals.uploads }}</strong></div>
+        <div class="stat glass-soft"><span>Cases</span><strong>{{ monitoring.totals.training_cases }}</strong></div>
+        <div class="stat glass-soft"><span>Runs</span><strong>{{ monitoring.totals.training_runs }}</strong></div>
+        <div class="stat glass-soft"><span>Login Failures ({{ monitoring.window_minutes }}m)</span><strong>{{ monitoring.events.login_failures_total }}</strong></div>
+        <div class="stat glass-soft"><span>MFA Failures ({{ monitoring.window_minutes }}m)</span><strong>{{ monitoring.events.mfa_failed }}</strong></div>
+    </div>
+    {% if monitoring.alerts.failed_login_spike == 1 or monitoring.alerts.mfa_failed_spike == 1 or monitoring.alerts.password_reset_spike == 1 %}
+        <div class="message error">Security alert threshold reached. Review recent auth-related audit events.</div>
+    {% else %}
+        <div class="message ok">No active auth-spike alerts in the current monitoring window.</div>
+    {% endif %}
+</section>
+
+<section class="glass card">
+    <h2>User Management</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Username</th>
+            <th>Email</th>
+            <th>Admin</th>
+            <th>Uploads</th>
+            <th>Cases</th>
+            <th>Last Login</th>
+            <th>Action</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if users %}
+            {% for row in users %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.username }}</td>
+                    <td>{{ row.email }}</td>
+                    <td>{% if row.is_admin == 1 %}yes{% else %}no{% endif %}</td>
+                    <td>{{ row.upload_count }}</td>
+                    <td>{{ row.case_count }}</td>
+                    <td>{{ row.last_login_at or "-" }}</td>
+                    <td>
+                        {% if row.id == current_user.id %}
+                            <span class="muted">current user</span>
+                        {% elif row.is_admin == 1 %}
+                            <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
+                                <input type="hidden" name="action" value="revoke">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="button-small alt">Revoke</button>
+                            </form>
+                        {% else %}
+                            <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
+                                <input type="hidden" name="action" value="grant">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="button-small">Grant</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="8">No users found.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+
+<section class="glass card">
+    <h2>Basic Case List</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Case ID</th>
+            <th>Status</th>
+            <th>Label</th>
+            <th>Outcome</th>
+            <th>Updated</th>
+            <th>Created By</th>
+            <th>Delete</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if cases %}
+            {% for row in cases %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td><a href="/admin/cases/{{ row.id }}">{{ row.case_id }}</a></td>
+                    <td>
+                        <span class="chip chip-table {% if row.status|lower == 'submitted' %}chip-status-submitted{% endif %}">
+                            {{ row.status }}
+                        </span>
+                    </td>
+                    <td>{{ row.label or "-" }}</td>
+                    <td>
+                        <span class="chip chip-table {% if row.outcome|lower == 'safe' %}chip-outcome-safe{% elif row.outcome|lower == 'review' %}chip-outcome-review{% endif %}">
+                            {{ row.outcome or "-" }}
+                        </span>
+                    </td>
+                    <td>{{ row.updated_at }}</td>
+                    <td>{{ row.created_by }}</td>
+                    <td>
+                        <form method="post" action="/admin/cases/{{ row.id }}/delete" class="inline-form" onsubmit="return confirm('Delete case {{ row.case_id }}?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="button-small delete-button" aria-label="Delete case {{ row.case_id }}" title="Delete case">
+                                <span aria-hidden="true">&#128465;</span>
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="8">No cases available.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+
+<section class="glass card">
+    <h2>Training Runs</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Created</th>
+            <th>Status</th>
+            <th>Uploads</th>
+            <th>Cases</th>
+            <th>Started By</th>
+            <th>Bundle</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if runs %}
+            {% for row in runs %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.status }}</td>
+                    <td>{{ row.upload_count }}</td>
+                    <td>{{ row.case_count }}</td>
+                    <td>{{ row.started_by }}</td>
+                    <td><a href="/admin/runs/{{ row.id }}/bundle">download</a></td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="7">No training runs yet.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+
+<section class="glass card">
+    <h2>Audit Log</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Time</th>
+            <th>Actor</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th>IP</th>
+            <th>User Agent</th>
+            <th>Details</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if audit_logs %}
+            {% for row in audit_logs %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.actor_username }}</td>
+                    <td>{{ row.action }}</td>
+                    <td>
+                        {% if row.target_type %}
+                            {{ row.target_type }}{% if row.target_id %} #{{ row.target_id }}{% endif %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td>{{ row.source_ip or "-" }}</td>
+                    <td>{{ row.user_agent or "-" }}</td>
+                    <td>{{ row.details or "-" }}</td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="8">No audit events yet.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

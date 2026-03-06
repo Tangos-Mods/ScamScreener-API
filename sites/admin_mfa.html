@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Verification{% endblock %}
+
+{% block content %}
+<section class="card auth-card hero-card">
+    <p class="eyebrow">Security Step-Up</p>
+    <h1>Admin Verification</h1>
+    <p>Enter the 6-digit code sent to {{ delivery_hint }}.</p>
+    {% if expires_at %}
+        <p class="muted">Code expires at {{ expires_at }} (UTC).</p>
+    {% endif %}
+
+    {% if notice %}
+        <div class="message ok">{{ notice }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="message error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/admin/mfa" class="auth-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Verification Code</label>
+        <input
+            type="text"
+            name="code"
+            inputmode="numeric"
+            pattern="[0-9]{6}"
+            minlength="6"
+            maxlength="6"
+            autocomplete="one-time-code"
+            required
+        >
+        <button type="submit">Verify</button>
+    </form>
+</section>
+{% endblock %}

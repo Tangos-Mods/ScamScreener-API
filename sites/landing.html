@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}ScamScreener - Training Hub{% endblock %}
+
+{% block content %}
+<section class="hero glass">
+    <p class="eyebrow">ScamScreener Training Hub</p>
+    <h1>Train Better Scam Detection With Real Cases.</h1>
+    <p class="lead">
+        Players upload structured cases. Admins curate users, review incoming data, trigger training, and keep a full audit trail.
+    </p>
+    <div class="stats-grid">
+        <div class="stat glass-soft"><span>Users</span><strong>{{ stats.users }}</strong></div>
+        <div class="stat glass-soft"><span>Uploads</span><strong>{{ stats.uploads }}</strong></div>
+    </div>
+    <div class="action-row">
+        {% if current_user %}
+            <a class="button-link" href="/dashboard">Open Dashboard</a>
+            {% if current_user.is_admin == 1 %}
+                <a class="button-link alt" href="/admin">Open Admin</a>
+            {% endif %}
+        {% else %}
+            <a class="button-link" href="/register">Create Account</a>
+            <a class="button-link alt" href="/login">Login</a>
+        {% endif %}
+    </div>
+</section>
+
+<section class="feature-grid">
+    <article class="glass feature">
+        <h2>For Players</h2>
+        <p>Upload your case files and keep a clean history of your submitted training data.</p>
+    </article>
+    <article class="glass feature">
+        <h2>For Admins</h2>
+        <p>Manage account roles, inspect the shared case pool, and train the pipeline directly from the hub.</p>
+    </article>
+    <article class="glass feature">
+        <h2>For Operations</h2>
+        <p>Audit log entries capture key actions so you can trace who changed what and when.</p>
+    </article>
+</section>
+{% endblock %}

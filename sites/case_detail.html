@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}Case {{ details.case_id }}{% endblock %}
+
+{% block content %}
+<section class="glass hero">
+    <p class="eyebrow">Case Detail</p>
+    <h1>{{ details.case_id }}</h1>
+    <p class="lead">Readable case view for fast review and training triage.</p>
+    <div class="meta-row">
+        <span class="chip {% if details.status|lower == 'submitted' %}chip-status-submitted{% endif %}">{{ details.status }}</span>
+        <span class="chip">{{ details.label or "no-label" }}</span>
+        <span class="chip {% if details.outcome|lower == 'safe' %}chip-outcome-safe{% elif details.outcome|lower == 'review' %}chip-outcome-review{% endif %}">{{ details.outcome or "no-outcome" }}</span>
+        <span class="chip chip-schema">Schema v{{ details.schema_version }}</span>
+    </div>
+    <p class="muted">
+        Created by <strong>{{ details.created_by }}</strong> |
+        Source: <strong>{{ details.source_file_name }}</strong> |
+        Updated: {{ details.updated_at }}
+    </p>
+    <div class="action-row">
+        <a class="button-link alt" href="/admin">Back to Admin</a>
+        <form method="post" action="/admin/cases/{{ details.id }}/delete" class="inline-form" onsubmit="return confirm('Delete case {{ details.case_id }}?');">
+            <input type="hidden" name="return_to" value="detail">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="delete-button">
+                <span aria-hidden="true">&#128465;</span> Delete Case
+            </button>
+        </form>
+    </div>
+</section>
+
+<section class="detail-grid">
+    <article class="glass card">
+        <h2>Observed Pipeline</h2>
+        <div class="kv-grid">
+            <div class="kv-item">
+                <span>Outcome at Capture</span>
+                <strong>{{ details.observed.outcome_at_capture or "-" }}</strong>
+            </div>
+            <div class="kv-item">
+                <span>Score at Capture</span>
+                <strong>{{ details.observed.score_at_capture or "-" }}</strong>
+            </div>
+            <div class="kv-item">
+                <span>Decided by Stage</span>
+                <strong>{{ details.observed.decided_by_stage_id or "-" }}</strong>
+            </div>
+            <div class="kv-item">
+                <span>Messages</span>
+                <strong>{{ details.messages|length }}</strong>
+            </div>
+        </div>
+    </article>
+
+    <article class="glass card">
+        <h2>Signals & Context</h2>
+        <div class="stack-group">
+            <div>
+                <p class="section-label">Signal Tags</p>
+                <p>{{ details.signal_tags|join(", ") if details.signal_tags else "-" }}</p>
+            </div>
+            <div>
+                <p class="section-label">Context Target Label</p>
+                <p>{{ details.context_stage.target_label or "-" }}</p>
+            </div>
+            <div>
+                <p class="section-label">Signal Message Indices</p>
+                <p>{{ details.context_stage.signal_message_indices|join(", ") if details.context_stage.signal_message_indices else "-" }}</p>
+            </div>
+            <div>
+                <p class="section-label">Context Message Indices</p>
+                <p>{{ details.context_stage.context_message_indices|join(", ") if details.context_stage.context_message_indices else "-" }}</p>
+            </div>
+            <div>
+                <p class="section-label">Excluded Message Indices</p>
+                <p>{{ details.context_stage.excluded_message_indices|join(", ") if details.context_stage.excluded_message_indices else "-" }}</p>
+            </div>
+        </div>
+    </article>
+</section>
+
+<section class="glass card">
+    <h2>Conversation</h2>
+    {% if details.messages %}
+        <div class="message-list">
+            {% for msg in details.messages %}
+                <article class="message-item">
+                    <header>
+                        <span class="msg-index">#{{ msg.index }}</span>
+                        <span class="msg-role">{{ msg.role }}</span>
+                    </header>
+                    <p>{{ msg.text or "-" }}</p>
+                </article>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="muted">No message content in this case payload.</p>
+    {% endif %}
+</section>
+
+<section class="glass card">
+    <h2>Stage Results</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>Stage ID</th>
+            <th>Outcome</th>
+            <th>Score</th>
+            <th>Reason</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if details.stage_results %}
+            {% for row in details.stage_results %}
+                <tr>
+                    <td>{{ row.stage_id or "-" }}</td>
+                    <td>{{ row.outcome or "-" }}</td>
+                    <td>{{ row.score or "-" }}</td>
+                    <td>{{ row.reason or "-" }}</td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="4">No stage trace available.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+{% endblock %}

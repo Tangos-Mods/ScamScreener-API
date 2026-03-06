@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}Training Hub Dashboard{% endblock %}
+
+{% block content %}
+<section class="glass hero">
+    <p class="eyebrow">User Dashboard</p>
+    <h1>Your Case Contributions</h1>
+    <p class="lead">Signed in as <strong>{{ current_user.username }}</strong>.</p>
+    {% if notice %}
+        <div class="message ok">{{ notice }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="message error">{{ error }}</div>
+    {% endif %}
+    <div class="stats-grid">
+        <div class="stat glass-soft"><span>My Uploads</span><strong>{{ uploads|length }}</strong></div>
+        <div class="stat glass-soft"><span>My Cases</span><strong>{{ total_cases }}</strong></div>
+    </div>
+</section>
+
+<section class="glass card">
+    <h2>Upload Cases</h2>
+    <p>Upload your <code>training-cases-v2.jsonl</code> file. Max size: {{ max_mb }} MB.</p>
+    <form method="post" action="/dashboard/upload" enctype="multipart/form-data" class="upload-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="file" name="training_file" accept=".jsonl,.ndjson,text/plain,application/json" required>
+        <button type="submit">Upload File</button>
+    </form>
+</section>
+
+<section class="glass card">
+    <h2>My Uploads</h2>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Created</th>
+            <th>File</th>
+            <th>Cases</th>
+            <th>Size</th>
+            <th>SHA-256</th>
+            <th>Download</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if uploads %}
+            {% for row in uploads %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.original_file_name }}</td>
+                    <td>{{ row.case_count }}</td>
+                    <td>{{ row.size_bytes }} B</td>
+                    <td><code>{{ row.payload_sha256[:16] }}...</code></td>
+                    <td><a href="/dashboard/uploads/{{ row.id }}/download">download</a></td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="7">No uploads yet.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+
+<section class="glass card">
+    <h2>Active Sessions</h2>
+    <p>Review active logins and revoke stale devices.</p>
+    <form method="post" action="/dashboard/sessions/revoke-others" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="button-small alt">Revoke Other Sessions</button>
+    </form>
+    <table>
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>Created</th>
+            <th>Expires</th>
+            <th>IP</th>
+            <th>User Agent</th>
+            <th>Action</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% if sessions %}
+            {% for row in sessions %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.expires_at }}</td>
+                    <td>{{ row.remote_addr }}</td>
+                    <td>{{ row.user_agent }}</td>
+                    <td>
+                        {% if row.is_current %}
+                            <span class="muted">current session</span>
+                        {% else %}
+                            <form method="post" action="/dashboard/sessions/{{ row.id }}/revoke" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="button-small alt">Revoke</button>
+                            </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        {% else %}
+            <tr><td colspan="6">No active sessions.</td></tr>
+        {% endif %}
+        </tbody>
+    </table>
+</section>
+
+<section class="glass card">
+    <h2>Security</h2>
+    <p>Change your account password. Other active sessions will be revoked.</p>
+    <form method="post" action="/dashboard/password" class="auth-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>Current Password</label>
+        <input type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+        <label>New Password</label>
+        <input type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password" required>
+        <label>Confirm New Password</label>
+        <input type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
+        <button type="submit">Update Password</button>
+    </form>
+</section>
+{% endblock %}

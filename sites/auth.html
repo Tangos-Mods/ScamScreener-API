@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Training Hub - {{ title }}{% endblock %}
+
+{% block content %}
+<section class="card auth-card hero-card">
+    <p class="eyebrow">Secure Access</p>
+    <h1>{{ title }}</h1>
+
+    {% if notice %}
+        <div class="message ok">{{ notice }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="message error">{{ error }}</div>
+    {% endif %}
+
+    {% if mode == "register" and registration_closed %}
+        <p>Registrations are currently closed. Contact an administrator for access.</p>
+    {% else %}
+        <form method="post" action="{{ form_action }}" class="auth-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if mode == "register" %}
+                <label>Username</label>
+                <input type="text" name="username" minlength="3" maxlength="32" autocomplete="username" required>
+
+                <label>Email</label>
+                <input type="email" name="email" autocomplete="email" required>
+
+                {% if registration_invite_required %}
+                    <label>Invite Code</label>
+                    <input type="text" name="invite_code" minlength="4" maxlength="128" autocomplete="off" required>
+                {% endif %}
+            {% else %}
+                <label>Username or email</label>
+                <input type="text" name="username_or_email" autocomplete="username" required>
+            {% endif %}
+
+            <label>Password</label>
+            <input type="password" name="password" minlength="8" autocomplete="current-password" required>
+            <button type="submit">{{ title }}</button>
+        </form>
+    {% endif %}
+
+    <div class="auth-switch">
+        {% if mode == "register" %}
+            <a href="/login">Already have an account? Login</a>
+        {% else %}
+            {% if registration_closed %}
+                <span class="muted">Registration is currently closed.</span>
+            {% else %}
+                <a href="/register">Need an account? Register</a>
+            {% endif %}
+            <span class="muted">|</span>
+            <a href="/forgot-password">Forgot password?</a>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

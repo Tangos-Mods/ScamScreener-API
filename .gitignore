@@ -1,5 +1,45 @@
-node_modules
-dist
-data
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local environment files
 .env
+.env.*
+!.env.example
+
+# IDE/editor files
+.idea/
+.vscode/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Project runtime data
+data/
+.route_tmp_data/
+
+# Logs and temp files
 *.log
+*.tmp
