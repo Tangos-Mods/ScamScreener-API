@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3 as _sqlite3
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 try:
     import pymysql
@@ -94,12 +94,19 @@ def is_mariadb_target(value: object) -> bool:
     return _is_mariadb_dsn(value)
 
 
+def _query_first(query: dict[str, list[str]], key: str) -> str:
+    values = query.get(key)
+    if not values:
+        return ""
+    return str(values[0] or "").strip()
+
+
 def _mariadb_params_from_dsn(dsn: str) -> dict[str, object]:
     parsed = urlsplit(dsn)
     database = parsed.path.lstrip("/")
     if not database:
         raise ValueError("MariaDB DSN must include a database name, e.g. mariadb://user:pass@host:3306/dbname")
-    return {
+    params: dict[str, object] = {
         "host": parsed.hostname or "127.0.0.1",
         "port": int(parsed.port or 3306),
         "user": unquote(parsed.username or ""),
@@ -108,6 +115,23 @@ def _mariadb_params_from_dsn(dsn: str) -> dict[str, object]:
         "charset": "utf8mb4",
         "autocommit": False,
     }
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    ssl_mode = _query_first(query, "ssl_mode").lower()
+    if ssl_mode in {"required", "verify-ca", "verify-full"}:
+        ssl_params: dict[str, object] = {}
+        ssl_ca = unquote(_query_first(query, "ssl_ca"))
+        ssl_cert = unquote(_query_first(query, "ssl_cert"))
+        ssl_key = unquote(_query_first(query, "ssl_key"))
+        if ssl_ca:
+            ssl_params["ca"] = ssl_ca
+        if ssl_cert:
+            ssl_params["cert"] = ssl_cert
+        if ssl_key:
+            ssl_params["key"] = ssl_key
+        if ssl_mode == "verify-full":
+            ssl_params["check_hostname"] = True
+        params["ssl"] = ssl_params
+    return params
 
 
 class _ConnectionWrapper:

@@ -135,6 +135,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 settings.admin_mfa_ttl_minutes,
                 source_ip,
                 user_agent,
+                settings.secret_key,
             )
             if not bool(challenge.get("issued")):
                 return _render_auth(
@@ -191,9 +192,10 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 ADMIN_MFA_COOKIE_NAME,
                 str(challenge["token"]),
                 httponly=True,
-                samesite="lax",
+                samesite="strict",
                 secure=settings.enforce_https,
                 max_age=settings.admin_mfa_ttl_minutes * 60,
+                path="/",
             )
             return response
 
@@ -202,8 +204,9 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         response.delete_cookie(
             ADMIN_MFA_COOKIE_NAME,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
             secure=settings.enforce_https,
+            path="/",
         )
         await run_in_threadpool(
             _create_audit_log,
@@ -225,7 +228,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         source_ip, user_agent = _request_meta(request, settings)
         current_user = request.state.user
         if session_token:
-            await run_in_threadpool(_revoke_session_by_token, settings.database_path, session_token, "logout")
+            await run_in_threadpool(_revoke_session_by_token, settings.database_path, session_token, "logout", settings.secret_key)
         if current_user is not None:
             await run_in_threadpool(
                 _create_audit_log,
@@ -242,14 +245,16 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         response.delete_cookie(
             SESSION_COOKIE_NAME,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
             secure=settings.enforce_https,
+            path="/",
         )
         response.delete_cookie(
             ADMIN_MFA_COOKIE_NAME,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
             secure=settings.enforce_https,
+            path="/",
         )
         return response
 

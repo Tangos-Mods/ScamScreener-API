@@ -76,6 +76,7 @@ def _is_same_origin_post(request: Request, settings: TrainingHubSettings) -> boo
 def _apply_security_headers(response: Response, enforce_https: bool) -> Response:
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "0"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
@@ -89,8 +90,9 @@ def _apply_security_headers(response: Response, enforce_https: bool) -> Response
         "form-action 'self'; "
         "frame-ancestors 'none'; "
         "object-src 'none'; "
+        "connect-src 'self'; "
         "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; "
+        "style-src 'self'; "
         "img-src 'self' data:"
     )
     if enforce_https:

@@ -53,8 +53,8 @@ def _normalize_email(value: str) -> str:
 def _validate_password(password: str) -> str:
     if password is None:
         return "Password is required."
-    if len(password) < 8:
-        return "Password must have at least 8 characters."
+    if len(password) < 10:
+        return "Password must have at least 10 characters."
     if len(password) > 128:
         return "Password must be at most 128 characters."
     return ""

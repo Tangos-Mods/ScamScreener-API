@@ -49,6 +49,7 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
             source_ip,
             user_agent,
             settings.admin_mfa_max_attempts,
+            settings.secret_key,
         )
         if not bool(challenge_state.get("ok")):
             message = quote_plus(str(challenge_state.get("error", "Verification challenge is invalid or expired.")))
@@ -56,8 +57,9 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
             response.delete_cookie(
                 ADMIN_MFA_COOKIE_NAME,
                 httponly=True,
-                samesite="lax",
+                samesite="strict",
                 secure=settings.enforce_https,
+                path="/",
             )
             return response
 
@@ -102,6 +104,7 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
             source_ip,
             user_agent,
             settings.admin_mfa_max_attempts,
+            settings.secret_key,
         )
         if not bool(consume_result.get("ok")):
             status_code = int(consume_result.get("status_code", 400))
@@ -112,6 +115,7 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
                 source_ip,
                 user_agent,
                 settings.admin_mfa_max_attempts,
+                settings.secret_key,
             )
             if bool(challenge_state.get("ok")):
                 actor_user_id = int(challenge_state["user_id"])
@@ -164,8 +168,9 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
             response.delete_cookie(
                 ADMIN_MFA_COOKIE_NAME,
                 httponly=True,
-                samesite="lax",
+                samesite="strict",
                 secure=settings.enforce_https,
+                path="/",
             )
             return response
 
@@ -175,8 +180,9 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
         response.delete_cookie(
             ADMIN_MFA_COOKIE_NAME,
             httponly=True,
-            samesite="lax",
+            samesite="strict",
             secure=settings.enforce_https,
+            path="/",
         )
         await run_in_threadpool(
             _create_audit_log,

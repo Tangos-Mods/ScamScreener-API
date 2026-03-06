@@ -37,8 +37,12 @@ def _current_user_from_request(request: Request, settings: TrainingHubSettings) 
     return resolved["user"]
 
 
-def _session_token_hash(session_token: str) -> str:
-    return hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+def _session_token_hash(session_token: str, secret_key: str = "") -> str:
+    token_bytes = (session_token or "").encode("utf-8")
+    secret = (secret_key or "").encode("utf-8")
+    if secret:
+        return hmac.new(secret, token_bytes, hashlib.sha256).hexdigest()
+    return hashlib.sha256(token_bytes).hexdigest()
 
 
 def _create_session(
@@ -47,9 +51,10 @@ def _create_session(
     ttl_minutes: int,
     remote_addr: str,
     user_agent: str,
+    secret_key: str,
 ) -> str:
     session_token = secrets.token_urlsafe(48)
-    token_sha = _session_token_hash(session_token)
+    token_sha = _session_token_hash(session_token, secret_key)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(minutes=ttl_minutes)
 
@@ -87,28 +92,50 @@ def _resolve_user_from_session(
     current_ip: str,
     current_user_agent: str,
 ) -> dict[str, Any] | None:
-    token_sha = _session_token_hash(session_token)
+    token_sha = _session_token_hash(session_token, settings.secret_key)
+    legacy_token_sha = _session_token_hash(session_token)
+    token_hashes = [token_sha] if token_sha == legacy_token_sha else [token_sha, legacy_token_sha]
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT
-                s.id AS session_id,
-                s.remote_addr,
-                s.user_agent,
-                u.id AS user_id,
-                u.username,
-                u.email,
-                u.is_admin
-            FROM sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.token_sha256 = ?
-              AND s.revoked_at IS NULL
-              AND s.expires_at > ?
-            """,
-            (token_sha, now),
-        ).fetchone()
+        if len(token_hashes) == 1:
+            row = connection.execute(
+                """
+                SELECT
+                    s.id AS session_id,
+                    s.remote_addr,
+                    s.user_agent,
+                    u.id AS user_id,
+                    u.username,
+                    u.email,
+                    u.is_admin
+                FROM sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_sha256 = ?
+                  AND s.revoked_at IS NULL
+                  AND s.expires_at > ?
+                """,
+                (token_hashes[0], now),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT
+                    s.id AS session_id,
+                    s.remote_addr,
+                    s.user_agent,
+                    u.id AS user_id,
+                    u.username,
+                    u.email,
+                    u.is_admin
+                FROM sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.token_sha256 IN (?, ?)
+                  AND s.revoked_at IS NULL
+                  AND s.expires_at > ?
+                """,
+                (token_hashes[0], token_hashes[1], now),
+            ).fetchone()
     if row is None:
         return None
 
@@ -116,14 +143,14 @@ def _resolve_user_from_session(
     session_user_agent = str(row["user_agent"] or "").strip()
 
     if settings.session_bind_ip and session_remote_addr and current_ip and session_remote_addr != current_ip:
-        _revoke_session_by_token(database_path, session_token, "session-ip-mismatch")
+        _revoke_session_by_token(database_path, session_token, "session-ip-mismatch", settings.secret_key)
         return None
 
     if settings.session_bind_user_agent:
         expected_agent = _normalize_user_agent_for_binding(session_user_agent)
         actual_agent = _normalize_user_agent_for_binding(current_user_agent)
         if expected_agent and actual_agent and expected_agent != actual_agent:
-            _revoke_session_by_token(database_path, session_token, "session-ua-mismatch")
+            _revoke_session_by_token(database_path, session_token, "session-ua-mismatch", settings.secret_key)
             return None
 
     return {
@@ -156,14 +183,16 @@ def _set_session_cookie(response: RedirectResponse, settings: TrainingHubSetting
         ttl_minutes=settings.session_ttl_minutes,
         remote_addr=remote_addr,
         user_agent=user_agent,
+        secret_key=settings.secret_key,
     )
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
         httponly=True,
-        samesite="lax",
+        samesite="strict",
         secure=settings.enforce_https,
         max_age=settings.session_ttl_minutes * 60,
+        path="/",
     )
 
 

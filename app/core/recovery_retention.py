@@ -27,6 +27,7 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
     audit_cutoff = (now - timedelta(days=int(settings.retention_audit_logs_days))).isoformat().replace("+00:00", "Z")
     uploads_cutoff = (now - timedelta(days=int(settings.retention_uploads_days))).isoformat().replace("+00:00", "Z")
     bundles_cutoff = (now - timedelta(days=int(settings.retention_bundles_days))).isoformat().replace("+00:00", "Z")
+    backups_cutoff_epoch = (now - timedelta(days=int(settings.retention_backups_days))).timestamp()
     rate_limit_cutoff = int((now - timedelta(days=int(settings.retention_rate_limit_days))).timestamp())
 
     removed_sessions = 0
@@ -35,6 +36,7 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
     removed_audit_logs = 0
     removed_uploads = 0
     removed_bundles = 0
+    removed_backups = 0
     removed_rate_limit_hits = 0
 
     with sqlite3.connect(settings.database_path) as connection:
@@ -120,6 +122,25 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
 
         connection.commit()
 
+    if settings.backups_dir.exists():
+        for backup_file in settings.backups_dir.iterdir():
+            if not backup_file.is_file():
+                continue
+            if not (
+                backup_file.name.startswith("training-hub-backup-")
+                and backup_file.name.endswith(".tar.gz")
+            ) and not (
+                backup_file.name.startswith("restore-")
+                and backup_file.name.endswith(".tar.gz")
+            ):
+                continue
+            try:
+                if backup_file.stat().st_mtime < backups_cutoff_epoch:
+                    backup_file.unlink()
+                    removed_backups += 1
+            except OSError:
+                continue
+
     return {
         "sessions": removed_sessions,
         "password_reset_tokens": removed_password_reset_tokens,
@@ -127,6 +148,7 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
         "audit_logs": removed_audit_logs,
         "uploads": removed_uploads,
         "bundles": removed_bundles,
+        "backups": removed_backups,
         "rate_limit_hits": removed_rate_limit_hits,
     }
 

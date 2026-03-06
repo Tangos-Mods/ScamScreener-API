@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import suppress
+
 from ..config.settings import TrainingHubSettings
 
 
 def _ensure_storage(settings: TrainingHubSettings) -> None:
-    settings.storage_dir.mkdir(parents=True, exist_ok=True)
-    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
-    settings.bundles_dir.mkdir(parents=True, exist_ok=True)
-    settings.backups_dir.mkdir(parents=True, exist_ok=True)
+    for directory in (settings.storage_dir, settings.uploads_dir, settings.bundles_dir, settings.backups_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError, PermissionError):
+            directory.chmod(0o700)
 

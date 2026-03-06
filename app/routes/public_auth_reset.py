@@ -49,6 +49,7 @@ def register_public_auth_password_reset_routes(app: FastAPI, settings: TrainingH
             settings.password_reset_ttl_minutes,
             source_ip,
             user_agent,
+            settings.secret_key,
         )
 
         reset_link = ""
@@ -138,7 +139,7 @@ def register_public_auth_password_reset_routes(app: FastAPI, settings: TrainingH
         if request.state.user:
             return RedirectResponse(url="/dashboard", status_code=303)
 
-        token_state = await run_in_threadpool(_validate_password_reset_token, settings.database_path, token)
+        token_state = await run_in_threadpool(_validate_password_reset_token, settings.database_path, token, settings.secret_key)
         context = {
             "request": request,
             "current_user": request.state.user,
@@ -179,6 +180,7 @@ def register_public_auth_password_reset_routes(app: FastAPI, settings: TrainingH
             settings.database_path,
             token,
             new_password,
+            settings.secret_key,
         )
         if not bool(reset_result.get("ok")):
             context = {

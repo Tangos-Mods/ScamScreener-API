@@ -6,11 +6,12 @@ from typing import Any
 
 from ..infra import db as sqlite3
 from .common import _now_utc_iso
-from .session_auth_password import _verify_password
+from .session_auth_password import _hash_password, _verify_password
 
 
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCKOUT_MINUTES = 15
+_DUMMY_PASSWORD_HASH = _hash_password("scamscreener_dummy_password_for_timing_padding")
 
 
 def _consume_login_attempt(
@@ -33,6 +34,7 @@ def _consume_login_attempt(
         ).fetchone()
 
         if user is None:
+            _verify_password(password or "", _DUMMY_PASSWORD_HASH)
             return {"status": "invalid"}
 
         user_id = int(user["id"])

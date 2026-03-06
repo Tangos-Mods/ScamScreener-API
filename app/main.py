@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .http.rate_limit import _SqliteRateLimiter, _rate_limit_identity, _rate_limit_rule
 from .http.security import _apply_security_headers, _is_same_origin_post, _request_is_https
@@ -57,20 +58,35 @@ def create_app(settings: TrainingHubSettings | None = None) -> FastAPI:
                     await retention_task
 
     app = FastAPI(title="ScamScreener Training Hub", version="2.0.0", lifespan=app_lifespan)
+    if settings.allowed_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(settings.allowed_hosts))
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(base_dir / "sites"))
     app.state.rate_limiter = _SqliteRateLimiter(settings.database_path)
     app.mount("/css", StaticFiles(directory=str(base_dir / "css")), name="css")
+
+    def _apply_no_store_headers(response, request: Request) -> None:
+        path = request.url.path
+        if (
+            path.startswith("/admin")
+            or path.startswith("/dashboard")
+            or path in {"/login", "/register", "/forgot-password", "/reset-password", "/admin/mfa"}
+            or "set-cookie" in response.headers
+        ):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
 
     @app.middleware("http")
     async def attach_session_user(request: Request, call_next):
         if settings.enforce_https and not _request_is_https(request, settings):
             https_url = request.url.replace(scheme="https")
             redirect = RedirectResponse(url=str(https_url), status_code=307)
+            _apply_no_store_headers(redirect, request)
             return _apply_security_headers(redirect, settings.enforce_https)
 
         if settings.enforce_origin_check and not _is_same_origin_post(request, settings):
             rejected = PlainTextResponse("Invalid request origin.", status_code=403)
+            _apply_no_store_headers(rejected, request)
             return _apply_security_headers(rejected, settings.enforce_https)
 
         request.state.user = await run_in_threadpool(_current_user_from_request, request, settings)
@@ -101,10 +117,12 @@ def create_app(settings: TrainingHubSettings | None = None) -> FastAPI:
                             CSRF_COOKIE_NAME,
                             csrf_token,
                             httponly=False,
-                            samesite="lax",
+                            samesite="strict",
                             secure=settings.enforce_https,
                             max_age=settings.session_ttl_minutes * 60,
+                            path="/",
                         )
+                    _apply_no_store_headers(limited, request)
                     return _apply_security_headers(limited, settings.enforce_https)
 
         response = await call_next(request)
@@ -113,10 +131,12 @@ def create_app(settings: TrainingHubSettings | None = None) -> FastAPI:
                 CSRF_COOKIE_NAME,
                 csrf_token,
                 httponly=False,
-                samesite="lax",
+                samesite="strict",
                 secure=settings.enforce_https,
                 max_age=settings.session_ttl_minutes * 60,
+                path="/",
             )
+        _apply_no_store_headers(response, request)
         return _apply_security_headers(response, settings.enforce_https)
 
     register_public_routes(app, settings)

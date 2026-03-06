@@ -19,16 +19,32 @@ from .common import _is_path_within, _normalize_user_agent_for_binding, _now_utc
 from .session_auth import _hash_password, _validate_password
 
 
-def _password_reset_token_hash(token: str) -> str:
-    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+def _sha256_digest(value: str, secret_key: str = "") -> str:
+    payload = (value or "").encode("utf-8")
+    secret = (secret_key or "").encode("utf-8")
+    if secret:
+        return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
-def _admin_mfa_token_hash(token: str) -> str:
-    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+def _candidate_hashes(value: str, secret_key: str) -> list[str]:
+    preferred = _sha256_digest(value, secret_key)
+    legacy = _sha256_digest(value)
+    if preferred == legacy:
+        return [preferred]
+    return [preferred, legacy]
 
 
-def _admin_mfa_code_hash(code: str) -> str:
-    return hashlib.sha256((code or "").encode("utf-8")).hexdigest()
+def _password_reset_token_hash(token: str, secret_key: str = "") -> str:
+    return _sha256_digest(token, secret_key)
+
+
+def _admin_mfa_token_hash(token: str, secret_key: str = "") -> str:
+    return _sha256_digest(token, secret_key)
+
+
+def _admin_mfa_code_hash(code: str, secret_key: str = "") -> str:
+    return _sha256_digest(code, secret_key)
 
 
 def _create_admin_mfa_challenge(
@@ -37,14 +53,15 @@ def _create_admin_mfa_challenge(
     ttl_minutes: int,
     source_ip: str = "",
     user_agent: str = "",
+    secret_key: str = "",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat().replace("+00:00", "Z")
     expires_at = (now + timedelta(minutes=max(5, int(ttl_minutes)))).isoformat().replace("+00:00", "Z")
     token = secrets.token_urlsafe(40)
     code = f"{secrets.randbelow(1_000_000):06d}"
-    token_sha = _admin_mfa_token_hash(token)
-    code_sha = _admin_mfa_code_hash(code)
+    token_sha = _admin_mfa_token_hash(token, secret_key)
+    code_sha = _admin_mfa_code_hash(code, secret_key)
 
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -100,24 +117,35 @@ def _validate_admin_mfa_challenge(
     source_ip: str = "",
     user_agent: str = "",
     max_attempts: int = 5,
+    secret_key: str = "",
 ) -> dict[str, Any]:
     normalized_token = (token or "").strip()
     if not normalized_token:
         return {"ok": False, "error": "Missing verification challenge."}
 
-    token_sha = _admin_mfa_token_hash(normalized_token)
+    token_hashes = _candidate_hashes(normalized_token, secret_key)
     now_iso = _now_utc_iso()
 
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT id, user_id, expires_at, consumed_at, source_ip, user_agent, failed_attempts
-            FROM admin_mfa_challenges
-            WHERE token_sha256 = ?
-            """,
-            (token_sha,),
-        ).fetchone()
+        if len(token_hashes) == 1:
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at, consumed_at, source_ip, user_agent, failed_attempts
+                FROM admin_mfa_challenges
+                WHERE token_sha256 = ?
+                """,
+                (token_hashes[0],),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at, consumed_at, source_ip, user_agent, failed_attempts
+                FROM admin_mfa_challenges
+                WHERE token_sha256 IN (?, ?)
+                """,
+                (token_hashes[0], token_hashes[1]),
+            ).fetchone()
 
         if row is None:
             return {"ok": False, "error": "Verification challenge is invalid or expired."}
@@ -173,6 +201,7 @@ def _consume_admin_mfa_challenge(
     source_ip: str = "",
     user_agent: str = "",
     max_attempts: int = 5,
+    secret_key: str = "",
 ) -> dict[str, Any]:
     normalized_code = (code or "").strip()
     if not re.fullmatch(r"[0-9]{6}", normalized_code):
@@ -182,28 +211,46 @@ def _consume_admin_mfa_challenge(
     if not normalized_token:
         return {"ok": False, "error": "Missing verification challenge.", "status_code": 400}
 
-    token_sha = _admin_mfa_token_hash(normalized_token)
-    submitted_code_sha = _admin_mfa_code_hash(normalized_code)
+    token_hashes = _candidate_hashes(normalized_token, secret_key)
+    submitted_code_hashes = set(_candidate_hashes(normalized_code, secret_key))
     now_iso = _now_utc_iso()
 
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT
-                id,
-                user_id,
-                code_sha256,
-                expires_at,
-                consumed_at,
-                source_ip,
-                user_agent,
-                failed_attempts
-            FROM admin_mfa_challenges
-            WHERE token_sha256 = ?
-            """,
-            (token_sha,),
-        ).fetchone()
+        if len(token_hashes) == 1:
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    code_sha256,
+                    expires_at,
+                    consumed_at,
+                    source_ip,
+                    user_agent,
+                    failed_attempts
+                FROM admin_mfa_challenges
+                WHERE token_sha256 = ?
+                """,
+                (token_hashes[0],),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    code_sha256,
+                    expires_at,
+                    consumed_at,
+                    source_ip,
+                    user_agent,
+                    failed_attempts
+                FROM admin_mfa_challenges
+                WHERE token_sha256 IN (?, ?)
+                """,
+                (token_hashes[0], token_hashes[1]),
+            ).fetchone()
         if row is None or row["consumed_at"] is not None:
             return {"ok": False, "error": "Verification challenge is invalid or expired.", "status_code": 400}
 
@@ -244,7 +291,7 @@ def _consume_admin_mfa_challenge(
             return {"ok": False, "error": "Verification challenge is invalid for this client.", "status_code": 400}
 
         stored_code_sha = str(row["code_sha256"] or "")
-        if not stored_code_sha or not hmac.compare_digest(stored_code_sha, submitted_code_sha):
+        if not stored_code_sha or all(not hmac.compare_digest(stored_code_sha, candidate) for candidate in submitted_code_hashes):
             updated_attempts = failed_attempts + 1
             consumed_at = now_iso if updated_attempts >= int(max_attempts) else None
             connection.execute(
@@ -285,6 +332,7 @@ def _create_password_reset_request(
     ttl_minutes: int,
     source_ip: str = "",
     user_agent: str = "",
+    secret_key: str = "",
 ) -> dict[str, Any]:
     candidate = (username_or_email or "").strip().lower()
     if not candidate:
@@ -294,7 +342,7 @@ def _create_password_reset_request(
     now_iso = now.isoformat().replace("+00:00", "Z")
     expires_at = (now + timedelta(minutes=max(5, int(ttl_minutes)))).isoformat().replace("+00:00", "Z")
     token = secrets.token_urlsafe(36)
-    token_sha = _password_reset_token_hash(token)
+    token_sha = _password_reset_token_hash(token, secret_key)
 
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -343,25 +391,37 @@ def _create_password_reset_request(
     }
 
 
-def _validate_password_reset_token(database_path: Path, token: str) -> dict[str, Any]:
+def _validate_password_reset_token(database_path: Path, token: str, secret_key: str = "") -> dict[str, Any]:
     normalized_token = (token or "").strip()
     if not normalized_token:
         return {"ok": False, "error": "Missing token."}
-    token_hash = _password_reset_token_hash(normalized_token)
+    token_hashes = _candidate_hashes(normalized_token, secret_key)
 
     now_iso = _now_utc_iso()
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT id, user_id, expires_at
-            FROM password_reset_tokens
-            WHERE token_sha256 = ?
-              AND consumed_at IS NULL
-              AND expires_at > ?
-            """,
-            (token_hash, now_iso),
-        ).fetchone()
+        if len(token_hashes) == 1:
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at
+                FROM password_reset_tokens
+                WHERE token_sha256 = ?
+                  AND consumed_at IS NULL
+                  AND expires_at > ?
+                """,
+                (token_hashes[0], now_iso),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT id, user_id, expires_at
+                FROM password_reset_tokens
+                WHERE token_sha256 IN (?, ?)
+                  AND consumed_at IS NULL
+                  AND expires_at > ?
+                """,
+                (token_hashes[0], token_hashes[1], now_iso),
+            ).fetchone()
     if row is None:
         return {"ok": False, "error": "Reset token is invalid or expired."}
     return {
@@ -376,12 +436,13 @@ def _reset_password_with_token(
     database_path: Path,
     token: str,
     new_password: str,
+    secret_key: str = "",
 ) -> dict[str, Any]:
     new_password_error = _validate_password(new_password)
     if new_password_error:
         return {"ok": False, "error": new_password_error, "status_code": 400}
 
-    token_state = _validate_password_reset_token(database_path, token)
+    token_state = _validate_password_reset_token(database_path, token, secret_key)
     if not bool(token_state.get("ok")):
         return {"ok": False, "error": str(token_state.get("error", "Invalid reset token.")), "status_code": 400}
 

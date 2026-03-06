@@ -85,6 +85,7 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
             f"MFA challenges: {cleanup['admin_mfa_challenges']}, "
             f"Audit logs: {cleanup['audit_logs']}, "
             f"Uploads: {cleanup['uploads']}, Bundles: {cleanup['bundles']}, "
+            f"Backups: {cleanup.get('backups', 0)}, "
             f"Rate-limit rows: {cleanup['rate_limit_hits']}."
         )
         source_ip, user_agent = _request_meta(request, settings)

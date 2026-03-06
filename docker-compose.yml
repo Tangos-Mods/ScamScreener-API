@@ -12,12 +12,12 @@ services:
     environment:
       MARIADB_DATABASE: ${TRAINING_HUB_DB_NAME:-scamscreener_hub}
       MARIADB_USER: ${TRAINING_HUB_DB_USER:-scamscreener}
-      MARIADB_PASSWORD: ${TRAINING_HUB_DB_PASSWORD:-change-me-hub-password}
-      MARIADB_ROOT_PASSWORD: ${TRAINING_HUB_DB_ROOT_PASSWORD:-change-me-root-password}
+      MARIADB_PASSWORD: ${TRAINING_HUB_DB_PASSWORD:?TRAINING_HUB_DB_PASSWORD must be set}
+      MARIADB_ROOT_PASSWORD: ${TRAINING_HUB_DB_ROOT_PASSWORD:?TRAINING_HUB_DB_ROOT_PASSWORD must be set}
     volumes:
       - mariadb_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${TRAINING_HUB_DB_ROOT_PASSWORD:-change-me-root-password}"]
+      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${TRAINING_HUB_DB_ROOT_PASSWORD:?TRAINING_HUB_DB_ROOT_PASSWORD must be set}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -31,14 +31,17 @@ services:
         condition: service_healthy
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    pids_limit: 256
     env_file:
       - .env
     environment:
+      TRAINING_HUB_ENV: ${TRAINING_HUB_ENV:-development}
+      TRAINING_HUB_ALLOWED_HOSTS: ${TRAINING_HUB_ALLOWED_HOSTS:-localhost,127.0.0.1}
       TRAINING_HUB_PROJECT_ROOT: /workspace
       TRAINING_HUB_DB_DRIVER: mariadb
       TRAINING_HUB_DB_HOST: mariadb

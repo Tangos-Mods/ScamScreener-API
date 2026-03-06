@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.background import BackgroundTask
 
 from ..core.hub_core import _create_audit_log, _create_backup_archive, _render_admin, _restore_backup_archive, _validate_csrf_token
 from ..config.settings import TrainingHubSettings
@@ -39,10 +40,21 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
             source_ip=source_ip,
             user_agent=user_agent,
         )
+
+        backup_path = Path(str(backup_result["backup_path"]))
+
+        def _delete_backup_file() -> None:
+            try:
+                if backup_path.exists():
+                    backup_path.unlink()
+            except OSError:
+                pass
+
         return FileResponse(
-            Path(str(backup_result["backup_path"])),
+            backup_path,
             media_type="application/gzip",
             filename=str(backup_result["backup_name"]),
+            background=BackgroundTask(_delete_backup_file),
         )
 
     @app.post("/admin/backups/restore", response_class=HTMLResponse)

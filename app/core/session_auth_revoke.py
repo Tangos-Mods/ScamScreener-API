@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from pathlib import Path
 from typing import Any
 
@@ -8,20 +9,37 @@ from ..infra import db as sqlite3
 from .common import _now_utc_iso
 
 
-def _revoke_session_by_token(database_path: Path, session_token: str, reason: str = "logout") -> None:
+def _revoke_session_by_token(
+    database_path: Path,
+    session_token: str,
+    reason: str = "logout",
+    secret_key: str = "",
+) -> None:
     normalized_token = (session_token or "").strip()
     if not normalized_token:
         return
-    token_sha = _session_token_hash(normalized_token)
+    token_sha = _session_token_hash(normalized_token, secret_key)
+    legacy_token_sha = _session_token_hash(normalized_token)
+    token_hashes = [token_sha] if token_sha == legacy_token_sha else [token_sha, legacy_token_sha]
     with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            """
-            UPDATE sessions
-            SET revoked_at = ?, revoke_reason = ?
-            WHERE token_sha256 = ? AND revoked_at IS NULL
-            """,
-            (_now_utc_iso(), (reason or "").strip()[:100], token_sha),
-        )
+        if len(token_hashes) == 1:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET revoked_at = ?, revoke_reason = ?
+                WHERE token_sha256 = ? AND revoked_at IS NULL
+                """,
+                (_now_utc_iso(), (reason or "").strip()[:100], token_hashes[0]),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE sessions
+                SET revoked_at = ?, revoke_reason = ?
+                WHERE token_sha256 IN (?, ?) AND revoked_at IS NULL
+                """,
+                (_now_utc_iso(), (reason or "").strip()[:100], token_hashes[0], token_hashes[1]),
+            )
         connection.commit()
 
 
@@ -117,6 +135,10 @@ def _user_active_sessions(database_path: Path, user_id: int, current_session_id:
     return sessions
 
 
-def _session_token_hash(session_token: str) -> str:
-    return hashlib.sha256(session_token.encode("utf-8")).hexdigest()
+def _session_token_hash(session_token: str, secret_key: str = "") -> str:
+    token_bytes = (session_token or "").encode("utf-8")
+    secret = (secret_key or "").encode("utf-8")
+    if secret:
+        return hmac.new(secret, token_bytes, hashlib.sha256).hexdigest()
+    return hashlib.sha256(token_bytes).hexdigest()
 
