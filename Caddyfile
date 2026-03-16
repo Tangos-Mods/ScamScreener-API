@@ -1,0 +1,16 @@
+{$CADDY_SITE_ADDRESS:http://localhost} {
+    encode zstd gzip
+
+    @observability_blocked {
+        path /api/v1/health /api/v1/metrics
+        not remote_ip 127.0.0.1/32 ::1 private_ranges
+    }
+    respond @observability_blocked "Forbidden" 403
+
+    reverse_proxy training-hub:8080 {
+        header_up Host {host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+    }
+}

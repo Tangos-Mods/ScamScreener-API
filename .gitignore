@@ -43,3 +43,8 @@ data/
 # Logs and temp files
 *.log
 *.tmp
+ops/mariadb/conf.d/ssl.cnf
+ops/mariadb/ssl/*
+!ops/mariadb/ssl/.gitkeep
+*.pre-production.*.bak
+AGENTS.md

@@ -4,7 +4,9 @@ services:
     container_name: scamscreener-training-hub-mailpit
     restart: unless-stopped
     ports:
-      - "8025:8025"
+      - "127.0.0.1:8025:8025"
+    networks:
+      - training_hub_net
 
   mariadb:
     image: mariadb:11.4
@@ -16,12 +18,16 @@ services:
       MARIADB_ROOT_PASSWORD: ${TRAINING_HUB_DB_ROOT_PASSWORD:?TRAINING_HUB_DB_ROOT_PASSWORD must be set}
     volumes:
       - mariadb_data:/var/lib/mysql
+      - ./ops/mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ./ops/mariadb/ssl:/etc/mysql/ssl:ro
     healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${TRAINING_HUB_DB_ROOT_PASSWORD:?TRAINING_HUB_DB_ROOT_PASSWORD must be set}"]
+      test: ["CMD", "mariadb-admin", "ping", "-u", "root", "-p${TRAINING_HUB_DB_ROOT_PASSWORD:?TRAINING_HUB_DB_ROOT_PASSWORD must be set}"]
       interval: 10s
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    networks:
+      - training_hub_net
 
   training-hub:
     build: .
@@ -40,20 +46,46 @@ services:
     env_file:
       - .env
     environment:
-      TRAINING_HUB_ENV: ${TRAINING_HUB_ENV:-development}
-      TRAINING_HUB_ALLOWED_HOSTS: ${TRAINING_HUB_ALLOWED_HOSTS:-localhost,127.0.0.1}
-      TRAINING_HUB_PROJECT_ROOT: /workspace
       TRAINING_HUB_DB_DRIVER: mariadb
       TRAINING_HUB_DB_HOST: mariadb
       TRAINING_HUB_DB_PORT: 3306
-      TRAINING_HUB_SMTP_HOST: mailpit
-      TRAINING_HUB_SMTP_PORT: 1025
-    ports:
-      - "8080:8080"
+      TRAINING_HUB_TRUSTED_PROXIES: 172.30.0.10
+      TRAINING_HUB_SMTP_HOST: ${TRAINING_HUB_SMTP_HOST:-mailpit}
+      TRAINING_HUB_SMTP_PORT: ${TRAINING_HUB_SMTP_PORT:-1025}
     volumes:
       - ./data:/app/data
-      - ../:/workspace:ro
+      - ./ops/mariadb/ssl:/etc/mysql/ssl:ro
     restart: unless-stopped
+    networks:
+      - training_hub_net
+
+  caddy:
+    image: caddy:2.8
+    container_name: scamscreener-training-hub-caddy
+    depends_on:
+      training-hub:
+        condition: service_started
+    environment:
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-http://localhost}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      training_hub_net:
+        ipv4_address: 172.30.0.10
 
 volumes:
   mariadb_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  training_hub_net:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
