@@ -148,6 +148,36 @@ body {
     gap: 14px;
 }
 
+.site-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 6px 4px;
+}
+
+.footer-copy {
+    color: #a7b4c8;
+    font-size: 0.86rem;
+}
+
+.footer-disclaimer {
+    max-width: 560px;
+    color: #c2cede;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    text-align: center;
+}
+
+.footer-links {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
 .hero,
 .card {
     padding: 18px;
@@ -500,6 +530,51 @@ tbody tr:hover {
     margin: 0;
 }
 
+.legal-card {
+    padding: 18px;
+}
+
+.legal-block {
+    margin: 0;
+    color: #e6eefb;
+    white-space: pre-line;
+    word-break: break-word;
+}
+
+.legal-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+    color: var(--text-muted);
+}
+
+.legal-warning {
+    display: grid;
+    gap: 10px;
+}
+
+.legal-warning strong {
+    color: #fff1f4;
+}
+
+.legal-warning p {
+    margin: 0;
+    color: #ffd6de;
+}
+
+.legal-warning-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 6px;
+}
+
+.auth-warning {
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
 .message-list {
     display: grid;
     gap: 8px;
@@ -540,6 +615,11 @@ tbody tr:hover {
 
 @media (max-width: 920px) {
     .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .site-footer {
         flex-direction: column;
         align-items: flex-start;
     }

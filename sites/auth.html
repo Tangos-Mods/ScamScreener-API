@@ -13,6 +13,9 @@
     {% if error %}
         <div class="message error">{{ error }}</div>
     {% endif %}
+    {% if mode != "register" %}
+        <div class="message error auth-warning">Do NOT enter your Minecraft credentials!</div>
+    {% endif %}
 
     {% if mode == "register" and registration_closed %}
         <p>Registrations are currently closed. Contact an administrator for access.</p>

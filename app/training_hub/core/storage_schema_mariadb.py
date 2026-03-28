@@ -3,6 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..infra import db as sqlite3
+from .storage_migrations import (
+    _migrate_admin_mfa_challenge_columns,
+    _migrate_audit_log_columns,
+    _migrate_password_reset_token_columns,
+    _migrate_training_cases_payload_json,
+    _migrate_uploads_security_columns,
+    _migrate_users_security_columns,
+)
 
 
 def _init_database_mariadb(database_path: Path | str) -> None:
@@ -163,14 +171,11 @@ def _init_database_mariadb(database_path: Path | str) -> None:
             )
             """
         )
-        connection.execute(
-            "ALTER TABLE admin_mfa_challenges ADD COLUMN IF NOT EXISTS failed_attempts INT NOT NULL DEFAULT 0"
-        )
-        connection.execute(
-            "ALTER TABLE admin_mfa_challenges ADD COLUMN IF NOT EXISTS source_ip VARCHAR(80) NOT NULL DEFAULT ''"
-        )
-        connection.execute(
-            "ALTER TABLE admin_mfa_challenges ADD COLUMN IF NOT EXISTS user_agent VARCHAR(300) NOT NULL DEFAULT ''"
-        )
+        _migrate_users_security_columns(connection)
+        _migrate_uploads_security_columns(connection)
+        _migrate_audit_log_columns(connection)
+        _migrate_password_reset_token_columns(connection)
+        _migrate_admin_mfa_challenge_columns(connection)
+        _migrate_training_cases_payload_json(connection)
         connection.commit()
 

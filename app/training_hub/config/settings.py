@@ -64,6 +64,16 @@ def _database_url_has_tls(database_url: str) -> bool:
     return ssl_flag in {"1", "true", "yes", "on", "required"}
 
 
+def _env_absolute_url(name: str) -> str:
+    raw = (os.getenv(name, "") or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute http or https URL.")
+    return raw
+
+
 @dataclass(frozen=True)
 class TrainingHubSettings:
     host: str
@@ -79,6 +89,7 @@ class TrainingHubSettings:
     admin_usernames: set[str]
     trusted_proxies: set[str]
     environment: str = "development"
+    public_base_url: str = ""
     allowed_hosts: set[str] = field(default_factory=lambda: {"localhost", "127.0.0.1", "testserver"})
     registration_mode: str = "open"
     registration_invite_code: str = ""
@@ -122,6 +133,12 @@ class TrainingHubSettings:
     security_alert_failed_login_threshold: int = 10
     security_alert_mfa_failed_threshold: int = 6
     security_alert_password_reset_threshold: int = 10
+    site_project_classification: str = "Private non-commercial community project"
+    site_operator_name: str = ""
+    site_postal_address: str = ""
+    site_contact_channel: str = ""
+    site_privacy_contact: str = ""
+    site_hosting_location: str = "Ashburn, Virginia, USA"
 
     @property
     def database_path(self) -> Path | str:
@@ -145,9 +162,17 @@ class TrainingHubSettings:
     def is_production(self) -> bool:
         return self.environment == "production"
 
+    @property
+    def site_privacy_contact_display(self) -> str:
+        return self.site_privacy_contact or self.site_contact_channel or self.site_operator_name
+
+    @property
+    def site_operator_identity_complete(self) -> bool:
+        return bool(self.site_operator_name.strip() and self.site_postal_address.strip() and not self.site_postal_address.lstrip().startswith("@"))
+
     @classmethod
     def from_env(cls) -> "TrainingHubSettings":
-        base_dir = Path(__file__).resolve().parents[2]
+        base_dir = Path(__file__).resolve().parents[3]
         load_dotenv(base_dir / ".env")
 
         environment_raw = (os.getenv("TRAINING_HUB_ENV", "development") or "development").strip().lower()
@@ -253,10 +278,27 @@ class TrainingHubSettings:
             1,
             100000,
         )
+        site_project_classification = (
+            os.getenv("TRAINING_HUB_SITE_PROJECT_CLASSIFICATION", "Private non-commercial community project").strip()
+            or "Private non-commercial community project"
+        )
+        site_operator_name = os.getenv("TRAINING_HUB_SITE_OPERATOR_NAME", "").strip()
+        site_postal_address = os.getenv("TRAINING_HUB_SITE_POSTAL_ADDRESS", "").strip()
+        site_contact_channel = os.getenv("TRAINING_HUB_SITE_CONTACT_CHANNEL", "").strip()
+        site_privacy_contact = os.getenv("TRAINING_HUB_SITE_PRIVACY_CONTACT", "").strip()
+        site_hosting_location = (
+            os.getenv("TRAINING_HUB_SITE_HOSTING_LOCATION", "Ashburn, Virginia, USA").strip()
+            or "Ashburn, Virginia, USA"
+        )
         storage_dir_raw = os.getenv("TRAINING_HUB_STORAGE_DIR", str(base_dir / "data")).strip()
         pipeline_command = os.getenv("TRAINING_HUB_PIPELINE_COMMAND", "").strip()
         project_root_raw = os.getenv("TRAINING_HUB_PROJECT_ROOT", "").strip()
+        public_base_url = _env_absolute_url("TRAINING_HUB_PUBLIC_BASE_URL")
         allowed_hosts = _env_csv_set("TRAINING_HUB_ALLOWED_HOSTS")
+        if not allowed_hosts and public_base_url:
+            public_host = (urlsplit(public_base_url).hostname or "").strip().lower()
+            if public_host:
+                allowed_hosts = {public_host}
         if not allowed_hosts and not is_production:
             allowed_hosts = {"localhost", "127.0.0.1", "testserver"}
         default_project_root = base_dir.parent if (base_dir.parent / "scripts").exists() else base_dir
@@ -304,6 +346,8 @@ class TrainingHubSettings:
         if is_production:
             if not enforce_https:
                 raise ValueError("TRAINING_HUB_ENFORCE_HTTPS must be true when TRAINING_HUB_ENV=production.")
+            if public_base_url and urlsplit(public_base_url).scheme.lower() != "https":
+                raise ValueError("TRAINING_HUB_PUBLIC_BASE_URL must use https in production.")
             if secret_key == "change-me-in-env" or len(secret_key) < 32:
                 raise ValueError("TRAINING_HUB_SECRET_KEY must be at least 32 chars in production.")
             if not admin_mfa_required:
@@ -340,6 +384,7 @@ class TrainingHubSettings:
             admin_usernames=_env_csv_set("TRAINING_HUB_ADMIN_USERNAMES"),
             trusted_proxies=_env_csv_set("TRAINING_HUB_TRUSTED_PROXIES"),
             environment=environment,
+            public_base_url=public_base_url,
             allowed_hosts=allowed_hosts,
             registration_mode=registration_mode,
             registration_invite_code=registration_invite_code,
@@ -383,5 +428,11 @@ class TrainingHubSettings:
             security_alert_failed_login_threshold=security_alert_failed_login_threshold,
             security_alert_mfa_failed_threshold=security_alert_mfa_failed_threshold,
             security_alert_password_reset_threshold=security_alert_password_reset_threshold,
+            site_project_classification=site_project_classification,
+            site_operator_name=site_operator_name,
+            site_postal_address=site_postal_address,
+            site_contact_channel=site_contact_channel,
+            site_privacy_contact=site_privacy_contact,
+            site_hosting_location=site_hosting_location,
         )
 

@@ -1,0 +1,15 @@
+{% if compliance_warnings %}
+<section class="message error legal-warning" aria-labelledby="legal-warning-title">
+    <strong id="legal-warning-title">Compliance Warning</strong>
+    <ul class="legal-warning-list">
+        {% for item in compliance_warnings %}
+            <li>{{ item }}</li>
+        {% endfor %}
+    </ul>
+    <p>
+        For a publicly reachable service in Germany or the EU, pseudonyms and handle-only contact details are very
+        unlikely to be sufficient for provider identification. Replace these placeholders with your real operator data
+        before going live if those obligations apply to your service.
+    </p>
+</section>
+{% endif %}

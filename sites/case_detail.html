@@ -16,7 +16,7 @@
     <p class="muted">
         Created by <strong>{{ details.created_by }}</strong> |
         Source: <strong>{{ details.source_file_name }}</strong> |
-        Updated: {{ details.updated_at }}
+        Updated: {{ details.updated_at|datetime_utc }}
     </p>
     <div class="action-row">
         <a class="button-link alt" href="/admin">Back to Admin</a>

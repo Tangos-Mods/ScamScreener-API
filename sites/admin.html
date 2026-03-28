@@ -78,7 +78,7 @@
                     <td>{% if row.is_admin == 1 %}yes{% else %}no{% endif %}</td>
                     <td>{{ row.upload_count }}</td>
                     <td>{{ row.case_count }}</td>
-                    <td>{{ row.last_login_at or "-" }}</td>
+                    <td>{{ row.last_login_at|datetime_utc if row.last_login_at else "-" }}</td>
                     <td>
                         {% if row.id == current_user.id %}
                             <span class="muted">current user</span>
@@ -137,7 +137,7 @@
                             {{ row.outcome or "-" }}
                         </span>
                     </td>
-                    <td>{{ row.updated_at }}</td>
+                    <td>{{ row.updated_at|datetime_utc }}</td>
                     <td>{{ row.created_by }}</td>
                     <td>
                         <form method="post" action="/admin/cases/{{ row.id }}/delete" class="inline-form">
@@ -175,7 +175,7 @@
             {% for row in runs %}
                 <tr>
                     <td>{{ row.id }}</td>
-                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.created_at|datetime_utc }}</td>
                     <td>{{ row.status }}</td>
                     <td>{{ row.upload_count }}</td>
                     <td>{{ row.case_count }}</td>
@@ -210,7 +210,7 @@
             {% for row in audit_logs %}
                 <tr>
                     <td>{{ row.id }}</td>
-                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.created_at|datetime_utc }}</td>
                     <td>{{ row.actor_username }}</td>
                     <td>{{ row.action }}</td>
                     <td>

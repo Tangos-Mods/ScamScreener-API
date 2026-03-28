@@ -1,11 +1,16 @@
-# ScamScreener Training Hub
+# ScamScreener Platform
 
-Web application for player-contributed training data and admin-side pipeline control.
+This repository contains two separate applications in one repo:
+
+- `Training Hub` for player-contributed training data and admin-side pipeline control
+- `MarketGuard API` for Hypixel SkyBlock market data, including Lowest BIN aggregation
 
 ## What it provides
 
+- Clear package split between `app/training_hub` and `app/marketguard_api`
 - Player registration + login
 - Optional admin MFA step-up with one-time email code
+- Branded HTML emails with plain-text fallback for password reset and admin MFA
 - Admin backup create/restore for DB + uploads + bundles
 - Forgot-password + token-based password reset flow
 - Player dashboard with own contribution stats
@@ -13,20 +18,27 @@ Web application for player-contributed training data and admin-side pipeline con
 - Per-account upload history with download links
 - Admin view over users, basic case list, training runs, and audit log
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
+- Public Lowest BIN endpoint at `/api/v1/lowestbin`
 - Admin button to:
   - build one merged training bundle from all accepted uploads
 - Audit log also records upload and bundle downloads
 
 Data/state:
 
-- MariaDB stores users/sessions/uploads/cases/audit metadata
-- `data/uploads/*.jsonl` keeps raw upload payloads
-- `data/bundles/*.jsonl` keeps generated training bundles
+- the default deployment stores app state under `/app/data`
+- SQLite stores users, sessions, uploads, cases, and audit metadata by default
+- uploaded raw payloads and generated bundles are kept in the persistent app data volume
 
 Frontend files:
 
 - HTML templates: `sites/`
 - CSS: `css/`
+
+Application packages:
+
+- `app/training_hub/` contains the Training Hub app, routes, storage, auth, and admin flows
+- `app/marketguard_api/` contains the Hypixel auction client, Lowest BIN cache, and API routes
+- `app/main.py` is the primary production entrypoint for the combined single-container deployment
 
 ## 1) Local setup
 
@@ -38,7 +50,7 @@ Copy-Item .env.example .env
 ```
 
 The sample `.env.example` is a local-development baseline. Before a real deployment, switch the production-only flags called out in section 4.
-It is intentionally minimal: anything omitted falls back to the app defaults in `app/config/settings.py`.
+It is intentionally minimal: anything omitted falls back to the app defaults in `app/training_hub/config/settings.py` and `app/marketguard_api/config.py`.
 
 Set at least:
 
@@ -47,7 +59,7 @@ Set at least:
 Optional:
 
 - `TRAINING_HUB_ADMIN_USERNAMES` (comma-separated bootstrap allowlist for first admin account)
-- MariaDB settings (`TRAINING_HUB_DB_*`) if not using the included docker-compose DB service
+- MariaDB settings (`TRAINING_HUB_DB_*`) if you intentionally want to use an external MariaDB instance
 
 Bootstrap note: first registration is locked until `TRAINING_HUB_ADMIN_USERNAMES` contains the first admin username.
 
@@ -55,106 +67,92 @@ Bootstrap note: first registration is locked until `TRAINING_HUB_ADMIN_USERNAMES
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --host 0.0.0.0 --port 8080
+uvicorn app.training_hub.main:create_app --factory --host 0.0.0.0 --port 8080
 ```
 
-or:
+In a second shell for the MarketGuard API:
 
 ```powershell
-.\run.ps1
+.\.venv\Scripts\Activate.ps1
+uvicorn app.marketguard_api.main:create_marketguard_app --factory --host 0.0.0.0 --port 8081
 ```
 
 Open:
 
-- `http://localhost:8080` (ScamScreener Landing Page)
+- `http://localhost:8080` (Training Hub landing page)
 - `http://localhost:8080/hub` (redirects to login/dashboard)
-- `http://localhost:8025` (Mailpit inbox for password-reset emails)
+- `http://localhost:8081/api/v1/lowestbin` (MarketGuard Lowest BIN JSON)
 
-## 3) Docker
+## 3) Docker Deploy
+
+The repository now ships a single Compose stack: the combined app behind bundled Caddy. It keeps persistent state under `/app/data`, auto-generates a strong app secret on first boot when you do not provide one, and serves both the Training Hub and `lowestbin` from one internal app process.
+
+One-time setup:
 
 ```powershell
-Copy-Item .env.example .env
-# edit .env
-docker compose up --build -d
+Copy-Item .env.production.example .env.production
+# edit .env.production
 ```
 
-`docker-compose.yml` now exposes only `caddy` publicly. `training-hub`, `mariadb`, and `mailpit` stay on the internal Docker network, and the app trusts only the fixed internal Caddy proxy IP for forwarded headers.
-The `.env.example` for this path is intentionally short; add extra `TRAINING_HUB_*` variables only when you want to override a default from section 4.
+Then start production:
 
-MariaDB credential note: `TRAINING_HUB_DB_PASSWORD` and `TRAINING_HUB_DB_ROOT_PASSWORD` are only applied when the `mariadb_data` volume is initialized the first time. If you change those values later, the existing database keeps the old credentials until you either recreate the volume or update the MariaDB users manually.
-
-Operational hardening in this compose stack:
-
-- `Caddy` is the only public entrypoint
-- `/api/v1/health` and `/api/v1/metrics` are blocked for public IPs at the proxy layer
-- the app no longer mounts the parent host directory into `/workspace`
-- optional MariaDB TLS material lives under `ops/mariadb/` and can be generated by the production-promotion script
-
-Default local proxy mode:
-
-- `CADDY_SITE_ADDRESS=http://localhost`
-- `TRAINING_HUB_ALLOWED_HOSTS=localhost,127.0.0.1`
-- `TRAINING_HUB_ENFORCE_HTTPS=false`
-- `TRAINING_HUB_ENV=development`
-
-Public-via-Caddy mode with the bundled internal MariaDB:
-
-- set `CADDY_SITE_ADDRESS=hub.example.com`
-- set `TRAINING_HUB_ALLOWED_HOSTS=hub.example.com`
-- set `TRAINING_HUB_ENFORCE_HTTPS=true`
-- keep `TRAINING_HUB_ENV=staging`
-- set `TRAINING_HUB_SMTP_HOST` / `TRAINING_HUB_SMTP_PORT` to a real mail server if you want password reset mail or admin MFA mail outside the server
-
-Why `staging`: `TRAINING_HUB_ENV=production` still requires verified MariaDB TLS by design. If you later provision MariaDB TLS with a trusted CA, switch to `production` and set `TRAINING_HUB_DB_REQUIRE_TLS=true` plus `TRAINING_HUB_DB_SSL_CA=/path/to/ca.pem`.
-
-## 3.1) Promote Server To Production
-
-After the staging stack works on the server, set a real public domain plus real SMTP settings in `.env`, then run:
-
-```bash
-./scripts/promote_to_production.sh
+```powershell
+python scripts/update.py
 ```
 
-What the script does:
+What this path expects:
 
-- backs up the current `.env`
-- generates an internal CA and MariaDB server certificate for hostname `mariadb`
-- writes MariaDB TLS config under `ops/mariadb/conf.d/ssl.cnf`
-- flips `.env` to `TRAINING_HUB_ENV=production`
-- enables verified MariaDB TLS in the app config
-- forces production security flags (`HTTPS`, MFA, rate limiting, origin checks, token hiding)
-- synchronizes the MariaDB app user password with the current `.env`
-- starts `mariadb`, `training-hub`, and `caddy` with the new production settings
+- a real public domain in `CADDY_SITE_ADDRESS` such as `scamscreener.creepans.net`
+- `TRAINING_HUB_PUBLIC_BASE_URL` is set to the real public `https://...` URL
+- SMTP is configured for password reset and admin MFA mail
+- `TRAINING_HUB_SITE_*` values are reviewed for `/impressum` and `/datenschutz`
+- persistent storage is kept on the Docker volumes
 
-Before running it, make sure `.env` already contains:
+What this path provides automatically:
 
-- `CADDY_SITE_ADDRESS=your.real.domain`
-- `TRAINING_HUB_SECRET_KEY=...` with at least 32 characters
-- `TRAINING_HUB_DB_PASSWORD=...`
-- `TRAINING_HUB_DB_ROOT_PASSWORD=...`
-- `TRAINING_HUB_SMTP_HOST=...`
-- `TRAINING_HUB_SMTP_FROM_EMAIL=...`
+- one internal app container plus one public Caddy container
+- automatic HTTPS via Caddy
+- `/api/v1/health` container healthcheck that works with host validation and HTTPS enforcement
+- public blocking of `/api/v1/health` and `/api/v1/metrics`
+- default bootstrap admin username `admin` when `TRAINING_HUB_ADMIN_USERNAMES` is omitted
+- generated persistent secret key when `TRAINING_HUB_SECRET_KEY` is omitted
 
-The generated private CA and MariaDB server key stay on the server under `ops/mariadb/ssl/`. Do not commit them.
+Operational helpers for this path:
 
-Open:
+- `python scripts/update.py` runs preflight, rebuilds the image, restarts the stack, and waits for app health
+- `python scripts/update.py --skip-pull` skips upstream base-image pulls during rebuild
+- `python scripts/reset.py` asks for confirmation and then deletes the full compose deployment state for a clean restart
+- `python scripts/reset.py --yes --prune-images` also removes the locally built app image
 
-- `http://localhost` (ScamScreener Landing Page via Caddy)
-- `http://localhost/hub` (redirects to login/dashboard)
-- `http://localhost:8025` (Mailpit inbox, local-only bind)
+Direct `docker run` is also supported if you prefer not to use Compose, but then you still need external HTTPS termination in front of the container:
 
-By default, `docker-compose.yml` does not mount any extra host source tree into the app container.
+```powershell
+docker build -t scamscreener .
+docker run -d --name scamscreener `
+  --env-file .env.production `
+  -p 8080:8080 `
+  -v scamscreener_data:/app/data `
+  --init `
+  --read-only `
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m `
+  --cap-drop ALL `
+  --security-opt no-new-privileges:true `
+  scamscreener
+```
 
 ## 4) Environment variables
 
 - `CADDY_SITE_ADDRESS` default `http://localhost` (set a real domain for public Caddy TLS)
 - `CADDY_HTTP_PORT` default `80`
 - `CADDY_HTTPS_PORT` default `443`
+- `PORT` optional runtime port override used by the single-container image
+- `WEB_CONCURRENCY` optional worker count for the single-container image (default `1`)
 - `TRAINING_HUB_HOST` default `0.0.0.0`
 - `TRAINING_HUB_PORT` default `8080`
 - `TRAINING_HUB_ENV` default `development` (`production` enforces strict startup checks)
+- `TRAINING_HUB_PUBLIC_BASE_URL` optional absolute public base URL; recommended for production and used for reset links plus allowed-host fallback
 - `TRAINING_HUB_ALLOWED_HOSTS` optional allowlist for `Host` header validation
-- `TRAINING_HUB_DB_DRIVER` default `sqlite` (`mariadb` for production)
+- `TRAINING_HUB_DB_DRIVER` default `sqlite` (`mariadb` if you intentionally use an external MariaDB instance)
 - `TRAINING_HUB_DATABASE_URL` optional full DSN override (`mariadb://user:pass@host:3306/db`)
 - `TRAINING_HUB_DB_HOST` default `127.0.0.1`
 - `TRAINING_HUB_DB_PORT` default `3306`
@@ -182,6 +180,12 @@ By default, `docker-compose.yml` does not mount any extra host source tree into 
 - `TRAINING_HUB_SMTP_FROM_EMAIL` sender address for reset emails
 - `TRAINING_HUB_SMTP_USE_TLS` default `false` (implicit TLS/SMTPS)
 - `TRAINING_HUB_SMTP_USE_STARTTLS` default `true` (explicit STARTTLS)
+- `TRAINING_HUB_SITE_PROJECT_CLASSIFICATION` default `Private non-commercial community project`
+- `TRAINING_HUB_SITE_OPERATOR_NAME` optional operator/provider name rendered on `/impressum`
+- `TRAINING_HUB_SITE_POSTAL_ADDRESS` optional postal address rendered on `/impressum`
+- `TRAINING_HUB_SITE_CONTACT_CHANNEL` optional public contact channel rendered on `/impressum`
+- `TRAINING_HUB_SITE_PRIVACY_CONTACT` optional privacy contact rendered on `/datenschutz`
+- `TRAINING_HUB_SITE_HOSTING_LOCATION` default `Ashburn, Virginia, USA`
 - `TRAINING_HUB_ADMIN_MFA_REQUIRED` default `false`
 - `TRAINING_HUB_ADMIN_MFA_TTL_MINUTES` default `30`
 - `TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS` default `5`
@@ -214,8 +218,17 @@ By default, `docker-compose.yml` does not mount any extra host source tree into 
 - `TRAINING_HUB_STORAGE_DIR` default `./data`
 - `TRAINING_HUB_ADMIN_EMAILS` optional, comma-separated (informational only)
 - `TRAINING_HUB_ADMIN_USERNAMES` required for first-account admin bootstrap
-- `TRAINING_HUB_TRUSTED_PROXIES` optional, comma-separated (`docker-compose.yml` injects the internal Caddy proxy IP automatically)
+- `TRAINING_HUB_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (`docker-compose.yml` keeps `127.0.0.1` for the internal healthcheck and appends the internal Caddy IP automatically)
 - `TRAINING_HUB_PROJECT_ROOT` optional
+- `MARKETGUARD_HYPIXEL_API_BASE_URL` default `https://api.hypixel.net/v2`
+- `MARKETGUARD_REQUEST_TIMEOUT_SECONDS` default `10`
+- `MARKETGUARD_MAX_PARALLEL_PAGES` default `8`
+- `MARKETGUARD_SNAPSHOT_RETRIES` default `3`
+- `MARKETGUARD_CACHE_TTL_SECONDS` default `60`
+- `MARKETGUARD_STALE_IF_ERROR_SECONDS` default `300`
+- `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
+- `MARKETGUARD_HTTP_USER_AGENT` default `ScamScreener-MarketGuard/1.0`
+- `MARKETGUARD_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (falls back to `TRAINING_HUB_TRUSTED_PROXIES` when unset)
 
 Production-mode startup checks (`TRAINING_HUB_ENV=production`) enforce:
 - `TRAINING_HUB_ENFORCE_HTTPS=true`
@@ -224,7 +237,7 @@ Production-mode startup checks (`TRAINING_HUB_ENV=production`) enforce:
 - `TRAINING_HUB_ENABLE_RATE_LIMIT=true`
 - `TRAINING_HUB_ENFORCE_ORIGIN_CHECK=true`
 - explicit `TRAINING_HUB_ALLOWED_HOSTS` (no wildcard)
-- MariaDB TLS enabled
+- MariaDB TLS enabled when MariaDB is configured
 - no token disclosure in forgot-password UI (`TRAINING_HUB_PASSWORD_RESET_SHOW_TOKEN=false`)
 
 Admin trigger creates a merged bundle and records the run as `prepared`.
@@ -239,7 +252,7 @@ Prometheus-compatible monitoring is available at `/api/v1/metrics`.
 
 Container hardening defaults:
 - runs as non-root user
-- read-only root filesystem in `docker-compose.yml` for `training-hub`
+- read-only root filesystem in `docker-compose.yml`
 - dropped Linux capabilities (`cap_drop: ALL`)
 - `no-new-privileges` enabled
 
@@ -247,8 +260,10 @@ Supply-chain checks:
 - GitHub Actions workflow `.github/workflows/server-security.yml` runs `pip-audit` and `trivy`
 - Dependabot config `.github/dependabot.yml` enables weekly dependency updates
 
-## 5) Health endpoint
+## 5) API endpoints
 
 - `GET /api/v1/health`
+- `GET /api/v1/lowestbin`
 
-Returns status, UTC time, user/upload counts, and storage metadata.
+`/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
+`/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices.

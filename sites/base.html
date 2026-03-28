@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{% block html_lang %}en{% endblock %}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -35,6 +35,16 @@
     <main class="content">
         {% block content %}{% endblock %}
     </main>
+    <footer class="site-footer">
+        <div class="footer-copy">ScamScreener © 2026 Pankraz01</div>
+        <div class="footer-disclaimer">ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang.</div>
+        <nav aria-label="Legal">
+            <ul class="footer-links">
+                <li><a href="/legal-notice">Legal Notice</a></li>
+                <li><a href="/privacy">Privacy</a></li>
+            </ul>
+        </nav>
+    </footer>
 </div>
 </body>
 </html>

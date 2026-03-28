@@ -48,7 +48,7 @@
             {% for row in uploads %}
                 <tr>
                     <td>{{ row.id }}</td>
-                    <td>{{ row.created_at }}</td>
+                    <td>{{ row.created_at|datetime_utc }}</td>
                     <td>{{ row.original_file_name }}</td>
                     <td>{{ row.case_count }}</td>
                     <td>{{ row.size_bytes }} B</td>
@@ -86,8 +86,8 @@
             {% for row in sessions %}
                 <tr>
                     <td>{{ row.id }}</td>
-                    <td>{{ row.created_at }}</td>
-                    <td>{{ row.expires_at }}</td>
+                    <td>{{ row.created_at|datetime_utc }}</td>
+                    <td>{{ row.expires_at|datetime_utc }}</td>
                     <td>{{ row.remote_addr }}</td>
                     <td>{{ row.user_agent }}</td>
                     <td>

@@ -1,23 +1,11 @@
 from __future__ import annotations
 
-from urllib.parse import urlsplit
-
 from fastapi import Request
 from fastapi.responses import Response
 
 from ..config.settings import TrainingHubSettings
-
-
-def _is_request_from_trusted_proxy(request: Request, trusted_proxies: set[str]) -> bool:
-    if "*" in trusted_proxies:
-        return True
-
-    client_host = ""
-    if request.client is not None and request.client.host:
-        client_host = request.client.host.strip().lower()
-    if not client_host:
-        return False
-    return client_host in trusted_proxies
+from ..core.common import _is_request_from_trusted_proxy, _request_client_ip
+from urllib.parse import urlsplit
 
 
 def _request_is_https(request: Request, settings: TrainingHubSettings) -> bool:
@@ -101,13 +89,5 @@ def _apply_security_headers(response: Response, enforce_https: bool) -> Response
 
 
 def _client_ip(request: Request, settings: TrainingHubSettings) -> str:
-    if _is_request_from_trusted_proxy(request, settings.trusted_proxies):
-        forwarded_for = request.headers.get("x-forwarded-for", "")
-        if forwarded_for:
-            first = forwarded_for.split(",")[0].strip()
-            if first:
-                return first
-    if request.client is not None and request.client.host:
-        return request.client.host
-    return "unknown"
+    return _request_client_ip(request, settings) or "unknown"
 

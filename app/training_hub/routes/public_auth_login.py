@@ -148,13 +148,19 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 )
             try:
                 await run_in_threadpool(
-                    __import__("app.routes.public", fromlist=["send_admin_mfa_email"]).send_admin_mfa_email,
+                    __import__("app.training_hub.routes.public", fromlist=["send_admin_mfa_email"]).send_admin_mfa_email,
                     settings,
                     str(challenge["user_email"]),
                     str(challenge["code"]),
                     str(challenge["expires_at"]),
                 )
-            except Exception:
+            except Exception as exception:
+                logger.exception(
+                    "Admin MFA email delivery failed for user_id=%s via smtp_host=%s smtp_port=%s.",
+                    actor_user_id,
+                    settings.smtp_host,
+                    settings.smtp_port,
+                )
                 await run_in_threadpool(
                     _create_audit_log,
                     settings.database_path,
@@ -162,7 +168,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                     action="auth.mfa.challenge.email.failed",
                     target_type="user",
                     target_id=actor_user_id,
-                    details="Admin MFA code delivery failed.",
+                    details=f"Admin MFA code delivery failed: {exception}",
                     source_ip=source_ip,
                     user_agent=user_agent,
                 )

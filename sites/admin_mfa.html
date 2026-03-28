@@ -8,7 +8,7 @@
     <h1>Admin Verification</h1>
     <p>Enter the 6-digit code sent to {{ delivery_hint }}.</p>
     {% if expires_at %}
-        <p class="muted">Code expires at {{ expires_at }} (UTC).</p>
+        <p class="muted">Code expires at {{ expires_at|datetime_utc }}.</p>
     {% endif %}
 
     {% if notice %}

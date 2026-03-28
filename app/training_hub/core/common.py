@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import hashlib
 import hmac
 import json
@@ -26,7 +27,24 @@ def _is_request_from_trusted_proxy(request: Request, trusted_proxies: set[str]) 
     if "*" in trusted_proxies:
         return True
     client_host = request.client.host.strip().lower() if request.client and request.client.host else ""
-    return bool(client_host and client_host in trusted_proxies)
+    if not client_host:
+        return False
+    if client_host in trusted_proxies:
+        return True
+    try:
+        client_ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    for candidate in trusted_proxies:
+        normalized = str(candidate or "").strip().lower()
+        if "/" not in normalized:
+            continue
+        try:
+            if client_ip in ipaddress.ip_network(normalized, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _request_client_ip(request: Request, settings: TrainingHubSettings) -> str:
@@ -57,4 +75,31 @@ def _is_path_within(base_dir: Path, candidate: Path) -> bool:
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _format_utc_timestamp(value: Any) -> str:
+    if value is None:
+        return ""
+
+    candidate = value
+    if isinstance(candidate, datetime):
+        parsed = candidate
+    else:
+        raw = str(candidate or "").strip()
+        if not raw:
+            return ""
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return raw
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+
+    if parsed.second or parsed.microsecond:
+        return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
 

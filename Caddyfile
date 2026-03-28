@@ -1,4 +1,4 @@
-{$CADDY_SITE_ADDRESS:http://localhost} {
+{$CADDY_SITE_ADDRESS:localhost} {
     encode zstd gzip
 
     @observability_blocked {
@@ -7,7 +7,7 @@
     }
     respond @observability_blocked "Forbidden" 403
 
-    reverse_proxy training-hub:8080 {
+    reverse_proxy scamscreener:8080 {
         header_up Host {host}
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}

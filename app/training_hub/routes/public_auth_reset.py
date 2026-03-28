@@ -54,7 +54,7 @@ def register_public_auth_password_reset_routes(app: FastAPI, settings: TrainingH
 
         reset_link = ""
         if bool(reset_result.get("issued")) and "token" in reset_result:
-            base_url = str(request.base_url).rstrip("/")
+            base_url = settings.public_base_url or str(request.base_url).rstrip("/")
             reset_link = f"{base_url}/reset-password?token={reset_result['token']}"
 
         if bool(reset_result.get("issued")) and "user_id" in reset_result:
@@ -87,7 +87,7 @@ def register_public_auth_password_reset_routes(app: FastAPI, settings: TrainingH
             if settings.password_reset_send_email and "user_email" in reset_result and reset_link:
                 try:
                     await run_in_threadpool(
-                        __import__("app.routes.public", fromlist=["send_password_reset_email"]).send_password_reset_email,
+                        __import__("app.training_hub.routes.public", fromlist=["send_password_reset_email"]).send_password_reset_email,
                         settings,
                         str(reset_result["user_email"]),
                         reset_link,

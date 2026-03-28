@@ -5,12 +5,13 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from app.main import TrainingHubSettings, create_app
+from app.training_hub.main import TrainingHubSettings, create_app
 
 CSRF_COOKIE_NAME = "training_hub_csrf"
 
@@ -61,6 +62,31 @@ def test_first_registered_user_is_admin(tmp_path: Path) -> None:
 
     assert admin_page.status_code == 200
     assert "Bundle Control" in admin_page.text
+
+
+def test_admin_page_formats_last_login_timestamp_in_utc(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute(
+            "UPDATE users SET last_login_at = ? WHERE username = ?",
+            ("2026-03-28T18:00:00Z", "dev"),
+        )
+        connection.commit()
+
+    admin_page = client.get("/admin")
+
+    assert admin_page.status_code == 200
+    assert "2026-03-28 18:00 UTC" in admin_page.text
+    assert "2026-03-28T18:00:00Z" not in admin_page.text
 
 
 def test_non_admin_cannot_access_admin_page(tmp_path: Path) -> None:
@@ -230,7 +256,7 @@ def test_forgot_password_sends_email_when_enabled(tmp_path: Path, monkeypatch) -
     def _fake_send_email(_settings, recipient_email: str, reset_link: str, expires_at: str):
         sent.append((recipient_email, reset_link))
 
-    monkeypatch.setattr("app.routes.public.send_password_reset_email", _fake_send_email)
+    monkeypatch.setattr("app.training_hub.routes.public.send_password_reset_email", _fake_send_email)
 
     forgot = _post_form(client, "/forgot-password", data={"username_or_email": "alice"})
     assert forgot.status_code == 200
@@ -244,6 +270,126 @@ def test_forgot_password_sends_email_when_enabled(tmp_path: Path, monkeypatch) -
             "SELECT id FROM audit_logs WHERE action = 'auth.password.reset.email.sent' LIMIT 1"
         ).fetchone()
         assert sent_audit is not None
+
+
+def test_forgot_password_uses_public_base_url_for_reset_email(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        password_reset_send_email=True,
+        password_reset_show_token=False,
+        smtp_host="mail.local",
+        smtp_port=1025,
+        smtp_from_email="no-reply@scamscreener.local",
+        smtp_use_starttls=False,
+        public_base_url="https://scamscreener.example.com",
+    )
+    client = TestClient(create_app(settings))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    sent: list[str] = []
+
+    def _fake_send_email(_settings, _recipient_email: str, reset_link: str, _expires_at: str):
+        sent.append(reset_link)
+
+    monkeypatch.setattr("app.training_hub.routes.public.send_password_reset_email", _fake_send_email)
+
+    forgot = _post_form(client, "/forgot-password", data={"username_or_email": "alice"})
+
+    assert forgot.status_code == 200
+    assert len(sent) == 1
+    assert sent[0].startswith("https://scamscreener.example.com/reset-password?token=")
+
+
+def test_legal_notice_page_hides_operator_status_badge_for_non_admins(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            _settings(
+                tmp_path,
+                site_operator_name="Pankraz01 (Tango)",
+                site_postal_address="@tango_cgn",
+                site_contact_channel="Discord: @tango_cgn",
+                public_base_url="https://scamscreener.example.com",
+            )
+        )
+    )
+
+    response = client.get("/legal-notice")
+
+    assert response.status_code == 200
+    assert "Pankraz01 (Tango)" in response.text
+    assert "Discord: @tango_cgn" in response.text
+    assert "Legal Notice" in response.text
+    assert "Compliance Warning" in response.text
+    assert "serviceable postal address" in response.text
+    assert "Operator details incomplete" not in response.text
+
+
+def test_legal_notice_page_shows_operator_status_badge_for_admins(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        site_operator_name="Pankraz01 (Tango)",
+        site_postal_address="42 Example Street, Example City",
+        site_contact_channel="Discord: @tango_cgn",
+        public_base_url="https://scamscreener.example.com",
+    )
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = client.get("/legal-notice")
+
+    assert response.status_code == 200
+    assert "Operator details configured" in response.text
+
+
+def test_login_page_shows_minecraft_credential_warning_and_footer_disclaimer(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    response = client.get("/login")
+
+    assert response.status_code == 200
+    assert "Do NOT enter your Minecraft credentials!" in response.text
+    assert "ScamScreener © 2026 Pankraz01" in response.text
+    assert "ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang." in response.text
+
+
+def test_privacy_page_lists_us_hosting_and_security_storage(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            _settings(
+                tmp_path,
+                site_operator_name="Pankraz01 (Tango)",
+                site_contact_channel="Discord: @tango_cgn",
+                site_privacy_contact="Discord DM: @tango_cgn",
+                site_hosting_location="Ashburn, Virginia, USA",
+                password_reset_send_email=True,
+                smtp_host="smtp.example.com",
+                smtp_from_email="no-reply@scamscreener.example.com",
+                smtp_use_starttls=True,
+            )
+        )
+    )
+
+    response = client.get("/privacy")
+
+    assert response.status_code == 200
+    assert "Privacy Notice" in response.text
+    assert "Ashburn, Virginia, USA" in response.text
+    assert "training_hub_session" in response.text
+    assert "training_hub_csrf" in response.text
+    assert "smtp.example.com" in response.text
+    assert "Password reset" in response.text
 
 
 def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> None:
@@ -269,7 +415,7 @@ def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> N
     def _fake_send_email(_settings, recipient_email: str, code: str, expires_at: str):
         delivered_codes.append((recipient_email, code))
 
-    monkeypatch.setattr("app.routes.public.send_admin_mfa_email", _fake_send_email)
+    monkeypatch.setattr("app.training_hub.routes.public.send_admin_mfa_email", _fake_send_email)
 
     login = _post_form(
         client,
@@ -337,7 +483,7 @@ def test_admin_mfa_rejects_invalid_code(tmp_path: Path, monkeypatch) -> None:
     def _fake_send_email(_settings, recipient_email: str, code: str, expires_at: str):
         delivered_codes.append(code)
 
-    monkeypatch.setattr("app.routes.public.send_admin_mfa_email", _fake_send_email)
+    monkeypatch.setattr("app.training_hub.routes.public.send_admin_mfa_email", _fake_send_email)
 
     login = _post_form(
         client,
@@ -366,6 +512,47 @@ def test_admin_mfa_rejects_invalid_code(tmp_path: Path, monkeypatch) -> None:
     )
     assert valid.status_code == 303
     assert valid.headers.get("location") == "/admin"
+
+
+def test_admin_mfa_delivery_failure_records_exception_detail(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        admin_mfa_required=True,
+        smtp_host="smtp.example.com",
+        smtp_port=465,
+        smtp_from_email="no-reply@scamscreener.local",
+        smtp_use_tls=True,
+        smtp_use_starttls=False,
+    )
+    client = TestClient(create_app(settings))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    def _failing_send_email(_settings, _recipient_email: str, _code: str, _expires_at: str):
+        raise RuntimeError("SMTP AUTH failed")
+
+    monkeypatch.setattr("app.training_hub.routes.public.send_admin_mfa_email", _failing_send_email)
+
+    login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "alice", "password": "supersecret"},
+    )
+
+    assert login.status_code == 503
+    assert "Admin verification code could not be delivered." in login.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        row = connection.execute(
+            "SELECT details FROM audit_logs WHERE action = 'auth.mfa.challenge.email.failed' LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert "SMTP AUTH failed" in str(row[0])
 
 
 def test_admin_mfa_challenge_is_bound_to_client(tmp_path: Path, monkeypatch) -> None:
@@ -398,7 +585,7 @@ def test_admin_mfa_challenge_is_bound_to_client(tmp_path: Path, monkeypatch) -> 
     def _fake_send_email(_settings, recipient_email: str, code: str, expires_at: str):
         delivered_codes.append(code)
 
-    monkeypatch.setattr("app.routes.public.send_admin_mfa_email", _fake_send_email)
+    monkeypatch.setattr("app.training_hub.routes.public.send_admin_mfa_email", _fake_send_email)
 
     login = _post_form(
         client,
@@ -450,7 +637,7 @@ def test_admin_mfa_max_attempts_expires_challenge(tmp_path: Path, monkeypatch) -
     def _fake_send_email(_settings, recipient_email: str, code: str, expires_at: str):
         delivered_codes.append(code)
 
-    monkeypatch.setattr("app.routes.public.send_admin_mfa_email", _fake_send_email)
+    monkeypatch.setattr("app.training_hub.routes.public.send_admin_mfa_email", _fake_send_email)
 
     login = _post_form(
         client,
@@ -1213,6 +1400,14 @@ def test_https_enforcement_respects_trusted_forwarded_proto(tmp_path: Path) -> N
     assert response.headers.get("strict-transport-security") == "max-age=31536000; includeSubDomains"
 
 
+def test_https_enforcement_respects_trusted_proxy_cidr(tmp_path: Path) -> None:
+    from app.training_hub.core.common import _is_request_from_trusted_proxy
+
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    assert _is_request_from_trusted_proxy(request, {"127.0.0.0/8"}) is True
+
+
 def test_upload_download_rejects_path_outside_upload_dir(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
@@ -1550,7 +1745,7 @@ def test_auto_retention_worker_runs_when_enabled(tmp_path: Path, monkeypatch) ->
             "rate_limit_hits": 0,
         }
 
-    monkeypatch.setattr("app.main._run_retention_cleanup", _fake_cleanup)
+    monkeypatch.setattr("app.training_hub.main._run_retention_cleanup", _fake_cleanup)
 
     with TestClient(create_app(settings)) as client:
         response = client.get("/api/v1/health")
@@ -1586,6 +1781,7 @@ def _settings(
     smtp_from_email: str = "",
     smtp_use_tls: bool = False,
     smtp_use_starttls: bool = False,
+    public_base_url: str = "",
     admin_mfa_required: bool = False,
     admin_mfa_ttl_minutes: int = 30,
     admin_mfa_max_attempts: int = 5,
@@ -1603,6 +1799,12 @@ def _settings(
     security_alert_failed_login_threshold: int = 10,
     security_alert_mfa_failed_threshold: int = 6,
     security_alert_password_reset_threshold: int = 10,
+    site_project_classification: str = "Private non-commercial community project",
+    site_operator_name: str = "",
+    site_postal_address: str = "",
+    site_contact_channel: str = "",
+    site_privacy_contact: str = "",
+    site_hosting_location: str = "Ashburn, Virginia, USA",
 ) -> TrainingHubSettings:
     default_admin_usernames = {"alice", "dev", "owner"}
     return TrainingHubSettings(
@@ -1618,6 +1820,7 @@ def _settings(
         admin_emails=set(),
         admin_usernames=admin_usernames if admin_usernames is not None else default_admin_usernames,
         trusted_proxies=trusted_proxies if trusted_proxies is not None else set(),
+        public_base_url=public_base_url,
         registration_mode=registration_mode,
         registration_invite_code=registration_invite_code,
         password_reset_ttl_minutes=password_reset_ttl_minutes,
@@ -1655,6 +1858,12 @@ def _settings(
         security_alert_failed_login_threshold=security_alert_failed_login_threshold,
         security_alert_mfa_failed_threshold=security_alert_mfa_failed_threshold,
         security_alert_password_reset_threshold=security_alert_password_reset_threshold,
+        site_project_classification=site_project_classification,
+        site_operator_name=site_operator_name,
+        site_postal_address=site_postal_address,
+        site_contact_channel=site_contact_channel,
+        site_privacy_contact=site_privacy_contact,
+        site_hosting_location=site_hosting_location,
     )
 
 
@@ -1662,7 +1871,7 @@ def _csrf_token(client: TestClient) -> str:
     token = client.cookies.get(CSRF_COOKIE_NAME)
     if token:
         return str(token)
-    client.get("/api/v1/health")
+    client.get("/login")
     token = client.cookies.get(CSRF_COOKIE_NAME)
     assert token is not None
     return str(token)

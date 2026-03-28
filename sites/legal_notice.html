@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block html_lang %}en{% endblock %}
+{% block title %}Legal Notice - ScamScreener{% endblock %}
+
+{% block content %}
+<section class="hero glass">
+    <p class="eyebrow">ScamScreener</p>
+    <h1>Legal Notice</h1>
+    <p class="lead">
+        Provider identification for this deployed ScamScreener community project instance.
+    </p>
+    <div class="meta-row">
+        <span class="chip">{{ site_project_classification }}</span>
+        {% if current_user and current_user.is_admin == 1 %}
+            {% if site_operator_identity_complete %}
+                <span class="chip chip-status-submitted">Operator details configured</span>
+            {% else %}
+                <span class="chip">Operator details incomplete</span>
+            {% endif %}
+        {% endif %}
+    </div>
+</section>
+
+{% include "_legal_warning.html" %}
+
+<section class="detail-grid">
+    <article class="card glass legal-card">
+        <h2>Provider</h2>
+        <div class="stack-group">
+            <div class="kv-item">
+                <span>Name</span>
+                <strong>{{ site_operator_name }}</strong>
+            </div>
+            <div class="kv-item">
+                <span>Postal address</span>
+                <p class="legal-block">{{ site_postal_address }}</p>
+            </div>
+            <div class="kv-item">
+                <span>Contact</span>
+                <p class="legal-block">{{ site_contact_channel }}</p>
+            </div>
+        </div>
+    </article>
+
+    <article class="card glass legal-card">
+        <h2>Project status</h2>
+        <div class="stack-group">
+            <p>
+                This deployment is labeled as a {{ site_project_classification|lower }}. A lack of commercial intent
+                does not automatically remove provider-identification or privacy obligations.
+            </p>
+            <p>
+                If the service publishes editorial content or is made available to the public, additional disclosures may
+                be required.
+            </p>
+            <div class="kv-item">
+                <span>Public base URL</span>
+                <p class="legal-block">{{ public_base_url }}</p>
+            </div>
+        </div>
+    </article>
+</section>
+{% endblock %}

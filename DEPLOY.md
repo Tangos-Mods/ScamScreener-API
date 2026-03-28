@@ -1,37 +1,64 @@
-# Deploy On Ubuntu
+# Ubuntu Production Deployment
 
-This guide assumes:
+This guide deploys the repository on a fresh Ubuntu server with:
 
-- you have a fresh Ubuntu server
-- your domain already points to the server IP
-- ports `80` and `443` can be reached from the internet
-- you want to run the app with the included `docker-compose.yml`
-- you want to start in `staging`, verify everything, then switch to real `production`
+- Docker Engine + Compose plugin
+- one internal application container
+- one public Caddy container for HTTPS and reverse proxy
+- automatic Let's Encrypt certificates through Caddy
+- persistent application data in Docker volumes
 
-This repo already includes:
+The resulting public topology is:
 
-- `caddy` as the public reverse proxy
-- internal `mariadb`
-- internal `mailpit` for local/staging mail testing
-- `scripts/promote_to_production.sh` to switch a working staging server to true production mode
+- `caddy` exposed on `80/443`
+- `scamscreener` internal only
+- `/api/v1/health` and `/api/v1/metrics` blocked publicly by Caddy
 
-## 1) Prepare DNS
+## Architecture
 
-Before touching the server, make sure your DNS points to it.
+Production now uses:
 
-- Create an `A` record for your domain, for example `hub.example.com`
-- If you use IPv6, also create an `AAAA` record
-- Wait until DNS resolves correctly
+- [docker-compose.yml](/C:/Users/mine6/Documents/GitHub/ScamScreener-API/docker-compose.yml)
+- [Caddyfile](/C:/Users/mine6/Documents/GitHub/ScamScreener-API/Caddyfile)
+- [Dockerfile](/C:/Users/mine6/Documents/GitHub/ScamScreener-API/Dockerfile)
+- [docker/entrypoint.sh](/C:/Users/mine6/Documents/GitHub/ScamScreener-API/docker/entrypoint.sh)
 
-Check from your own machine:
+## Prerequisites
+
+Before you start, make sure:
+
+- your domain already points to the Ubuntu server
+- ports `80` and `443` are reachable from the internet
+- you have SMTP credentials for admin MFA and password-reset mail
+- you can log in to the server via SSH
+
+## 1) Create The Server
+
+Use a fresh Ubuntu LTS server.
+
+Recommended minimum:
+
+- 2 vCPU
+- 2 GB RAM
+- 20 GB SSD
+
+## 2) Point DNS To The Server
+
+Create DNS records for your domain:
+
+- `A` record to the server IPv4
+- `AAAA` record if you use IPv6
+
+Verify from your own machine:
 
 ```bash
-dig +short hub.example.com
+dig +short scamscreener.creepans.net
+dig +short AAAA scamscreener.creepans.net
 ```
 
-The result should be your server IP.
+The output must point to your server.
 
-## 2) First Login And Base Packages
+## 3) Log In And Update Ubuntu
 
 SSH into the server:
 
@@ -39,97 +66,83 @@ SSH into the server:
 ssh root@YOUR_SERVER_IP
 ```
 
-Update the system and install basic packages:
+Update the system:
 
 ```bash
 apt update
 apt upgrade -y
-DEBIAN_FRONTEND=noninteractive apt install -y ca-certificates curl gnupg git openssl iptables-persistent
+DEBIAN_FRONTEND=noninteractive apt install -y ca-certificates curl gnupg git iptables-persistent
 ```
 
-## 3) Optional: Create A Deploy User
+## 4) Optional: Create A Deploy User
 
-Running everything as `root` works, but a dedicated sudo user is cleaner.
+Using a dedicated deploy user is cleaner than operating everything as `root`.
 
 ```bash
-adduser deploy
-usermod -aG sudo deploy
+adduser scamscreener
+usermod -aG sudo scamscreener
+usermod -aG docker scamscreener 2>/dev/null || true
 ```
 
-If you use SSH keys:
+If you want to continue as that user after Docker is installed, reconnect later with:
 
 ```bash
-rsync --archive --chown=deploy:deploy ~/.ssh /home/deploy
+ssh scamscreener@YOUR_SERVER_IP
 ```
 
-Then reconnect:
-
-```bash
-ssh deploy@YOUR_SERVER_IP
-```
-
-## 4) Configure Firewall With `iptables`
-
-This guide assumes you manage the host firewall directly with `iptables`.
+## 5) Configure The Firewall With iptables
 
 Keep your current SSH session open while applying rules. If you use a non-standard SSH port, replace `22` below.
 
 IPv4 rules:
 
 ```bash
-sudo iptables -F INPUT
-sudo iptables -A INPUT -i lo -j ACCEPT
-sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-sudo iptables -P INPUT DROP
-sudo iptables -P FORWARD ACCEPT
-sudo iptables -P OUTPUT ACCEPT
-sudo netfilter-persistent save
+iptables -F INPUT
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+iptables -P INPUT DROP
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+netfilter-persistent save
 ```
 
-If the server uses IPv6 publicly, mirror the rules with `ip6tables`:
+If the server uses public IPv6, mirror the rules with `ip6tables`:
 
 ```bash
-sudo ip6tables -F INPUT
-sudo ip6tables -A INPUT -i lo -j ACCEPT
-sudo ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-sudo ip6tables -A INPUT -p tcp --dport 22 -j ACCEPT
-sudo ip6tables -A INPUT -p tcp --dport 80 -j ACCEPT
-sudo ip6tables -A INPUT -p tcp --dport 443 -j ACCEPT
-sudo ip6tables -P INPUT DROP
-sudo ip6tables -P FORWARD ACCEPT
-sudo ip6tables -P OUTPUT ACCEPT
-sudo netfilter-persistent save
+ip6tables -F INPUT
+ip6tables -A INPUT -i lo -j ACCEPT
+ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+ip6tables -A INPUT -p tcp --dport 22 -j ACCEPT
+ip6tables -A INPUT -p tcp --dport 80 -j ACCEPT
+ip6tables -A INPUT -p tcp --dport 443 -j ACCEPT
+ip6tables -P INPUT DROP
+ip6tables -P FORWARD ACCEPT
+ip6tables -P OUTPUT ACCEPT
+netfilter-persistent save
 ```
 
 Notes:
 
-- do not set `FORWARD` to `DROP` unless you also understand Docker's forwarding chains
-- if a cloud firewall exists at your provider, `80` and `443` must also be opened there
+- do not set `FORWARD` to `DROP`, because Docker relies on packet forwarding
+- if your cloud provider has its own firewall or security group, open `80` and `443` there as well
 
-## 5) Install Docker Engine And Compose Plugin
+## 6) Install Docker Engine And Compose Plugin
 
 Set up Docker from the official repository:
 
 ```bash
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-```
-
-If you use the `deploy` user, allow docker commands without `sudo`:
-
-```bash
-sudo usermod -aG docker "$USER"
-newgrp docker
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt update
+apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
 Verify:
@@ -139,322 +152,430 @@ docker --version
 docker compose version
 ```
 
-## 6) Clone The Repository
-
-Pick a stable directory:
+If you created a deploy user:
 
 ```bash
-cd /srv
-sudo mkdir -p scamscreener
-sudo chown "$USER":"$USER" scamscreener
-cd scamscreener
-git clone YOUR_REPO_URL app
-cd app
+usermod -aG docker scamscreener
 ```
 
-## 7) Create The Server `.env`
-
-Start from the minimal sample:
+Then reconnect as that user, or run:
 
 ```bash
-cp .env.example .env
+newgrp docker
+```
+
+## 7) Prepare The Upload Directory
+
+Create a stable application directory and hand it to the deploy user:
+
+```bash
+sudo mkdir -p /srv/scamscreener
+sudo chown -R scamscreener:scamscreener /srv/scamscreener
+sudo chmod 750 /srv/scamscreener
+```
+
+Upload the repository contents from your local machine via SFTP or FTP into:
+
+```text
+/srv/scamscreener
+```
+
+Then continue on the server as the `scamscreener` user:
+
+```bash
+cd /srv/scamscreener
+```
+
+Upload the project contents, not a nested extra folder layer. After upload, the server should contain files like:
+
+```text
+/srv/scamscreener/docker-compose.yml
+/srv/scamscreener/Dockerfile
+/srv/scamscreener/Caddyfile
+/srv/scamscreener/scripts/update.py
+/srv/scamscreener/scripts/reset.py
+/srv/scamscreener/app
+/srv/scamscreener/css
+/srv/scamscreener/sites
+```
+
+Set script permissions once after upload:
+
+```bash
+cd /srv/scamscreener
+chmod 750 scripts/*.sh
+chmod 750 scripts/*.py
+```
+
+## 8) Create The Production Environment File
+
+Copy the provided production example:
+
+```bash
+cp .env.production.example .env.production
 ```
 
 Edit it:
 
 ```bash
-nano .env
+nano .env.production
 ```
 
-For the initial staging deployment, set at least:
+Set at least these values:
 
 ```env
-CADDY_SITE_ADDRESS=hub.example.com
-TRAINING_HUB_ENV=staging
-TRAINING_HUB_ALLOWED_HOSTS=hub.example.com
+CADDY_SITE_ADDRESS=scamscreener.creepans.net
+
+TRAINING_HUB_ENV=production
+TRAINING_HUB_PUBLIC_BASE_URL=https://scamscreener.creepans.net
 TRAINING_HUB_ENFORCE_HTTPS=true
-
-TRAINING_HUB_SECRET_KEY=REPLACE_WITH_LONG_RANDOM_SECRET
-TRAINING_HUB_DB_PASSWORD=REPLACE_WITH_STRONG_DB_PASSWORD
-TRAINING_HUB_DB_ROOT_PASSWORD=REPLACE_WITH_STRONG_ROOT_PASSWORD
-
-TRAINING_HUB_ADMIN_USERNAMES=admin
 TRAINING_HUB_ADMIN_MFA_REQUIRED=true
 TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL=true
+TRAINING_HUB_SESSION_BIND_USER_AGENT=true
+TRAINING_HUB_RETENTION_AUTO_ENABLED=true
+
 TRAINING_HUB_SMTP_HOST=smtp.example.com
 TRAINING_HUB_SMTP_PORT=587
 TRAINING_HUB_SMTP_USERNAME=YOUR_SMTP_USERNAME
 TRAINING_HUB_SMTP_PASSWORD=YOUR_SMTP_PASSWORD
-TRAINING_HUB_SMTP_FROM_EMAIL=no-reply@hub.example.com
+TRAINING_HUB_SMTP_FROM_EMAIL=no-reply@scamscreener.creepans.net
 TRAINING_HUB_SMTP_USE_STARTTLS=true
+TRAINING_HUB_SMTP_USE_TLS=false
 
-TRAINING_HUB_SESSION_BIND_USER_AGENT=true
+TRAINING_HUB_SITE_PROJECT_CLASSIFICATION=Private non-commercial community project
+TRAINING_HUB_SITE_OPERATOR_NAME=YOUR_LEGAL_NAME_OR_ENTITY
+TRAINING_HUB_SITE_POSTAL_ADDRESS=YOUR_SERVICEABLE_POSTAL_ADDRESS
+TRAINING_HUB_SITE_CONTACT_CHANNEL=YOUR_PUBLIC_CONTACT
+TRAINING_HUB_SITE_PRIVACY_CONTACT=YOUR_PRIVACY_CONTACT
+TRAINING_HUB_SITE_HOSTING_LOCATION=Ashburn, Virginia, USA
 ```
 
-Notes:
+Optional:
 
-- use a real SMTP server, not Mailpit, on the public server
-- keep `TRAINING_HUB_ENV=staging` for the first public deployment
-- do not use `production` yet; that comes later through the promotion script
+```env
+TRAINING_HUB_ADMIN_USERNAMES=your-admin-username
+TRAINING_HUB_SECRET_KEY=YOUR_OWN_LONG_RANDOM_SECRET
+WEB_CONCURRENCY=2
+MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE=30
+```
 
-Generate a strong secret if needed:
+Important notes:
+
+- if `TRAINING_HUB_SECRET_KEY` is omitted, the app generates one on first boot and persists it in the app data volume
+- if `TRAINING_HUB_ADMIN_USERNAMES` is omitted, the default bootstrap admin username is `admin`
+- keep `TRAINING_HUB_TRUSTED_PROXIES=127.0.0.1` unless you intentionally know you need extra proxy ranges; Docker Compose appends the internal Caddy IP automatically
+- `/impressum` and `/datenschutz` render from the `TRAINING_HUB_SITE_*` variables
+- if you operate the site publicly in Germany or the EU, a pseudonym or Discord handle alone is likely not sufficient for the provider-identification fields; `scripts/preflight.sh` warns about obviously incomplete values but cannot replace legal review
+
+Lock down the file permissions:
 
 ```bash
-openssl rand -hex 48
+chmod 600 .env.production
 ```
 
-## 8) Start The Staging Stack
+## 9) Run Preflight Checks
 
-Start everything:
+Before the first deployment, run:
 
 ```bash
-docker compose up -d --build
+bash scripts/preflight.sh
 ```
 
-Check status:
+This checks:
+
+- required files exist
+- required production environment values exist
+- Caddy domain and public base URL match
+- SMTP transport encryption is configured sanely
+- Compose resolves successfully
+
+## 10) Start The Production Stack
+
+Build and start everything:
+
+```bash
+python3 scripts/update.py
+```
+
+This starts:
+
+- `scamscreener` as the internal FastAPI app
+- `caddy` as the public reverse proxy with automatic HTTPS
+
+Internally the update script does:
+
+- optional preflight validation
+- `docker compose build --pull`
+- `docker compose up -d --remove-orphans`
+- wait for the app container health check
+- print final service state
+
+Only Caddy is exposed publicly.
+
+## 11) Verify Container Health
+
+Check service state:
 
 ```bash
 docker compose ps
 ```
+
+You want:
+
+- `scamscreener` status `healthy`
+- `caddy` status `running`
 
 Check logs:
 
 ```bash
+docker compose logs --tail=100 scamscreener
 docker compose logs --tail=100 caddy
-docker compose logs --tail=100 training-hub
-docker compose logs --tail=100 mariadb
 ```
 
-What you want to see:
+You do not want:
 
-- `mariadb` becomes healthy
-- `training-hub` starts without a traceback
-- `caddy` obtains a certificate for your public domain
+- Python tracebacks
+- Caddy ACME errors
+- settings validation failures
 
-## 9) Verify Staging Works
+## 12) Verify The Public Site
 
-From your own machine, open:
-
-- `https://hub.example.com`
-- `https://hub.example.com/hub`
-
-Then verify:
-
-1. the site loads over HTTPS
-2. registration/login works
-3. admin MFA mail arrives
-4. password reset mail arrives
-
-Useful server-side checks:
+From your own machine, check:
 
 ```bash
-curl -I https://hub.example.com
-curl -I https://hub.example.com/hub
-curl -I https://hub.example.com/api/v1/health
+curl -I https://scamscreener.creepans.net
+curl -I https://scamscreener.creepans.net/hub
+curl -I https://scamscreener.creepans.net/api/v1/lowestbin
+curl -I https://scamscreener.creepans.net/api/v1/health
+curl -I https://scamscreener.creepans.net/api/v1/metrics
 ```
 
 Expected:
 
-- the main site returns `200` or `303`
-- public `health` should be blocked by Caddy from non-private networks
+- main site responds with `200`, `303`, or similar valid app response
+- `lowestbin` responds with `200`
+- `health` and `metrics` respond with `403` from public networks
 
-## 10) Important MariaDB Password Rule
+## 13) Bootstrap The First Admin
 
-The MariaDB container only applies these on first initialization:
+If `TRAINING_HUB_ADMIN_USERNAMES` was not set, the first allowed admin username is:
 
-- `TRAINING_HUB_DB_PASSWORD`
-- `TRAINING_HUB_DB_ROOT_PASSWORD`
-
-If you change them later, the old `mariadb_data` volume still keeps the old credentials.
-
-Fresh server and no data to keep:
-
-```bash
-docker compose down -v
-docker compose up -d --build
+```text
+admin
 ```
 
-Existing data must stay:
+If you set `TRAINING_HUB_ADMIN_USERNAMES`, the first account must use one of those names.
 
-- update the MariaDB users manually
-- or use the production promotion script, which already synchronizes the app user password
+After startup:
 
-## 11) Promote To Real Production
+1. open `https://scamscreener.creepans.net/hub`
+2. register the first admin account
+3. log in
+4. complete the admin MFA flow via email
 
-Once staging is working, run the one-time production switch:
+## 14) Basic Post-Deploy Checks
+
+After the first admin works, verify:
+
+1. login works
+2. admin MFA mail arrives
+3. password-reset mail arrives
+4. uploads work
+5. `lowestbin` works publicly
+6. admin area loads
+7. backup creation works
+
+## 15) Updating The Server
+
+When you want to deploy a new version with FTP/SFTP:
+
+1. upload the changed repository files to `/srv/scamscreener`
+2. do not overwrite `.env.production` unless you intentionally changed it
+3. on the server run:
 
 ```bash
-chmod +x scripts/promote_to_production.sh
-./scripts/promote_to_production.sh
+cd /srv/scamscreener
+python3 scripts/update.py
 ```
 
-What it does:
-
-- backs up `.env`
-- generates an internal CA for MariaDB
-- generates a MariaDB server certificate for host `mariadb`
-- writes MariaDB TLS config under `ops/mariadb/conf.d/ssl.cnf`
-- switches `.env` to `TRAINING_HUB_ENV=production`
-- enables verified MariaDB TLS in the app config
-- forces production security flags
-- syncs the MariaDB app user password with the current `.env`
-- restarts the production stack
-
-After it finishes, verify:
+If you only changed static configuration and want to skip base-image pulls:
 
 ```bash
-docker compose ps
-docker compose logs --tail=100 mariadb
-docker compose logs --tail=100 training-hub
-docker compose logs --tail=100 caddy
+cd /srv/scamscreener
+python3 scripts/update.py --skip-pull
 ```
 
-At this point the app should be in true `production` mode, not only `staging`.
+## 16) Full Reset For A Clean Restart
 
-## 12) Post-Production Checks
-
-Run these checks after promotion:
+If you intentionally want to delete the full deployment state and start from zero, run:
 
 ```bash
-curl -I https://hub.example.com
-curl -I https://hub.example.com/hub
-curl -I https://hub.example.com/api/v1/health
-curl -I https://hub.example.com/api/v1/metrics
+cd /srv/scamscreener
+python3 scripts/reset.py
 ```
 
-Expected:
+The script asks for the exact confirmation phrase before it proceeds. It removes:
 
-- main pages work over HTTPS
-- `health` and `metrics` are blocked publicly
+- containers in the production compose stack
+- Docker volumes for app data
+- Docker volumes for Caddy certificates and config
 
-Also test in the browser:
-
-1. admin login
-2. MFA delivery
-3. password reset flow
-4. upload flow
-5. backup creation from admin area
-
-## 13) Day-2 Operations
-
-### Update The App
+Optional full local image cleanup:
 
 ```bash
-cd /srv/scamscreener/app
-git pull
-docker compose up -d --build
+cd /srv/scamscreener
+python3 scripts/reset.py --prune-images
 ```
 
-### Watch Logs
+If you want to skip the interactive prompt explicitly:
 
 ```bash
-docker compose logs -f training-hub
+cd /srv/scamscreener
+python3 scripts/reset.py --yes --prune-images
+```
+
+After a reset, upload the desired release if needed and start again with:
+
+```bash
+cd /srv/scamscreener
+python3 scripts/update.py
+```
+
+## 17) Watching Logs
+
+```bash
+docker compose logs -f scamscreener
 docker compose logs -f caddy
-docker compose logs -f mariadb
 ```
 
-### Restart Services
+## 18) Restarting Services
 
 ```bash
-docker compose restart training-hub
+docker compose restart scamscreener
 docker compose restart caddy
-docker compose restart mariadb
 ```
 
-### Stop Everything
+## 19) Stopping Services
 
 ```bash
 docker compose down
 ```
 
-Do not use `docker compose down -v` unless you intentionally want to delete the MariaDB volume.
+Do not add `-v` unless you intentionally want to delete the persistent data volumes.
 
-## 14) Backups
+## 20) Backups
 
-There are two layers:
+You should keep two layers of backups:
 
-- application-level backups from the admin UI
-- infrastructure-level backups of the server and Docker volumes
+1. application-level backups from the admin UI
+2. Docker volume / host-level backups
 
-Recommended:
+Relevant volumes:
 
-1. use the admin backup function regularly
-2. snapshot or back up the host directory and Docker volumes
-3. store backups off-server
+- `scamscreener_data`
+- `caddy_data`
+- `caddy_config`
 
-Important directories:
+Relevant app data inside the app container:
 
-- repo: `/srv/scamscreener/app`
-- app data: `/srv/scamscreener/app/data`
-- generated MariaDB TLS files: `/srv/scamscreener/app/ops/mariadb/ssl`
+- `/app/data`
 
-## 15) Rollback
+## 21) Rollback
 
-If a deploy breaks after a code update:
+Because you deploy via FTP/SFTP, rollback means re-uploading the last known-good application files and redeploying.
 
-```bash
-cd /srv/scamscreener/app
-git log --oneline -n 5
-git checkout KNOWN_GOOD_COMMIT
-docker compose up -d --build
-```
+Recommended rollback workflow:
 
-If the production promotion changed `.env` and you need to revert:
+1. keep a dated local archive of each uploaded release
+2. if a new release breaks, re-upload the last known-good release files
+3. run:
 
 ```bash
-ls -1 .env.pre-production.*.bak
-cp .env.pre-production.YYYYMMDDTHHMMSSZ.bak .env
-docker compose up -d --build
+cd /srv/scamscreener
+python3 scripts/update.py --skip-pull
 ```
 
-## 16) Troubleshooting
+Because app state is kept in Docker volumes, rolling back code does not remove your application data.
 
-### `Access denied for user 'scamscreener'`
-
-Most likely:
-
-- `.env` password changed after MariaDB volume initialization
-- old `mariadb_data` volume still exists
-
-Fix:
-
-- fresh server: `docker compose down -v` and start again
-- existing data: reset the MariaDB user password manually or rerun the synchronization path
+## 22) Troubleshooting
 
 ### Caddy does not get a certificate
 
 Check:
 
-- domain resolves to the server
-- ports `80` and `443` are open
-- no other service is using those ports
-- cloud firewall/provider firewall allows inbound `80/443`
+- DNS points to the server
+- ports `80` and `443` are reachable
+- no other service is already using `80` or `443`
+- your cloud firewall allows inbound `80/443`
 
-### `training-hub` crashes on startup
+### The app redirects forever to HTTPS
+
+Check:
+
+- `TRAINING_HUB_PUBLIC_BASE_URL` uses `https://`
+- Caddy is running
+- you did not remove the internal trusted proxy configuration
+
+### SMTP or MFA errors on startup
+
+Check:
+
+- `TRAINING_HUB_SMTP_HOST`
+- `TRAINING_HUB_SMTP_PORT`
+- `TRAINING_HUB_SMTP_USERNAME`
+- `TRAINING_HUB_SMTP_PASSWORD`
+- `TRAINING_HUB_SMTP_FROM_EMAIL`
+- only one of `TRAINING_HUB_SMTP_USE_TLS` or `TRAINING_HUB_SMTP_USE_STARTTLS` is `true`
+
+### First admin registration is blocked
+
+Check:
+
+- `TRAINING_HUB_ADMIN_USERNAMES` contains the intended bootstrap username
+- if you left it unset, use username `admin`
+
+### `python3 scripts/update.py` fails before startup
+
+Run:
+
+```bash
+cd /srv/scamscreener
+bash scripts/preflight.sh
+```
+
+This will usually tell you exactly which required setting is missing or inconsistent.
+
+### `docker compose` fails after a partial FTP upload
+
+Most likely:
+
+- not all files were uploaded
+- the upload created an extra nested directory
+- `Caddyfile` or `docker-compose.yml` was not replaced consistently
 
 Check:
 
 ```bash
-docker compose logs --tail=200 training-hub
+cd /srv/scamscreener
+ls -la
+find scripts -maxdepth 1 -type f
 ```
 
-Common causes:
+Then re-upload the full release and run:
 
-- wrong SMTP settings
-- wrong MariaDB credentials
-- `TRAINING_HUB_ALLOWED_HOSTS` not matching the public domain
-- trying to run `production` before MariaDB TLS is actually in place
+```bash
+bash scripts/preflight.sh
+```
 
-## 17) Recommended Final State
+## 23) Final Expected State
 
-For a correctly deployed production server, the final setup should look like this:
+For a healthy production server, the final state should be:
 
-- `Caddy` serves the public domain on `80/443`
-- only `caddy` is publicly exposed
-- `mariadb` and `training-hub` stay internal
-- app runs with `TRAINING_HUB_ENV=production`
-- `TRAINING_HUB_ENFORCE_HTTPS=true`
+- the Ubuntu host exposes only `80/443`
+- Caddy terminates TLS publicly
+- the application container is not exposed directly
+- `TRAINING_HUB_ENV=production`
 - admin MFA is enabled
-- password reset mail is enabled
-- verified TLS is enabled between app and MariaDB
-- `health` and `metrics` are not publicly reachable
+- password-reset mail is enabled
+- `lowestbin` is public
+- `health` and `metrics` are blocked publicly
