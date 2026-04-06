@@ -21,6 +21,7 @@ This repository contains two separate applications in one repo:
 - Admin view over users, basic case list, training runs, and audit log
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN endpoint at `/api/v1/lowestbin`
+- Public Bazaar endpoint at `/api/v1/bazaar`
 - Admin button to:
   - build one merged training bundle from all accepted uploads
 - Audit log also records upload and bundle downloads
@@ -84,6 +85,7 @@ Open:
 - `http://localhost:8080` (Training Hub landing page)
 - `http://localhost:8080/hub` (redirects to login/dashboard)
 - `http://localhost:8081/api/v1/lowestbin` (MarketGuard Lowest BIN JSON)
+- `http://localhost:8081/api/v1/bazaar` (MarketGuard Bazaar summary JSON)
 
 ## 3) Docker Deploy
 
@@ -266,6 +268,7 @@ Supply-chain checks:
 
 - `GET /api/v1/health`
 - `GET /api/v1/lowestbin`
+- `GET /api/v1/bazaar`
 - `POST /api/v1/client/auth/login`
 - `POST /api/v1/client/uploads`
 - `POST /api/v1/client/auth/logout`

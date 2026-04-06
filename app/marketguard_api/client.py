@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 import httpx
 
 from .config import MarketGuardSettings
 from .exceptions import HypixelRateLimitError, HypixelSnapshotDriftError, HypixelUpstreamError
-from .models import AuctionPage, AuctionSnapshot
+from .models import AuctionPage, AuctionSnapshot, BazaarProductSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -147,3 +148,124 @@ class HypixelAuctionClient:
             last_updated=last_updated,
             auctions=auctions,
         )
+
+
+class HypixelBazaarClient:
+    def __init__(
+        self,
+        settings: MarketGuardSettings,
+        client: httpx.AsyncClient | None = None,
+        close_client: bool | None = None,
+    ) -> None:
+        self._settings = settings
+        self._client = client
+        self._close_client = (client is None) if close_client is None else close_client
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._settings.hypixel_api_base_url,
+            follow_redirects=False,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self._settings.http_user_agent,
+            },
+            timeout=httpx.Timeout(self._settings.request_timeout_seconds),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+        )
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._close_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def fetch_snapshot(self) -> BazaarProductSnapshot:
+        client = self._get_client()
+        try:
+            response = await client.get("/skyblock/bazaar")
+        except httpx.TimeoutException as exc:
+            raise HypixelUpstreamError("Timed out while fetching Hypixel bazaar data.") from exc
+        except httpx.HTTPError as exc:
+            raise HypixelUpstreamError("Failed to fetch Hypixel bazaar data.") from exc
+
+        retry_after_header = str(response.headers.get("Retry-After", "")).strip()
+        retry_after = int(retry_after_header) if retry_after_header.isdigit() else None
+        if response.status_code == 429:
+            raise HypixelRateLimitError("Hypixel API rate limited the request.", retry_after_seconds=retry_after)
+        if response.is_error:
+            raise HypixelUpstreamError(f"Hypixel API returned HTTP {response.status_code} for bazaar data.")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HypixelUpstreamError("Hypixel API returned invalid JSON.") from exc
+
+        return self._parse_payload(payload)
+
+    def _parse_payload(self, payload: dict[str, Any]) -> BazaarProductSnapshot:
+        if payload.get("success") is not True:
+            cause = str(payload.get("cause", "unknown upstream error")).strip() or "unknown upstream error"
+            raise HypixelUpstreamError(f"Hypixel API reported an unsuccessful response: {cause}.")
+
+        try:
+            last_updated = int(payload.get("lastUpdated"))
+        except (TypeError, ValueError) as exc:
+            raise HypixelUpstreamError("Hypixel API returned invalid bazaar metadata.") from exc
+
+        products_raw = payload.get("products")
+        if not isinstance(products_raw, dict):
+            raise HypixelUpstreamError("Hypixel API returned an invalid bazaar payload.")
+
+        products: dict[str, dict[str, Any]] = {}
+        for product_id, product_payload in products_raw.items():
+            if not isinstance(product_id, str) or not product_id:
+                continue
+            if not isinstance(product_payload, dict):
+                continue
+            quick_status = product_payload.get("quick_status")
+            if not isinstance(quick_status, dict):
+                continue
+
+            buy_price = _parse_finite_number(quick_status.get("buyPrice"))
+            sell_price = _parse_finite_number(quick_status.get("sellPrice"))
+            buy_volume = _parse_non_negative_int(quick_status.get("buyVolume"))
+            sell_volume = _parse_non_negative_int(quick_status.get("sellVolume"))
+            buy_moving_week = _parse_non_negative_int(quick_status.get("buyMovingWeek"))
+            sell_moving_week = _parse_non_negative_int(quick_status.get("sellMovingWeek"))
+            if None in {buy_price, sell_price, buy_volume, sell_volume, buy_moving_week, sell_moving_week}:
+                continue
+
+            products[product_id] = {
+                "buyPrice": buy_price,
+                "sellPrice": sell_price,
+                "buyVolume": buy_volume,
+                "sellVolume": sell_volume,
+                "buyMovingWeek": buy_moving_week,
+                "sellMovingWeek": sell_moving_week,
+            }
+
+        return BazaarProductSnapshot(last_updated=last_updated, products=products)
+
+
+def _parse_finite_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _parse_non_negative_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < 0:
+        return None
+    return parsed

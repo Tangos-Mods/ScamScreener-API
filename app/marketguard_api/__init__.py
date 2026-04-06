@@ -4,6 +4,7 @@ __all__ = [
     "app",
     "create_marketguard_app",
     "register_marketguard_routes",
+    "BazaarService",
     "LowestBinService",
     "MarketGuardSettings",
 ]
@@ -18,6 +19,10 @@ def __getattr__(name: str):
         from .service import LowestBinService
 
         return LowestBinService
+    if name == "BazaarService":
+        from .service import BazaarService
+
+        return BazaarService
     if name == "register_marketguard_routes":
         from .routes import register_marketguard_routes
 

@@ -21,6 +21,12 @@ class AuctionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class BazaarProductSnapshot:
+    last_updated: int
+    products: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
 class LowestBinSnapshot:
     generated_at: datetime
     snapshot_last_updated: int
@@ -28,4 +34,12 @@ class LowestBinSnapshot:
     total_auctions: int
     total_bin_auctions: int
     items: dict[str, float]
+    is_stale: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BazaarSnapshot:
+    generated_at: datetime
+    snapshot_last_updated: int
+    products: dict[str, dict[str, float | int]]
     is_stale: bool = False

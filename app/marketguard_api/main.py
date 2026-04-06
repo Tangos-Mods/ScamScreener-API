@@ -5,12 +5,13 @@ from fastapi import FastAPI
 from .config import MarketGuardSettings
 from .rate_limit import InMemoryRateLimiter
 from .routes import register_marketguard_routes
-from .service import LowestBinService
+from .service import BazaarService, LowestBinService
 
 
 def create_marketguard_app(
     settings: MarketGuardSettings | None = None,
     service: LowestBinService | None = None,
+    bazaar_service: BazaarService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="MarketGuard API", version="1.0.0")
     app.state.rate_limiter = InMemoryRateLimiter()
@@ -23,5 +24,5 @@ def create_marketguard_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
-    register_marketguard_routes(app, settings=settings, service=service)
+    register_marketguard_routes(app, settings=settings, service=service, bazaar_service=bazaar_service)
     return app
