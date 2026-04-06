@@ -116,6 +116,7 @@ def _ingest_cases_from_upload(
     now = _now_utc_iso()
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
+        _upsert_upload_case_entries(connection, int(upload_id), parsed_cases)
         for payload in parsed_cases:
             case_id = str(payload.get("caseId", "")).strip()
             if not case_id:
@@ -165,6 +166,60 @@ def _ingest_cases_from_upload(
                 updated += 1
         connection.commit()
     return inserted, updated
+
+
+def _upsert_upload_case_entries(
+    connection,
+    upload_id: int,
+    parsed_cases: list[dict[str, Any]],
+) -> None:
+    for payload in parsed_cases:
+        case_id = str(payload.get("caseId", "")).strip()
+        if not case_id:
+            raise HTTPException(status_code=400, detail="Case payload is missing caseId.")
+
+        label, outcome, tags = _extract_case_fields(payload)
+        existing = connection.execute(
+            "SELECT id FROM upload_cases WHERE upload_id = ? AND case_id = ?",
+            (int(upload_id), case_id),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO upload_cases (
+                    upload_id,
+                    case_id,
+                    label,
+                    outcome,
+                    tag_ids_json,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(upload_id),
+                    case_id,
+                    label,
+                    outcome,
+                    _json_dumps(tags),
+                    _json_dumps(payload),
+                ),
+            )
+            continue
+
+        connection.execute(
+            """
+            UPDATE upload_cases
+            SET label = ?, outcome = ?, tag_ids_json = ?, payload_json = ?
+            WHERE id = ?
+            """,
+            (
+                label,
+                outcome,
+                _json_dumps(tags),
+                _json_dumps(payload),
+                int(existing["id"]),
+            ),
+        )
 
 
 def _global_stats(database_path: Path) -> dict[str, int]:

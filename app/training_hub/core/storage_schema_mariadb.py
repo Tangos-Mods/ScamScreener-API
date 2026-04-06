@@ -107,6 +107,22 @@ def _init_database_mariadb(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS upload_cases (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                upload_id BIGINT NOT NULL,
+                case_id VARCHAR(128) NOT NULL,
+                label VARCHAR(128) NOT NULL DEFAULT '',
+                outcome VARCHAR(64) NOT NULL DEFAULT '',
+                tag_ids_json LONGTEXT NOT NULL,
+                payload_json LONGTEXT NOT NULL,
+                FOREIGN KEY (upload_id) REFERENCES uploads(id),
+                UNIQUE KEY idx_upload_cases_upload_case (upload_id, case_id),
+                KEY idx_upload_cases_case_id (case_id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
                 created_at VARCHAR(40) NOT NULL,
@@ -168,6 +184,28 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 updated_at VARCHAR(40) NOT NULL,
                 PRIMARY KEY (bucket_key, bucket_start),
                 KEY idx_rate_limit_updated_at (updated_at)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_export_requests (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                requested_email VARCHAR(254) NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                requested_from_ip VARCHAR(80) NOT NULL DEFAULT '',
+                request_user_agent VARCHAR(300) NOT NULL DEFAULT '',
+                completed_at VARCHAR(40),
+                failed_at VARCHAR(40),
+                delivery_error VARCHAR(300) NOT NULL DEFAULT '',
+                archive_sha256 CHAR(64) NOT NULL DEFAULT '',
+                size_bytes BIGINT NOT NULL DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                KEY idx_data_export_requests_user (user_id),
+                KEY idx_data_export_requests_status (status),
+                KEY idx_data_export_requests_created_at (created_at)
             )
             """
         )

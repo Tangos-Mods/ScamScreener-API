@@ -44,6 +44,7 @@ def _build_email_message(
     plain_text: str,
     html_template_name: str,
     html_context: dict[str, str],
+    attachments: list[dict[str, object]] | None = None,
 ) -> EmailMessage:
     message = EmailMessage()
     message["From"] = settings.smtp_from_email
@@ -51,6 +52,13 @@ def _build_email_message(
     message["Subject"] = subject
     message.set_content(plain_text)
     message.add_alternative(_render_email_html(html_template_name, **html_context), subtype="html")
+    for attachment in attachments or []:
+        message.add_attachment(
+            bytes(attachment.get("content", b"")),
+            maintype=str(attachment.get("maintype", "application")),
+            subtype=str(attachment.get("subtype", "octet-stream")),
+            filename=str(attachment.get("filename", "attachment.bin")),
+        )
     return message
 
 
@@ -138,6 +146,49 @@ def send_admin_mfa_email(
             "expires_at": formatted_expires_at,
             "support_email": settings.smtp_from_email,
         },
+    )
+
+    _send_message(settings, message)
+
+
+def send_account_data_export_email(
+    settings: TrainingHubSettings,
+    recipient_email: str,
+    requested_at: str,
+    archive_name: str,
+    archive_bytes: bytes,
+    size_bytes: int,
+) -> None:
+    subject = "ScamScreener Account Data Export"
+    formatted_requested_at = _format_utc_timestamp(requested_at)
+    message = _build_email_message(
+        settings,
+        recipient_email=recipient_email,
+        subject=subject,
+        plain_text=(
+            "Your ScamScreener account data export is attached to this email.\n\n"
+            f"Requested at (UTC): {formatted_requested_at}\n"
+            f"Attachment: {archive_name} ({int(size_bytes)} bytes)\n\n"
+            "For security reasons, secret hashes, internal storage paths, and full audit-log detail text are not included."
+        ),
+        html_template_name="account_data_export_email.html",
+        html_context={
+            "subject": subject,
+            "site_label": _site_label(settings),
+            "site_url": settings.public_base_url,
+            "requested_at": formatted_requested_at,
+            "archive_name": archive_name,
+            "size_bytes": str(int(size_bytes)),
+            "support_email": settings.smtp_from_email,
+        },
+        attachments=[
+            {
+                "content": archive_bytes,
+                "maintype": "application",
+                "subtype": "zip",
+                "filename": archive_name,
+            }
+        ],
     )
 
     _send_message(settings, message)

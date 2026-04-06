@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#0b1220;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:#e5edf8;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+    Your ScamScreener account data export is attached.
+</div>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color:#0b1220;">
+    <tr>
+        <td align="center" style="padding:32px 16px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:640px;">
+                <tr>
+                    <td style="padding:0 0 16px 0;color:#9fb3cf;font-size:12px;letter-spacing:0.16em;text-transform:uppercase;">
+                        ScamScreener
+                    </td>
+                </tr>
+                <tr>
+                    <td style="background:linear-gradient(180deg,#172033,#111827);border:1px solid #2b3952;border-radius:20px;padding:32px;box-shadow:0 18px 50px rgba(0,0,0,0.35);">
+                        <h1 style="margin:0 0 12px 0;font-size:28px;line-height:1.15;color:#f8fbff;">Account Data Export</h1>
+                        <p style="margin:0 0 18px 0;font-size:16px;line-height:1.65;color:#c8d5e8;">
+                            Your requested ScamScreener account data export is attached to this email.
+                        </p>
+                        <div style="margin:0 0 22px 0;padding:18px 20px;background-color:#0d1524;border:1px solid #243149;border-radius:16px;">
+                            <p style="margin:0 0 8px 0;font-size:14px;line-height:1.65;color:#9fb3cf;">Requested at (UTC)</p>
+                            <p style="margin:0 0 16px 0;font-size:18px;line-height:1.4;color:#ffffff;font-weight:700;">{{ requested_at }}</p>
+                            <p style="margin:0 0 8px 0;font-size:14px;line-height:1.65;color:#9fb3cf;">Attachment</p>
+                            <p style="margin:0;font-size:16px;line-height:1.5;color:#f3f7fe;">
+                                <strong>{{ archive_name }}</strong> ({{ size_bytes }} bytes)
+                            </p>
+                        </div>
+                        <p style="margin:0;font-size:14px;line-height:1.65;color:#c8d5e8;">
+                            For security reasons, secret hashes, internal server paths, training-bundle contents, and full audit-log detail
+                            text are intentionally redacted from self-service exports.
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:18px 6px 0 6px;font-size:12px;line-height:1.7;color:#8ea0bb;">
+                        Sent by {{ site_label }}.
+                        {% if site_url %}
+                        <a href="{{ site_url }}" style="color:#d9e5f6;text-decoration:none;">Open ScamScreener</a>.
+                        {% endif %}
+                        Contact: {{ support_email }}.
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:10px 6px 0 6px;font-size:11px;line-height:1.7;color:#70819c;">
+                        ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang.
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+</table>
+</body>
+</html>

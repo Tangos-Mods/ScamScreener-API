@@ -16,6 +16,8 @@ This repository contains two separate applications in one repo:
 - Player dashboard with own contribution stats
 - Upload form for `training-cases-v2.jsonl` files
 - Per-account upload history with download links
+- Self-service upload deletion, full contribution purge, and account deletion
+- Self-service account data export workflow delivered by email
 - Admin view over users, basic case list, training runs, and audit log
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN endpoint at `/api/v1/lowestbin`
@@ -264,6 +266,50 @@ Supply-chain checks:
 
 - `GET /api/v1/health`
 - `GET /api/v1/lowestbin`
+- `POST /api/v1/client/auth/login`
+- `POST /api/v1/client/uploads`
+- `POST /api/v1/client/auth/logout`
 
 `/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
 `/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices.
+
+The client upload API is meant for non-browser clients such as a Minecraft mod. It uses the same account database and server-side sessions as the web app, but the client authenticates with a Bearer session token over HTTPS instead of cookies. Do not add custom application-layer crypto on top of it unless you have a concrete threat model for that; the transport encryption here is TLS.
+
+Example login:
+
+```bash
+curl -sS https://scamscreener.creepans.net/api/v1/client/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"usernameOrEmail":"alice","password":"supersecret"}'
+```
+
+Example upload:
+
+```bash
+curl -sS https://scamscreener.creepans.net/api/v1/client/uploads \
+  -X POST \
+  -H "Authorization: Bearer YOUR_SESSION_TOKEN" \
+  -H "Content-Type: application/x-ndjson" \
+  -H "X-ScamScreener-Filename: training-cases-v2.jsonl" \
+  --data-binary @training-cases-v2.jsonl
+```
+
+Example logout:
+
+```bash
+curl -sS https://scamscreener.creepans.net/api/v1/client/auth/logout \
+  -X POST \
+  -H "Authorization: Bearer YOUR_SESSION_TOKEN"
+```
+
+Notes:
+
+- Admin accounts are intentionally blocked from API login when `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`; use a non-admin uploader account for the Minecraft client.
+- `/api/v1/client/auth/login` requires `application/json`.
+- `/api/v1/client/uploads` accepts the raw JSONL body and applies the same validation, quotas, deduplication, and audit logging as the dashboard upload form.
+- Full mod-side integration guidance: `MINECRAFT_MOD_INTEGRATION.md`
+
+## License
+
+This repository is licensed under the GNU Affero General Public License v3.0 only.
+SPDX identifier: `AGPL-3.0-only`

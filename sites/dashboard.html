@@ -16,6 +16,7 @@
     <div class="stats-grid">
         <div class="stat glass-soft"><span>My Uploads</span><strong>{{ uploads|length }}</strong></div>
         <div class="stat glass-soft"><span>My Cases</span><strong>{{ total_cases }}</strong></div>
+        <div class="stat glass-soft"><span>Export Requests</span><strong>{{ data_export_requests|length }}</strong></div>
     </div>
 </section>
 
@@ -40,7 +41,7 @@
             <th>Cases</th>
             <th>Size</th>
             <th>SHA-256</th>
-            <th>Download</th>
+            <th>Actions</th>
         </tr>
         </thead>
         <tbody>
@@ -53,7 +54,15 @@
                     <td>{{ row.case_count }}</td>
                     <td>{{ row.size_bytes }} B</td>
                     <td><code>{{ row.payload_sha256[:16] }}...</code></td>
-                    <td><a href="/dashboard/uploads/{{ row.id }}/download">download</a></td>
+                    <td>
+                        <div class="table-actions">
+                            <a href="/dashboard/uploads/{{ row.id }}/download">download</a>
+                            <form method="post" action="/dashboard/uploads/{{ row.id }}/delete" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="button-small delete-button">Delete</button>
+                            </form>
+                        </div>
+                    </td>
                 </tr>
             {% endfor %}
         {% else %}
@@ -61,6 +70,62 @@
         {% endif %}
         </tbody>
     </table>
+</section>
+
+<section class="glass card">
+    <h2>Data Export</h2>
+    <p>Request a ZIP export of the account data currently stored for you. The archive is sent to <code>{{ current_user.email }}</code>.</p>
+    {% if data_export_requests %}
+        <table>
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Requested</th>
+                <th>Status</th>
+                <th>Finished</th>
+                <th>Size</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for row in data_export_requests %}
+                <tr>
+                    <td>{{ row.id }}</td>
+                    <td>{{ row.created_at|datetime_utc }}</td>
+                    <td>{{ row.status }}</td>
+                    <td>
+                        {% if row.completed_at %}
+                            {{ row.completed_at|datetime_utc }}
+                        {% elif row.failed_at %}
+                            {{ row.failed_at|datetime_utc }}
+                        {% else %}
+                            <span class="muted">pending</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if row.size_bytes %}
+                            {{ row.size_bytes }} B
+                        {% elif row.delivery_error %}
+                            <span class="muted">{{ row.delivery_error }}</span>
+                        {% else %}
+                            <span class="muted">-</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+    {% if email_exports_enabled %}
+        <form method="post" action="/dashboard/data-export/request" class="auth-form stacked-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>Current Password</label>
+            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
+            <button type="submit">Email My Data Export</button>
+        </form>
+        <p class="muted">You can request another export after {{ data_export_cooldown_minutes }} minutes.</p>
+    {% else %}
+        <div class="message error">Account data export email is currently unavailable because SMTP is not configured.</div>
+    {% endif %}
 </section>
 
 <section class="glass card">
@@ -122,5 +187,33 @@
         <input type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
         <button type="submit">Update Password</button>
     </form>
+</section>
+
+<section class="detail-grid">
+    <article class="glass card danger-card">
+        <h2>Delete Uploads And Cases</h2>
+        <p>Delete all uploads from your account and rebuild any affected cases from remaining uploads owned by other users.</p>
+        <form method="post" action="/dashboard/data/purge" class="auth-form stacked-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>Type <code>ERASE MY DATA</code> to confirm</label>
+            <input type="text" name="confirmation" maxlength="64" autocomplete="off" required>
+            <label>Current Password</label>
+            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
+            <button type="submit" class="delete-button">Delete My Uploads And Cases</button>
+        </form>
+    </article>
+
+    <article class="glass card danger-card">
+        <h2>Delete Account</h2>
+        <p>Permanently delete your account, sessions, uploads, and account-linked records. This cannot be undone.</p>
+        <form method="post" action="/dashboard/account/delete" class="auth-form stacked-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <label>Type <code>DELETE MY ACCOUNT</code> to confirm</label>
+            <input type="text" name="confirmation" maxlength="64" autocomplete="off" required>
+            <label>Current Password</label>
+            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
+            <button type="submit" class="delete-button">Delete My Account</button>
+        </form>
+    </article>
 </section>
 {% endblock %}

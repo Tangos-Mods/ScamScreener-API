@@ -257,6 +257,13 @@ p {
     margin-top: 10px;
 }
 
+.table-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
 .message {
     border-radius: 12px;
     padding: 9px 11px;
@@ -285,6 +292,10 @@ p {
 .upload-form {
     display: grid;
     gap: 10px;
+}
+
+.stacked-form {
+    margin-top: 12px;
 }
 
 label {
@@ -369,6 +380,10 @@ button:hover,
     transform: translateY(-1px);
 }
 
+.danger-card {
+    border-color: rgba(252, 129, 129, 0.24);
+}
+
 a {
     color: #f1d8de;
     text-decoration-color: rgba(193, 85, 104, 0.35);
@@ -431,6 +446,26 @@ tbody tr:hover {
 .muted {
     color: #96a4b8;
     font-size: 0.85rem;
+}
+
+.status-indicator {
+    display: inline-flex;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow:
+        0 0 0 2px rgba(9, 13, 21, 0.42),
+        inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    vertical-align: middle;
+}
+
+.status-indicator-yes {
+    background: radial-gradient(circle at 35% 35%, #bff7df 0%, #50d89a 38%, #229a67 100%);
+}
+
+.status-indicator-no {
+    background: radial-gradient(circle at 35% 35%, #ffd2da 0%, #f06d83 38%, #a33b4b 100%);
 }
 
 .auth-switch {

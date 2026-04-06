@@ -118,6 +118,8 @@ class TrainingHubSettings:
     max_upload_cases_per_day_per_user: int = 20_000
     max_uploads_per_day_per_ip: int = 120
     global_upload_storage_cap_bytes: int = 5 * 1024 * 1024 * 1024
+    data_export_cooldown_minutes: int = 60
+    data_export_max_archive_bytes: int = 20 * 1024 * 1024
     retention_sessions_days: int = 30
     retention_password_reset_days: int = 7
     retention_audit_logs_days: int = 180
@@ -161,6 +163,10 @@ class TrainingHubSettings:
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def outbound_email_enabled(self) -> bool:
+        return bool(self.smtp_host.strip() and self.smtp_from_email.strip())
 
     @property
     def site_privacy_contact_display(self) -> str:
@@ -242,6 +248,13 @@ class TrainingHubSettings:
             5 * 1024 * 1024 * 1024,
             10 * 1024 * 1024,
             200 * 1024 * 1024 * 1024,
+        )
+        data_export_cooldown_minutes = _env_int("TRAINING_HUB_DATA_EXPORT_COOLDOWN_MINUTES", 60, 1, 10_080)
+        data_export_max_archive_bytes = _env_int(
+            "TRAINING_HUB_DATA_EXPORT_MAX_ARCHIVE_BYTES",
+            20 * 1024 * 1024,
+            1 * 1024 * 1024,
+            100 * 1024 * 1024,
         )
         retention_sessions_days = _env_int("TRAINING_HUB_RETENTION_SESSIONS_DAYS", 30, 1, 3650)
         retention_password_reset_days = _env_int("TRAINING_HUB_RETENTION_PASSWORD_RESET_DAYS", 7, 1, 3650)
@@ -367,7 +380,7 @@ class TrainingHubSettings:
                     raise ValueError("MariaDB connections must enable TLS in production.")
                 if db_require_tls and not db_ssl_ca and not database_url_raw:
                     raise ValueError("TRAINING_HUB_DB_SSL_CA should be set for verified MariaDB TLS in production.")
-            if (password_reset_send_email or admin_mfa_required) and not (smtp_use_tls or smtp_use_starttls):
+            if (password_reset_send_email or admin_mfa_required or (smtp_host and smtp_from_email)) and not (smtp_use_tls or smtp_use_starttls):
                 raise ValueError("SMTP transport encryption (TLS or STARTTLS) is required in production.")
 
         return cls(
@@ -413,6 +426,8 @@ class TrainingHubSettings:
             max_upload_cases_per_day_per_user=max_upload_cases_per_day_per_user,
             max_uploads_per_day_per_ip=max_uploads_per_day_per_ip,
             global_upload_storage_cap_bytes=global_upload_storage_cap_bytes,
+            data_export_cooldown_minutes=data_export_cooldown_minutes,
+            data_export_max_archive_bytes=data_export_max_archive_bytes,
             retention_sessions_days=retention_sessions_days,
             retention_password_reset_days=retention_password_reset_days,
             retention_audit_logs_days=retention_audit_logs_days,

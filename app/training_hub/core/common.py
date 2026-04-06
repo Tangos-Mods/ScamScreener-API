@@ -62,6 +62,16 @@ def _normalize_user_agent_for_binding(value: str) -> str:
     return (value or "").strip().lower()[:180]
 
 
+def _authorization_bearer_token(value: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        return ""
+    scheme, separator, token = normalized.partition(" ")
+    if separator != " " or scheme.strip().lower() != "bearer":
+        return ""
+    return token.strip()
+
+
 def _is_path_within(base_dir: Path, candidate: Path) -> bool:
     base_resolved = base_dir.resolve(strict=False)
     candidate_resolved = candidate.resolve(strict=False)

@@ -73,6 +73,40 @@ def test_admin_mfa_email_includes_code_card_and_html_alternative(tmp_path: Path,
     assert "Return To Login" in html_body.get_content()
 
 
+def test_account_data_export_email_includes_zip_attachment_and_html_alternative(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    sent_messages = []
+
+    monkeypatch.setattr(mailer, "_send_message", lambda _settings, message: sent_messages.append(message))
+
+    mailer.send_account_data_export_email(
+        settings,
+        recipient_email="alice@example.com",
+        requested_at="2026-03-28T18:00:00Z",
+        archive_name="account-data-export.zip",
+        archive_bytes=b"zip-bytes",
+        size_bytes=9,
+    )
+
+    assert len(sent_messages) == 1
+    message = sent_messages[0]
+    assert message["Subject"] == "ScamScreener Account Data Export"
+
+    plain_body = message.get_body(preferencelist=("plain",))
+    html_body = message.get_body(preferencelist=("html",))
+    attachments = list(message.iter_attachments())
+
+    assert plain_body is not None
+    assert html_body is not None
+    assert "Requested at (UTC): 2026-03-28 18:00 UTC" in plain_body.get_content()
+    assert "account-data-export.zip (9 bytes)" in plain_body.get_content()
+    assert "Account Data Export" in html_body.get_content()
+    assert "account-data-export.zip" in html_body.get_content()
+    assert "2026-03-28 18:00 UTC" in html_body.get_content()
+    assert len(attachments) == 1
+    assert attachments[0].get_filename() == "account-data-export.zip"
+
+
 def test_format_utc_timestamp_normalizes_iso_and_preserves_seconds() -> None:
     assert _format_utc_timestamp("2026-03-28T18:00:00Z") == "2026-03-28 18:00 UTC"
     assert _format_utc_timestamp("2026-03-28T18:00:05Z") == "2026-03-28 18:00:05 UTC"

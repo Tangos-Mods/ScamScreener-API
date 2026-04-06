@@ -1,8 +1,11 @@
 import hashlib
+import io
+import json
 import re
 import sqlite3
 import sys
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +52,368 @@ def test_register_upload_and_dashboard(tmp_path: Path) -> None:
         assert cases == 1
 
 
+def test_user_can_delete_own_upload_and_rebuild_case_from_remaining_upload(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    shared_case_id = "case_shared_0001"
+    alice_payload = _valid_payload(case_id=shared_case_id, label="risk", outcome="review")
+    bob_payload = _valid_payload(case_id=shared_case_id, label="safe", outcome="safe")
+    alice_upload_path = settings.uploads_dir / f"{hashlib.sha256(alice_payload.encode('utf-8')).hexdigest()}.jsonl"
+    bob_upload_path = settings.uploads_dir / f"{hashlib.sha256(bob_payload.encode('utf-8')).hexdigest()}.jsonl"
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("alice-shared.jsonl", alice_payload, "application/x-ndjson")},
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("bob-shared.jsonl", bob_payload, "application/x-ndjson")},
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "alice", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    delete_response = _post_form(client, "/dashboard/uploads/1/delete")
+
+    assert delete_response.status_code == 200
+    assert "Deleted upload #1." in delete_response.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        upload_one = connection.execute("SELECT id FROM uploads WHERE id = 1").fetchone()
+        upload_two = connection.execute("SELECT id FROM uploads WHERE id = 2").fetchone()
+        case_row = connection.execute(
+            "SELECT created_by_user_id, source_upload_id, label, outcome FROM training_cases WHERE case_id = ?",
+            (shared_case_id,),
+        ).fetchone()
+        assert upload_one is None
+        assert upload_two is not None
+        assert case_row == (2, 2, "safe", "safe")
+
+    assert not alice_upload_path.exists()
+    assert bob_upload_path.exists()
+
+
+def test_user_can_purge_own_uploads_and_cases_without_deleting_account(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("case-one.jsonl", _valid_payload(case_id="case_purge_0001"), "application/x-ndjson")},
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("case-two.jsonl", _valid_payload(case_id="case_purge_0002"), "application/x-ndjson")},
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/data/purge",
+        data={"current_password": "supersecret", "confirmation": "ERASE MY DATA"},
+    )
+
+    assert response.status_code == 200
+    assert "Deleted 2 uploads." in response.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        user_row = connection.execute("SELECT id FROM users WHERE username = 'alice'").fetchone()
+        upload_count = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
+        case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
+        upload_case_count = int(connection.execute("SELECT COUNT(*) FROM upload_cases").fetchone()[0])
+        assert user_row is not None
+        assert upload_count == 0
+        assert case_count == 0
+        assert upload_case_count == 0
+
+
+def test_last_admin_cannot_delete_own_account(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/account/delete",
+        data={"current_password": "supersecret", "confirmation": "DELETE MY ACCOUNT"},
+    )
+
+    assert response.status_code == 400
+    assert "last remaining admin account" in response.text
+
+
+def test_user_can_delete_own_account_and_related_records(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    payload = _valid_payload(case_id="case_account_delete_0001")
+    upload_response = _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("delete-me.jsonl", payload, "application/x-ndjson")},
+    )
+    assert upload_response.status_code == 201
+    upload_path = settings.uploads_dir / f"{hashlib.sha256(payload.encode('utf-8')).hexdigest()}.jsonl"
+
+    response = _post_form(
+        client,
+        "/dashboard/account/delete",
+        data={"current_password": "supersecret", "confirmation": "DELETE MY ACCOUNT"},
+    )
+
+    assert response.status_code == 303
+    assert response.headers.get("location") == "/login?notice=Account+deleted"
+
+    with sqlite3.connect(settings.database_path) as connection:
+        bob_row = connection.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()
+        bob_sessions = connection.execute("SELECT COUNT(*) FROM sessions WHERE user_id = 2").fetchone()[0]
+        bob_uploads = connection.execute("SELECT COUNT(*) FROM uploads WHERE user_id = 2").fetchone()[0]
+        audit_rows = connection.execute("SELECT COUNT(*) FROM audit_logs WHERE actor_user_id = 2").fetchone()[0]
+        case_count = connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0]
+        assert bob_row is None
+        assert int(bob_sessions) == 0
+        assert int(bob_uploads) == 0
+        assert int(audit_rows) == 0
+        assert int(case_count) == 0
+
+    assert not upload_path.exists()
+
+
+def test_user_can_request_account_data_export_email(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        smtp_host="mail.local",
+        smtp_port=1025,
+        smtp_from_email="no-reply@scamscreener.local",
+        smtp_use_starttls=False,
+        data_export_cooldown_minutes=60,
+    )
+    delivered: list[tuple[str, str, str, bytes, int]] = []
+
+    def _fake_send_export_email(
+        _settings,
+        recipient_email: str,
+        requested_at: str,
+        archive_name: str,
+        archive_bytes: bytes,
+        size_bytes: int,
+    ) -> None:
+        delivered.append((recipient_email, requested_at, archive_name, archive_bytes, size_bytes))
+
+    monkeypatch.setattr("app.training_hub.core.data_exports.send_account_data_export_email", _fake_send_export_email)
+
+    with TestClient(create_app(settings)) as client:
+        _post_form(
+            client,
+            "/register",
+            data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+            follow_redirects=True,
+        )
+        _post_form(
+            client,
+            "/dashboard/upload",
+            files={"training_file": ("export.jsonl", _valid_payload(case_id="case_export_0001"), "application/x-ndjson")},
+        )
+
+        response = _post_form(
+            client,
+            "/dashboard/data-export/request",
+            data={"current_password": "supersecret"},
+        )
+
+        assert response.status_code == 202
+        assert "Account data export requested." in response.text
+
+        timeout_at = time.time() + 2.0
+        while time.time() < timeout_at and not delivered:
+            time.sleep(0.02)
+
+        assert len(delivered) == 1
+        assert delivered[0][0] == "alice@example.com"
+        assert delivered[0][2].endswith(".zip")
+        assert delivered[0][4] == len(delivered[0][3])
+
+        with zipfile.ZipFile(io.BytesIO(delivered[0][3])) as archive:
+            names = set(archive.namelist())
+            assert "account-data-export.json" in names
+            upload_entries = [name for name in names if name.startswith("uploads/")]
+            assert len(upload_entries) == 1
+            manifest = json.loads(archive.read("account-data-export.json").decode("utf-8"))
+            assert manifest["account"]["username"] == "alice"
+            assert manifest["counts"]["uploads"] == 1
+            assert manifest["trainingCasesCreatedByAccount"][0]["caseId"] == "case_export_0001"
+
+        timeout_at = time.time() + 2.0
+        export_row = None
+        audit_row = None
+        while time.time() < timeout_at:
+            with sqlite3.connect(settings.database_path) as connection:
+                export_row = connection.execute(
+                    "SELECT status FROM data_export_requests WHERE user_id = 1 ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                audit_row = connection.execute(
+                    "SELECT id FROM audit_logs WHERE action = 'account.data_export.sent' LIMIT 1"
+                ).fetchone()
+            if export_row == ("sent",) and audit_row is not None:
+                break
+            time.sleep(0.02)
+
+        assert export_row == ("sent",)
+        assert audit_row is not None
+
+
+def test_api_client_can_login_upload_and_logout(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    login = client.post(
+        "/api/v1/client/auth/login",
+        json={"usernameOrEmail": "alice", "password": "supersecret"},
+    )
+    assert login.status_code == 200
+    login_payload = login.json()
+    assert login_payload["status"] == "ok"
+    token = str(login_payload["sessionToken"])
+    assert token
+
+    upload = client.post(
+        "/api/v1/client/uploads",
+        content=_valid_payload(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/x-ndjson",
+            "X-ScamScreener-Filename": "training-cases-v2.jsonl",
+        },
+    )
+    assert upload.status_code == 201
+    upload_payload = upload.json()
+    assert upload_payload["status"] == "accepted"
+    assert upload_payload["caseCount"] == 1
+    assert upload_payload["insertedCases"] == 1
+    assert upload_payload["updatedCases"] == 0
+
+    logout = client.post(
+        "/api/v1/client/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert logout.status_code == 200
+    assert logout.json() == {"status": "ok"}
+
+    revoked = client.post(
+        "/api/v1/client/uploads",
+        content=_valid_payload(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/x-ndjson"},
+    )
+    assert revoked.status_code == 401
+
+    with sqlite3.connect(settings.database_path) as connection:
+        uploads = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
+        cases = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
+        logout_audit = connection.execute(
+            "SELECT id FROM audit_logs WHERE action = 'auth.api.logout' LIMIT 1"
+        ).fetchone()
+        assert uploads == 1
+        assert cases == 1
+        assert logout_audit is not None
+
+
+def test_api_client_upload_requires_bearer_session(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    response = client.post(
+        "/api/v1/client/uploads",
+        content=_valid_payload(),
+        headers={"Content-Type": "application/x-ndjson"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Bearer session token required."
+
+
+def test_api_client_login_blocks_admin_accounts_when_mfa_is_required(tmp_path: Path) -> None:
+    settings = _settings(
+        tmp_path,
+        admin_mfa_required=True,
+        smtp_host="mail.local",
+        smtp_port=1025,
+        smtp_from_email="no-reply@scamscreener.local",
+        smtp_use_starttls=False,
+    )
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    response = client.post(
+        "/api/v1/client/auth/login",
+        json={"usernameOrEmail": "alice", "password": "supersecret"},
+    )
+
+    assert response.status_code == 403
+    assert "Use a non-admin account for client uploads." in response.json()["detail"]
+
+
 def test_first_registered_user_is_admin(tmp_path: Path) -> None:
     client = TestClient(create_app(_settings(tmp_path)))
 
@@ -87,6 +452,40 @@ def test_admin_page_formats_last_login_timestamp_in_utc(tmp_path: Path) -> None:
     assert admin_page.status_code == 200
     assert "2026-03-28 18:00 UTC" in admin_page.text
     assert "2026-03-28T18:00:00Z" not in admin_page.text
+
+
+def test_admin_page_shows_colored_admin_status_indicators(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "owner", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    admin_page = client.get("/admin")
+
+    assert admin_page.status_code == 200
+    assert 'class="status-indicator status-indicator-yes"' in admin_page.text
+    assert 'class="status-indicator status-indicator-no"' in admin_page.text
+    assert 'aria-label="Admin: yes"' in admin_page.text
+    assert 'aria-label="Admin: no"' in admin_page.text
 
 
 def test_non_admin_cannot_access_admin_page(tmp_path: Path) -> None:
@@ -1769,6 +2168,8 @@ def _settings(
     session_bind_user_agent: bool = False,
     max_upload_downloads_per_minute_per_user: int = 60,
     max_bundle_downloads_per_minute_per_user: int = 30,
+    data_export_cooldown_minutes: int = 60,
+    data_export_max_archive_bytes: int = 20 * 1024 * 1024,
     registration_mode: str = "open",
     registration_invite_code: str = "",
     password_reset_ttl_minutes: int = 30,
@@ -1843,6 +2244,8 @@ def _settings(
         session_bind_user_agent=session_bind_user_agent,
         max_upload_downloads_per_minute_per_user=max_upload_downloads_per_minute_per_user,
         max_bundle_downloads_per_minute_per_user=max_bundle_downloads_per_minute_per_user,
+        data_export_cooldown_minutes=data_export_cooldown_minutes,
+        data_export_max_archive_bytes=data_export_max_archive_bytes,
         max_uploads_per_day_per_user=max_uploads_per_day_per_user,
         retention_sessions_days=retention_sessions_days,
         retention_password_reset_days=retention_password_reset_days,
@@ -1896,11 +2299,15 @@ def _post_form(
     return client.post(path, data=form_data, files=files, headers=request_headers, follow_redirects=follow_redirects)
 
 
-def _valid_payload() -> str:
+def _valid_payload(
+    case_id: str = "case_000001",
+    label: str = "risk",
+    outcome: str = "review",
+) -> str:
     return (
-        '{"format":"training_case_v2","schemaVersion":2,"caseId":"case_000001",'
-        '"caseData":{"label":"risk","messages":[],"caseSignalTagIds":[]},'
-        '"observedPipeline":{"scoreAtCapture":0,"outcomeAtCapture":"review","decidedByStageId":"stage.rule","stageResults":[]},'
+        f'{{"format":"training_case_v2","schemaVersion":2,"caseId":"{case_id}",'
+        f'"caseData":{{"label":"{label}","messages":[],"caseSignalTagIds":[]}},'
+        f'"observedPipeline":{{"scoreAtCapture":0,"outcomeAtCapture":"{outcome}","decidedByStageId":"stage.rule","stageResults":[]}},'
         '"supervision":{"contextStage":{"targetLabel":"risk","signalMessageIndices":[],"contextMessageIndices":[],"excludedMessageIndices":[],"targetSignalTagIds":[]},'
         '"fixedStageCalibrations":[]}}'
     )

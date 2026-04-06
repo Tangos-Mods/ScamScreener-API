@@ -12,12 +12,14 @@ from fastapi.responses import RedirectResponse
 
 from ..infra import db as sqlite3
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TrainingHubSettings
-from .common import _normalize_user_agent_for_binding, _request_client_ip
+from .common import _authorization_bearer_token, _normalize_user_agent_for_binding, _request_client_ip
 from .session_auth_revoke import _revoke_session_by_token
 
 
 def _current_user_from_request(request: Request, settings: TrainingHubSettings) -> dict[str, Any] | None:
     session_token = str(request.cookies.get(SESSION_COOKIE_NAME, "")).strip()
+    if not session_token:
+        session_token = _authorization_bearer_token(str(request.headers.get("authorization", "")))
     if not session_token:
         return None
 

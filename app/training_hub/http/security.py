@@ -45,6 +45,8 @@ def _expected_origin(request: Request, settings: TrainingHubSettings) -> str:
 def _is_same_origin_post(request: Request, settings: TrainingHubSettings) -> bool:
     if request.method.upper() != "POST":
         return True
+    if _is_client_api_post(request):
+        return True
 
     expected = _expected_origin(request, settings)
     if not expected:
@@ -58,6 +60,19 @@ def _is_same_origin_post(request: Request, settings: TrainingHubSettings) -> boo
     if referer_header:
         return _origin_from_header(referer_header) == expected
 
+    return False
+
+
+def _is_client_api_post(request: Request) -> bool:
+    path = str(request.url.path or "").strip()
+    if not path.startswith("/api/v1/client/"):
+        return False
+
+    content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    if path == "/api/v1/client/auth/login":
+        return content_type == "application/json"
+    if path in {"/api/v1/client/auth/logout", "/api/v1/client/uploads"}:
+        return True
     return False
 
 

@@ -103,6 +103,20 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS upload_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id INTEGER NOT NULL,
+                case_id TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                outcome TEXT NOT NULL DEFAULT '',
+                tag_ids_json TEXT NOT NULL DEFAULT '[]',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY (upload_id) REFERENCES uploads(id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
@@ -160,6 +174,25 @@ def _init_database_sqlite(database_path: Path | str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_export_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                requested_email TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_from_ip TEXT NOT NULL DEFAULT '',
+                request_user_agent TEXT NOT NULL DEFAULT '',
+                completed_at TEXT,
+                failed_at TEXT,
+                delivery_error TEXT NOT NULL DEFAULT '',
+                archive_sha256 TEXT NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
         _migrate_audit_log_columns(connection)
@@ -170,6 +203,8 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_training_runs_created_at ON training_runs(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_training_cases_status ON training_cases(status)")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_cases_upload_case ON upload_cases(upload_id, case_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_upload_cases_case_id ON upload_cases(case_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_uploads_source_ip ON uploads(source_ip)")
@@ -179,6 +214,9 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_password_reset_expires ON password_reset_tokens(expires_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_mfa_user ON admin_mfa_challenges(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_admin_mfa_expires ON admin_mfa_challenges(expires_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_user ON data_export_requests(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_status ON data_export_requests(status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_created_at ON data_export_requests(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_updated_at ON rate_limit_hits(updated_at)")
         connection.commit()
 

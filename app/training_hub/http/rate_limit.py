@@ -71,6 +71,8 @@ def _rate_limit_rule(
     if normalized_method == "POST":
         if path == "/login":
             return "auth.login", 12, 300
+        if path == "/api/v1/client/auth/login":
+            return "auth.api-login", 12, 300
         if path == "/admin/mfa":
             return "auth.admin-mfa", 12, 600
         if path == "/forgot-password":
@@ -81,6 +83,10 @@ def _rate_limit_rule(
             return "auth.register", 10, 600
         if path == "/dashboard/upload":
             return "upload.submit", 12, 600
+        if path == "/api/v1/client/uploads":
+            return "upload.api-submit", 12, 600
+        if path == "/api/v1/client/auth/logout":
+            return "auth.api-logout", 30, 600
         if path == "/dashboard/password":
             return "auth.password-change", 10, 600
         if path == "/admin/train":

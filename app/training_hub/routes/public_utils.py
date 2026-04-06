@@ -102,3 +102,14 @@ async def read_upload_bytes(upload_file: UploadFile, max_bytes: int, chunk_size:
     return bytes(payload)
 
 
+async def read_request_bytes(request: Request, max_bytes: int) -> bytes:
+    payload = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        payload.extend(chunk)
+        if len(payload) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File exceeds limit ({max_bytes} bytes).")
+    return bytes(payload)
+
+

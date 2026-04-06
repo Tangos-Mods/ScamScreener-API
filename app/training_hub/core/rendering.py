@@ -22,6 +22,7 @@ from ..infra import db as sqlite3
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TRAINING_FORMAT, TRAINING_SCHEMA_VERSION, TrainingHubSettings
 
 from .admin_ops import _admin_audit_logs, _admin_cases, _admin_runs, _admin_users
+from .data_exports import _user_data_export_requests
 from .recovery import _monitoring_snapshot
 from .session_auth import _user_active_sessions
 from .training_data import _user_uploads
@@ -79,8 +80,11 @@ def _render_dashboard(
         "csrf_token": getattr(request.state, "csrf_token", ""),
         "uploads": uploads,
         "sessions": sessions,
+        "data_export_requests": _user_data_export_requests(settings.database_path, int(user["id"])),
         "total_cases": total_cases,
         "max_mb": settings.max_upload_bytes // (1024 * 1024),
+        "email_exports_enabled": settings.outbound_email_enabled,
+        "data_export_cooldown_minutes": settings.data_export_cooldown_minutes,
     }
     return templates.TemplateResponse(request, "dashboard.html", context, status_code=status_code)
 

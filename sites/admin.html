@@ -75,7 +75,14 @@
                     <td>{{ row.id }}</td>
                     <td>{{ row.username }}</td>
                     <td>{{ row.email }}</td>
-                    <td>{% if row.is_admin == 1 %}yes{% else %}no{% endif %}</td>
+                    <td>
+                        <span
+                            class="status-indicator {% if row.is_admin == 1 %}status-indicator-yes{% else %}status-indicator-no{% endif %}"
+                            role="img"
+                            aria-label="Admin: {% if row.is_admin == 1 %}yes{% else %}no{% endif %}"
+                            title="Admin: {% if row.is_admin == 1 %}yes{% else %}no{% endif %}"
+                        ></span>
+                    </td>
                     <td>{{ row.upload_count }}</td>
                     <td>{{ row.case_count }}</td>
                     <td>{{ row.last_login_at|datetime_utc if row.last_login_at else "-" }}</td>

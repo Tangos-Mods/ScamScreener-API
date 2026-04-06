@@ -131,6 +131,10 @@
                 Requests can be submitted through the privacy contact listed above. Depending on the applicable law,
                 there may also be a right to lodge a complaint with a competent supervisory authority.
             </p>
+            <p>
+                Authenticated users can also request a self-service account data export by email and delete their own
+                uploads or account from the dashboard.
+            </p>
         </div>
     </article>
 
@@ -139,12 +143,15 @@
         <div class="stack-group">
             {% if email_features_enabled %}
                 <p>
-                    Password reset and admin MFA may send transactional emails. The metadata required for delivery is
-                    transmitted to the configured mail service.
+                    Password reset, admin MFA, and self-service account data export may send transactional emails. The
+                    metadata required for delivery is transmitted to the configured mail service.
                 </p>
+                {% if account_data_export_email_enabled %}
+                    <p>Authenticated users can request an email export of their account data from the dashboard.</p>
+                {% endif %}
             {% else %}
                 <p>
-                    Password reset and admin MFA emails are not enabled in this configuration.
+                    Transactional email delivery is not enabled in this configuration.
                 </p>
             {% endif %}
         </div>

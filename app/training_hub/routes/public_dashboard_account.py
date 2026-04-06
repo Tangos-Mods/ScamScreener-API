@@ -7,14 +7,18 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from ..core.hub_core import (
     _change_user_password,
     _create_audit_log,
+    _delete_user_account,
+    _purge_user_uploads,
+    _queue_user_data_export_request,
     _refresh_user,
     _render_dashboard,
     _revoke_other_user_sessions,
     _revoke_user_session_by_id,
     _validate_csrf_token,
+    _verify_user_action_password,
 )
-from ..config.settings import TrainingHubSettings
-from .public_utils import request_meta as _request_meta
+from ..config.settings import SESSION_COOKIE_NAME, TrainingHubSettings
+from .public_utils import ADMIN_MFA_COOKIE_NAME, mask_email as _mask_email, request_meta as _request_meta
 
 
 def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
@@ -198,4 +202,219 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
             user=refreshed_user,
             notice=f"Revoked session #{session_id}.",
         )
+
+    @app.post("/dashboard/data-export/request", response_class=HTMLResponse)
+    async def request_account_data_export(
+        request: Request,
+        current_password: str = Form(...),
+        csrf_token: str = Form(...),
+    ):
+        user = request.state.user
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
+        _validate_csrf_token(request, csrf_token)
+
+        password_result = await run_in_threadpool(
+            _verify_user_action_password,
+            settings.database_path,
+            int(user["id"]),
+            current_password,
+        )
+        if not bool(password_result.get("ok")):
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error=str(password_result.get("error", "Current password is incorrect.")),
+                status_code=int(password_result.get("status_code", 400)),
+            )
+
+        source_ip, user_agent = _request_meta(request, settings)
+        queue_result = await run_in_threadpool(
+            _queue_user_data_export_request,
+            settings,
+            int(user["id"]),
+            source_ip,
+            user_agent,
+        )
+        if not bool(queue_result.get("ok")):
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error=str(queue_result.get("error", "Could not queue account data export.")),
+                status_code=int(queue_result.get("status_code", 400)),
+            )
+
+        await run_in_threadpool(
+            _create_audit_log,
+            settings.database_path,
+            actor_user_id=int(user["id"]),
+            action="account.data_export.requested",
+            target_type="data_export_request",
+            target_id=int(queue_result["request_id"]),
+            details=f"Queued account data export request #{int(queue_result['request_id'])}.",
+            source_ip=source_ip,
+            user_agent=user_agent,
+        )
+        data_export_wake = getattr(app.state, "data_export_wake", None)
+        if data_export_wake is not None:
+            data_export_wake.set()
+
+        refreshed_user = await run_in_threadpool(_refresh_user, settings.database_path, int(user["id"])) or user
+        return await run_in_threadpool(
+            _render_dashboard,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=refreshed_user,
+            notice=(
+                "Account data export requested. "
+                f"It will be emailed to {_mask_email(str(queue_result['recipient_email']))}."
+            ),
+            status_code=202,
+        )
+
+    @app.post("/dashboard/data/purge", response_class=HTMLResponse)
+    async def purge_own_uploads_and_cases(
+        request: Request,
+        current_password: str = Form(...),
+        confirmation: str = Form(...),
+        csrf_token: str = Form(...),
+    ):
+        user = request.state.user
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
+        _validate_csrf_token(request, csrf_token)
+
+        if (confirmation or "").strip() != "ERASE MY DATA":
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error="Type ERASE MY DATA exactly to confirm deleting your uploads and cases.",
+                status_code=400,
+            )
+
+        password_result = await run_in_threadpool(
+            _verify_user_action_password,
+            settings.database_path,
+            int(user["id"]),
+            current_password,
+        )
+        if not bool(password_result.get("ok")):
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error=str(password_result.get("error", "Current password is incorrect.")),
+                status_code=int(password_result.get("status_code", 400)),
+            )
+
+        purge_result = await run_in_threadpool(_purge_user_uploads, settings, int(user["id"]))
+        source_ip, user_agent = _request_meta(request, settings)
+        await run_in_threadpool(
+            _create_audit_log,
+            settings.database_path,
+            actor_user_id=int(user["id"]),
+            action="account.data.purged",
+            target_type="user",
+            target_id=int(user["id"]),
+            details=(
+                f"Purged own uploads and cases. Uploads deleted: {int(purge_result['deleted_uploads'])}, "
+                f"cases deleted: {int(purge_result['deleted_cases'])}, cases rebuilt: {int(purge_result['rebuilt_cases'])}."
+            ),
+            source_ip=source_ip,
+            user_agent=user_agent,
+        )
+
+        refreshed_user = await run_in_threadpool(_refresh_user, settings.database_path, int(user["id"])) or user
+        return await run_in_threadpool(
+            _render_dashboard,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=refreshed_user,
+            notice=(
+                f"Deleted {int(purge_result['deleted_uploads'])} uploads. "
+                f"Cases removed: {int(purge_result['deleted_cases'])}, rebuilt from remaining uploads: {int(purge_result['rebuilt_cases'])}."
+            ),
+        )
+
+    @app.post("/dashboard/account/delete", response_class=HTMLResponse)
+    async def delete_own_account(
+        request: Request,
+        current_password: str = Form(...),
+        confirmation: str = Form(...),
+        csrf_token: str = Form(...),
+    ):
+        user = request.state.user
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
+        _validate_csrf_token(request, csrf_token)
+
+        if (confirmation or "").strip() != "DELETE MY ACCOUNT":
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error="Type DELETE MY ACCOUNT exactly to confirm permanent account deletion.",
+                status_code=400,
+            )
+
+        password_result = await run_in_threadpool(
+            _verify_user_action_password,
+            settings.database_path,
+            int(user["id"]),
+            current_password,
+        )
+        if not bool(password_result.get("ok")):
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error=str(password_result.get("error", "Current password is incorrect.")),
+                status_code=int(password_result.get("status_code", 400)),
+            )
+
+        delete_result = await run_in_threadpool(_delete_user_account, settings, int(user["id"]))
+        if not bool(delete_result.get("ok")):
+            return await run_in_threadpool(
+                _render_dashboard,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                error=str(delete_result.get("error", "Account deletion failed.")),
+                status_code=int(delete_result.get("status_code", 400)),
+            )
+
+        response = RedirectResponse(url="/login?notice=Account+deleted", status_code=303)
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            httponly=True,
+            samesite="strict",
+            secure=settings.enforce_https,
+            path="/",
+        )
+        response.delete_cookie(
+            ADMIN_MFA_COOKIE_NAME,
+            httponly=True,
+            samesite="strict",
+            secure=settings.enforce_https,
+            path="/",
+        )
+        return response
 

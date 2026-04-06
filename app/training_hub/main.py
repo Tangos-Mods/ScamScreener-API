@@ -14,7 +14,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .http.rate_limit import _SqliteRateLimiter, _rate_limit_identity, _rate_limit_rule
 from .http.security import _apply_security_headers, _is_same_origin_post, _request_is_https
-from .core.hub_core import _current_user_from_request, _ensure_storage, _init_database, _new_csrf_token, _run_retention_cleanup
+from .core.hub_core import (
+    _current_user_from_request,
+    _ensure_storage,
+    _init_database,
+    _new_csrf_token,
+    _process_next_data_export_request,
+    _run_retention_cleanup,
+)
 from .core.common import _format_utc_timestamp
 from .routes import register_admin_routes, register_public_routes
 from .config.settings import CSRF_COOKIE_NAME, TrainingHubSettings
@@ -35,6 +42,23 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
     @contextlib.asynccontextmanager
     async def app_lifespan(app: FastAPI):
         app.state.retention_task = None
+        app.state.data_export_task = None
+        app.state.data_export_wake = asyncio.Event()
+
+        async def _data_export_worker() -> None:
+            app.state.data_export_wake.set()
+            while True:
+                try:
+                    processed = await run_in_threadpool(_process_next_data_export_request, settings)
+                    if processed:
+                        await asyncio.sleep(0)
+                        continue
+                except Exception:
+                    logger.exception("Account data export worker failed.")
+                await app.state.data_export_wake.wait()
+                app.state.data_export_wake.clear()
+
+        app.state.data_export_task = asyncio.create_task(_data_export_worker(), name="account-data-export-worker")
         if settings.retention_auto_enabled:
 
             async def _retention_worker() -> None:
@@ -52,6 +76,11 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
         try:
             yield
         finally:
+            data_export_task = getattr(app.state, "data_export_task", None)
+            if data_export_task is not None:
+                data_export_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await data_export_task
             retention_task = getattr(app.state, "retention_task", None)
             if retention_task is not None:
                 retention_task.cancel()
@@ -72,6 +101,7 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
         if (
             path.startswith("/admin")
             or path.startswith("/dashboard")
+            or path.startswith("/api/v1/client/")
             or path in {"/login", "/register", "/forgot-password", "/reset-password", "/admin/mfa"}
             or "set-cookie" in response.headers
         ):
