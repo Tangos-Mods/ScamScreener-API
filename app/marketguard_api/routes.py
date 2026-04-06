@@ -59,11 +59,13 @@ def register_marketguard_routes(
             f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
         )
         response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
+        response.headers["X-API-Provider"] = "Pankraz01"
         return JSONResponse(
             snapshot.items,
             headers={
                 "Cache-Control": response.headers["Cache-Control"],
                 "X-Data-Stale": response.headers["X-Data-Stale"],
+                "X-API-Provider": response.headers["X-API-Provider"],
             },
         )
 
@@ -95,6 +97,7 @@ def register_marketguard_routes(
             f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
         )
         response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
+        response.headers["X-API-Provider"] = "Pankraz01"
         return JSONResponse(
             {
                 "lastUpdated": snapshot.snapshot_last_updated,
@@ -103,6 +106,7 @@ def register_marketguard_routes(
             headers={
                 "Cache-Control": response.headers["Cache-Control"],
                 "X-Data-Stale": response.headers["X-Data-Stale"],
+                "X-API-Provider": response.headers["X-API-Provider"],
             },
         )
 

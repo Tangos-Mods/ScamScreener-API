@@ -85,6 +85,7 @@ def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) ->
     assert response.status_code == 200
     assert response.headers["cache-control"] == "public, max-age=60, stale-if-error=300"
     assert response.headers["x-data-stale"] == "false"
+    assert response.headers["x-api-provider"] == "Pankraz01"
     assert "set-cookie" not in response.headers
     assert response.json() == {
         "CRIMSON_BOOTS": 7_000_000.0,
@@ -152,6 +153,7 @@ def test_bazaar_returns_transformed_quick_status_snapshot(tmp_path: Path) -> Non
     assert response.status_code == 200
     assert response.headers["cache-control"] == "public, max-age=60, stale-if-error=300"
     assert response.headers["x-data-stale"] == "false"
+    assert response.headers["x-api-provider"] == "Pankraz01"
     assert response.json() == {
         "lastUpdated": 1_715_478_978_620,
         "products": {
@@ -475,6 +477,7 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
         response = client.get("/api/v1/bazaar")
 
     assert response.status_code == 200
+    assert response.headers["x-api-provider"] == "Pankraz01"
     assert response.json() == {
         "lastUpdated": 1_700_000_000_000,
         "products": {
