@@ -86,6 +86,8 @@ def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) ->
     assert response.headers["cache-control"] == "public, max-age=60, stale-if-error=300"
     assert response.headers["x-data-stale"] == "false"
     assert response.headers["x-api-provider"] == "Pankraz01"
+    assert response.headers["deprecation"] == "true"
+    assert response.headers["sunset"] == "Mon, 01 Jun 2026 00:00:00 GMT"
     assert "set-cookie" not in response.headers
     assert response.json() == {
         "CRIMSON_BOOTS": 7_000_000.0,
@@ -99,6 +101,139 @@ def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) ->
         "TRUE_ESSENCE": 23_437.5,
     }
     assert requests == [0, 1]
+
+
+def test_lowestbin_v2_returns_price_and_auctioneer_uuid(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction(
+                        "HYPERION",
+                        100_000_000,
+                        auctioneer="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    ),
+                    _auction(
+                        "HYPERION",
+                        98_000_000,
+                        auctioneer="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ),
+                    _auction(
+                        "TRUE_ESSENCE",
+                        1_500_000,
+                        count=64,
+                        auctioneer="cccccccccccccccccccccccccccccccc",
+                    ),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v2/lowestbin")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=60, stale-if-error=300"
+    assert response.headers["x-data-stale"] == "false"
+    assert response.headers["x-api-provider"] == "Pankraz01"
+    assert response.json() == {
+        "lastUpdated": 1_700_000_000_000,
+        "products": {
+            "HYPERION": {
+                "price": 98_000_000.0,
+                "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            },
+            "TRUE_ESSENCE": {
+                "price": 23_437.5,
+                "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
+            },
+        },
+    }
+
+
+def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+    assert schema["paths"]["/api/v1/lowestbin"]["get"]["deprecated"] is True
+    assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
+
+
+def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, api_docs_enabled=False)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=_marketguard_settings(),
+    )
+
+    with TestClient(app) as client:
+        docs_response = client.get("/docs")
+        openapi_response = client.get("/openapi.json")
+
+    assert docs_response.status_code == 404
+    assert openapi_response.status_code == 404
+
+
+def test_combined_app_exposes_docs_when_api_docs_enabled(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=_marketguard_settings(),
+    )
+
+    with TestClient(app) as client:
+        docs_response = client.get("/docs")
+        openapi_response = client.get("/openapi.json")
+
+    assert docs_response.status_code == 200
+    assert openapi_response.status_code == 200
+
+
+def test_lowestbin_v2_does_not_emit_deprecation_headers(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction("HYPERION", 98_000_000),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v2/lowestbin")
+
+    assert response.status_code == 200
+    assert "deprecation" not in response.headers
+    assert "sunset" not in response.headers
 
 
 def test_bazaar_returns_transformed_quick_status_snapshot(tmp_path: Path) -> None:
@@ -495,6 +630,19 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
     }
 
 
+def test_standalone_marketguard_app_disables_docs_when_configured() -> None:
+    app = create_marketguard_app(
+        settings=_marketguard_settings(api_docs_enabled=False),
+    )
+
+    with TestClient(app) as client:
+        docs_response = client.get("/docs")
+        openapi_response = client.get("/openapi.json")
+
+    assert docs_response.status_code == 404
+    assert openapi_response.status_code == 404
+
+
 def test_resolve_auction_item_supports_special_moulberry_keys() -> None:
     enchanted_book = _auction(
         "ENCHANTED_BOOK",
@@ -570,16 +718,18 @@ def _marketguard_settings(
     cache_ttl_seconds: int = 60,
     stale_if_error_seconds: int = 300,
     lowestbin_rate_limit_per_minute: int = 30,
+    api_docs_enabled: bool = True,
 ) -> MarketGuardSettings:
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
         cache_ttl_seconds=cache_ttl_seconds,
         stale_if_error_seconds=stale_if_error_seconds,
         lowestbin_rate_limit_per_minute=lowestbin_rate_limit_per_minute,
+        api_docs_enabled=api_docs_enabled,
     )
 
 
-def _training_hub_settings(tmp_path: Path) -> TrainingHubSettings:
+def _training_hub_settings(tmp_path: Path, *, api_docs_enabled: bool = True) -> TrainingHubSettings:
     return TrainingHubSettings(
         host="127.0.0.1",
         port=18080,
@@ -596,6 +746,7 @@ def _training_hub_settings(tmp_path: Path) -> TrainingHubSettings:
         enable_rate_limit=True,
         enforce_origin_check=True,
         smtp_use_starttls=False,
+        api_docs_enabled=api_docs_enabled,
     )
 
 
@@ -606,6 +757,7 @@ def _auction(
     count: int = 1,
     item_name: str | None = None,
     bin: bool = True,
+    auctioneer: str = "11111111111111111111111111111111",
     extra_attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged_extra_attributes = {"id": item_id}
@@ -616,6 +768,7 @@ def _auction(
         "item_name": item_name or item_id,
         "starting_bid": starting_bid,
         "bin": bin,
+        "auctioneer": auctioneer,
         "item_bytes": _encode_item_bytes(count=count, extra_attributes=merged_extra_attributes),
     }
 

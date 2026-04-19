@@ -141,6 +141,7 @@ class TrainingHubSettings:
     site_contact_channel: str = ""
     site_privacy_contact: str = ""
     site_hosting_location: str = "Ashburn, Virginia, USA"
+    api_docs_enabled: bool = True
 
     @property
     def database_path(self) -> Path | str:
@@ -303,6 +304,7 @@ class TrainingHubSettings:
             os.getenv("TRAINING_HUB_SITE_HOSTING_LOCATION", "Ashburn, Virginia, USA").strip()
             or "Ashburn, Virginia, USA"
         )
+        api_docs_enabled = _env_bool("TRAINING_HUB_API_DOCS_ENABLED", not is_production)
         storage_dir_raw = os.getenv("TRAINING_HUB_STORAGE_DIR", str(base_dir / "data")).strip()
         pipeline_command = os.getenv("TRAINING_HUB_PIPELINE_COMMAND", "").strip()
         project_root_raw = os.getenv("TRAINING_HUB_PROJECT_ROOT", "").strip()
@@ -449,5 +451,6 @@ class TrainingHubSettings:
             site_contact_channel=site_contact_channel,
             site_privacy_contact=site_privacy_contact,
             site_hosting_location=site_hosting_location,
+            api_docs_enabled=api_docs_enabled,
         )
 

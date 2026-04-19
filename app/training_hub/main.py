@@ -87,7 +87,17 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
                 with contextlib.suppress(asyncio.CancelledError):
                     await retention_task
 
-    app = FastAPI(title="ScamScreener Training Hub", version="2.0.0", lifespan=app_lifespan)
+    docs_url = "/docs" if settings.api_docs_enabled else None
+    redoc_url = "/redoc" if settings.api_docs_enabled else None
+    openapi_url = "/openapi.json" if settings.api_docs_enabled else None
+    app = FastAPI(
+        title="ScamScreener Training Hub",
+        version="2.0.0",
+        lifespan=app_lifespan,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
+    )
     if settings.allowed_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(settings.allowed_hosts))
     app.state.settings = settings

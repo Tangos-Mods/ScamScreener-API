@@ -12,7 +12,7 @@ from .client import HypixelAuctionClient, HypixelBazaarClient
 from .config import MarketGuardSettings
 from .exceptions import HypixelUpstreamError
 from .item_keys import resolve_auction_item
-from .models import BazaarSnapshot, LowestBinSnapshot
+from .models import BazaarSnapshot, LowestBinSnapshot, LowestBinV2Entry, LowestBinV2Snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ class LowestBinService:
         self._client = client or HypixelAuctionClient(settings)
         self._clock = clock or time.monotonic
         self._cache: _CachedLowestBinSnapshot | None = None
+        self._last_auctioneer_uuids: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     async def aclose(self) -> None:
@@ -80,9 +81,30 @@ class LowestBinService:
             self._cache = _CachedLowestBinSnapshot(snapshot=snapshot, fetched_at_monotonic=now)
             return snapshot
 
+    async def get_lowest_bins_v2(self) -> LowestBinV2Snapshot:
+        snapshot = await self.get_lowest_bins()
+        items: dict[str, LowestBinV2Entry] = {}
+
+        for item_key, price in snapshot.items.items():
+            auctioneer_uuid = self._find_auctioneer_uuid_for_price(item_key, price)
+            if auctioneer_uuid is None:
+                continue
+            items[item_key] = LowestBinV2Entry(price=price, auctioneer_uuid=auctioneer_uuid)
+
+        return LowestBinV2Snapshot(
+            generated_at=snapshot.generated_at,
+            snapshot_last_updated=snapshot.snapshot_last_updated,
+            total_pages=snapshot.total_pages,
+            total_auctions=snapshot.total_auctions,
+            total_bin_auctions=snapshot.total_bin_auctions,
+            items=items,
+            is_stale=snapshot.is_stale,
+        )
+
     async def _refresh_snapshot(self) -> LowestBinSnapshot:
         auction_snapshot = await self._client.fetch_snapshot()
         lowest_bins: dict[str, float] = {}
+        auctioneer_uuids: dict[str, str] = {}
         total_bin_auctions = 0
 
         for auction in auction_snapshot.auctions:
@@ -93,13 +115,18 @@ class LowestBinService:
             if resolved_item is None:
                 continue
 
+            auctioneer_uuid = _parse_auctioneer_uuid(auction.get("auctioneer"))
+            if auctioneer_uuid is None:
+                continue
+
             total_bin_auctions += 1
             for item_key in resolved_item.keys:
                 current_lowest = lowest_bins.get(item_key)
                 if current_lowest is None or resolved_item.unit_price < current_lowest:
                     lowest_bins[item_key] = resolved_item.unit_price
+                    auctioneer_uuids[item_key] = auctioneer_uuid
 
-        return LowestBinSnapshot(
+        snapshot = LowestBinSnapshot(
             generated_at=datetime.now(timezone.utc),
             snapshot_last_updated=auction_snapshot.last_updated,
             total_pages=auction_snapshot.total_pages,
@@ -108,6 +135,16 @@ class LowestBinService:
             items=dict(sorted(lowest_bins.items(), key=lambda item: item[0].lower())),
             is_stale=False,
         )
+        self._last_auctioneer_uuids = auctioneer_uuids
+        return snapshot
+
+    def _find_auctioneer_uuid_for_price(self, item_key: str, price: float) -> str | None:
+        auctioneer_uuids = getattr(self, "_last_auctioneer_uuids", {})
+        auctioneer_uuid = auctioneer_uuids.get(item_key)
+        if not auctioneer_uuid:
+            logger.warning("Missing auctioneer UUID for Lowest BIN key %s at price %s.", item_key, price)
+            return None
+        return auctioneer_uuid
 
 
 class BazaarService:
@@ -199,3 +236,10 @@ def _spread_percentage(spread: float, sell_price: float) -> float:
     except (InvalidOperation, ValueError) as exc:
         raise HypixelUpstreamError("Hypixel API returned an invalid bazaar price.") from exc
     return float(percentage)
+
+
+def _parse_auctioneer_uuid(value: object) -> str | None:
+    parsed = str(value or "").strip().lower()
+    if len(parsed) != 32 or not all(character in "0123456789abcdef" for character in parsed):
+        return None
+    return parsed

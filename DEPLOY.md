@@ -257,6 +257,8 @@ TRAINING_HUB_ADMIN_USERNAMES=your-admin-username
 TRAINING_HUB_SECRET_KEY=YOUR_OWN_LONG_RANDOM_SECRET
 WEB_CONCURRENCY=2
 MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE=30
+TRAINING_HUB_API_DOCS_ENABLED=false
+MARKETGUARD_API_DOCS_ENABLED=false
 ```
 
 Important notes:
@@ -265,6 +267,7 @@ Important notes:
 - if `TRAINING_HUB_ADMIN_USERNAMES` is omitted, the default bootstrap admin username is `admin`
 - keep `TRAINING_HUB_TRUSTED_PROXIES=127.0.0.1` unless you intentionally know you need extra proxy ranges; Docker Compose appends the internal Caddy IP automatically
 - `/impressum` and `/datenschutz` render from the `TRAINING_HUB_SITE_*` variables
+- `/docs`, `/redoc`, and `/openapi.json` should remain disabled on public production unless you have an explicit internal-access requirement
 - if you operate the site publicly in Germany or the EU, a pseudonym or Discord handle alone is likely not sufficient for the provider-identification fields; `scripts/preflight.sh` warns about obviously incomplete values but cannot replace legal review
 
 Lock down the file permissions:
@@ -346,15 +349,20 @@ From your own machine, check:
 curl -I https://scamscreener.creepans.net
 curl -I https://scamscreener.creepans.net/hub
 curl -I https://scamscreener.creepans.net/api/v1/lowestbin
+curl -I https://scamscreener.creepans.net/api/v2/lowestbin
 curl -I https://scamscreener.creepans.net/api/v1/health
 curl -I https://scamscreener.creepans.net/api/v1/metrics
+curl -I https://scamscreener.creepans.net/docs
 ```
 
 Expected:
 
 - main site responds with `200`, `303`, or similar valid app response
-- `lowestbin` responds with `200`
+- `lowestbin v1` responds with `200` and includes `Deprecation: true`
+- `lowestbin v1` includes `Sunset: Mon, 01 Jun 2026 00:00:00 GMT`
+- `lowestbin v2` responds with `200`
 - `health` and `metrics` respond with `403` from public networks
+- `docs` responds with `404` unless you intentionally enabled API docs
 
 ## 13) Bootstrap The First Admin
 
@@ -381,9 +389,10 @@ After the first admin works, verify:
 2. admin MFA mail arrives
 3. password-reset mail arrives
 4. uploads work
-5. `lowestbin` works publicly
-6. admin area loads
-7. backup creation works
+5. `lowestbin v1` works publicly and shows deprecation headers
+6. `lowestbin v2` works publicly
+7. admin area loads
+8. backup creation works
 
 ## 15) Updating The Server
 
@@ -577,5 +586,7 @@ For a healthy production server, the final state should be:
 - `TRAINING_HUB_ENV=production`
 - admin MFA is enabled
 - password-reset mail is enabled
-- `lowestbin` is public
+- `lowestbin v1` is public, deprecated, and emits the planned sunset date
+- `lowestbin v2` is public
 - `health` and `metrics` are blocked publicly
+- `docs`, `redoc`, and `openapi.json` are not exposed publicly unless explicitly enabled

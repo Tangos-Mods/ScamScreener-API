@@ -38,6 +38,23 @@ class LowestBinSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class LowestBinV2Entry:
+    price: float
+    auctioneer_uuid: str
+
+
+@dataclass(frozen=True, slots=True)
+class LowestBinV2Snapshot:
+    generated_at: datetime
+    snapshot_last_updated: int
+    total_pages: int
+    total_auctions: int
+    total_bin_auctions: int
+    items: dict[str, LowestBinV2Entry]
+    is_stale: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class BazaarSnapshot:
     generated_at: datetime
     snapshot_last_updated: int

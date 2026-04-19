@@ -70,6 +70,23 @@ def test_from_env_derives_allowed_hosts_from_public_base_url(monkeypatch) -> Non
     assert settings.allowed_hosts == {"scamscreener.example.com"}
 
 
+def test_from_env_disables_api_docs_by_default_in_production(monkeypatch) -> None:
+    _clear_training_hub_env(monkeypatch)
+    settings_module = _load_settings_module()
+    monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("TRAINING_HUB_ENV", "production")
+    monkeypatch.setenv("TRAINING_HUB_ALLOWED_HOSTS", "scamscreener.example.com")
+    monkeypatch.setenv("TRAINING_HUB_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "true")
+    monkeypatch.setenv("TRAINING_HUB_ENFORCE_HTTPS", "true")
+    monkeypatch.setenv("TRAINING_HUB_SMTP_HOST", "smtp.internal")
+    monkeypatch.setenv("TRAINING_HUB_SMTP_FROM_EMAIL", "no-reply@scamscreener.example.com")
+
+    settings = settings_module.TrainingHubSettings.from_env()
+
+    assert settings.api_docs_enabled is False
+
+
 def test_from_env_loads_site_legal_configuration(monkeypatch) -> None:
     _clear_training_hub_env(monkeypatch)
     settings_module = _load_settings_module()

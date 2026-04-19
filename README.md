@@ -21,6 +21,7 @@ This repository contains two separate applications in one repo:
 - Admin view over users, basic case list, training runs, and audit log
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN endpoint at `/api/v1/lowestbin`
+- Public Lowest BIN v2 endpoint at `/api/v2/lowestbin`
 - Public Bazaar endpoint at `/api/v1/bazaar`
 - Admin button to:
   - build one merged training bundle from all accepted uploads
@@ -84,8 +85,10 @@ Open:
 
 - `http://localhost:8080` (Training Hub landing page)
 - `http://localhost:8080/hub` (redirects to login/dashboard)
-- `http://localhost:8081/api/v1/lowestbin` (MarketGuard Lowest BIN JSON)
+- `http://localhost:8081/api/v1/lowestbin` (deprecated MarketGuard Lowest BIN JSON)
+- `http://localhost:8081/api/v2/lowestbin` (MarketGuard Lowest BIN JSON with `lastUpdated`, `products`, and seller UUID)
 - `http://localhost:8081/api/v1/bazaar` (MarketGuard Bazaar summary JSON)
+- `http://localhost:8081/docs` (interactive OpenAPI docs for local validation)
 
 ## 3) Docker Deploy
 
@@ -233,6 +236,8 @@ docker run -d --name scamscreener `
 - `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
 - `MARKETGUARD_HTTP_USER_AGENT` default `ScamScreener-MarketGuard/1.0`
 - `MARKETGUARD_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (falls back to `TRAINING_HUB_TRUSTED_PROXIES` when unset)
+- `TRAINING_HUB_API_DOCS_ENABLED` default `true` outside production, `false` in production
+- `MARKETGUARD_API_DOCS_ENABLED` default `true` for the standalone MarketGuard app, set `false` in production
 
 Production-mode startup checks (`TRAINING_HUB_ENV=production`) enforce:
 - `TRAINING_HUB_ENFORCE_HTTPS=true`
@@ -268,13 +273,55 @@ Supply-chain checks:
 
 - `GET /api/v1/health`
 - `GET /api/v1/lowestbin`
+- `GET /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
 - `POST /api/v1/client/auth/login`
 - `POST /api/v1/client/uploads`
 - `POST /api/v1/client/auth/logout`
 
 `/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
-`/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices.
+`/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices. This endpoint is deprecated and emits `Deprecation: true` plus `Sunset: Mon, 01 Jun 2026 00:00:00 GMT`.
+`/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price` and seller `auctioneerUuid`.
+
+Example `GET /api/v1/lowestbin` response:
+
+```json
+{
+  "HYPERION": 98000000.0,
+  "TRUE_ESSENCE": 23437.5
+}
+```
+
+Example `GET /api/v2/lowestbin` response:
+
+```json
+{
+  "lastUpdated": 1700000000000,
+  "products": {
+    "HYPERION": {
+      "price": 98000000.0,
+      "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "TRUE_ESSENCE": {
+      "price": 23437.5,
+      "auctioneerUuid": "cccccccccccccccccccccccccccccccc"
+    }
+  }
+}
+```
+
+Example deprecation headers for `GET /api/v1/lowestbin`:
+
+```http
+Deprecation: true
+Sunset: Mon, 01 Jun 2026 00:00:00 GMT
+```
+
+API documentation:
+
+- `/docs`, `/redoc`, and `/openapi.json` are intended for local development and controlled internal use
+- the combined production app disables them by default when `TRAINING_HUB_ENV=production`
+- the standalone MarketGuard app can disable them explicitly with `MARKETGUARD_API_DOCS_ENABLED=false`
 
 The client upload API is meant for non-browser clients such as a Minecraft mod. It uses the same account database and server-side sessions as the web app, but the client authenticates with a Bearer session token over HTTPS instead of cookies. Do not add custom application-layer crypto on top of it unless you have a concrete threat model for that; the transport encryption here is TLS.
 

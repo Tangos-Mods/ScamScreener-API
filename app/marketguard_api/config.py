@@ -19,6 +19,18 @@ def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, parsed))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _env_csv_set(name: str, fallback_name: str = "") -> set[str]:
     raw = os.getenv(name, "")
     if not raw.strip() and fallback_name:
@@ -51,6 +63,7 @@ class MarketGuardSettings:
     lowestbin_rate_limit_per_minute: int = 30
     http_user_agent: str = "ScamScreener-MarketGuard/1.0"
     trusted_proxies: set[str] = field(default_factory=set)
+    api_docs_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> "MarketGuardSettings":
@@ -71,6 +84,7 @@ class MarketGuardSettings:
             http_user_agent=(os.getenv("MARKETGUARD_HTTP_USER_AGENT", "ScamScreener-MarketGuard/1.0") or "").strip()
             or "ScamScreener-MarketGuard/1.0",
             trusted_proxies=_env_csv_set("MARKETGUARD_TRUSTED_PROXIES", fallback_name="TRAINING_HUB_TRUSTED_PROXIES"),
+            api_docs_enabled=_env_bool("MARKETGUARD_API_DOCS_ENABLED", True),
         )
         if settings.stale_if_error_seconds < settings.cache_ttl_seconds:
             raise ValueError("MARKETGUARD_STALE_IF_ERROR_SECONDS must be greater than or equal to CACHE_TTL_SECONDS.")

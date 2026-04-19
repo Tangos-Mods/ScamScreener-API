@@ -10,6 +10,9 @@ from .config import MarketGuardSettings
 from .exceptions import HypixelRateLimitError, HypixelUpstreamError
 from .service import BazaarService, LowestBinService
 
+_LOWESTBIN_V1_DEPRECATION_HEADER = "true"
+_LOWESTBIN_V1_SUNSET_HEADER = "Mon, 01 Jun 2026 00:00:00 GMT"
+
 
 def register_marketguard_routes(
     app: FastAPI,
@@ -31,7 +34,7 @@ def register_marketguard_routes(
     app.add_event_handler("shutdown", marketguard_service.aclose)
     app.add_event_handler("shutdown", marketguard_bazaar_service.aclose)
 
-    @app.get("/api/v1/lowestbin")
+    @app.get("/api/v1/lowestbin", deprecated=True)
     async def lowestbin(request: Request, response: Response) -> JSONResponse:
         await _apply_rate_limit(
             request,
@@ -62,6 +65,55 @@ def register_marketguard_routes(
         response.headers["X-API-Provider"] = "Pankraz01"
         return JSONResponse(
             snapshot.items,
+            headers={
+                "Cache-Control": response.headers["Cache-Control"],
+                "X-Data-Stale": response.headers["X-Data-Stale"],
+                "X-API-Provider": response.headers["X-API-Provider"],
+                "Deprecation": _LOWESTBIN_V1_DEPRECATION_HEADER,
+                "Sunset": _LOWESTBIN_V1_SUNSET_HEADER,
+            },
+        )
+
+    @app.get("/api/v2/lowestbin")
+    async def lowestbin_v2(request: Request, response: Response) -> JSONResponse:
+        await _apply_rate_limit(
+            request,
+            route_key="lowestbin",
+            max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
+            trusted_proxies=marketguard_settings.trusted_proxies,
+        )
+        try:
+            snapshot = await marketguard_service.get_lowest_bins_v2()
+        except HypixelRateLimitError as exc:
+            headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds else None
+            raise HTTPException(
+                status_code=503,
+                detail="Lowest BIN data is temporarily unavailable.",
+                headers=headers,
+            ) from exc
+        except HypixelUpstreamError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Lowest BIN data is temporarily unavailable.",
+            ) from exc
+
+        response.headers["Cache-Control"] = (
+            f"public, max-age={marketguard_settings.cache_ttl_seconds}, "
+            f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
+        )
+        response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
+        response.headers["X-API-Provider"] = "Pankraz01"
+        return JSONResponse(
+            {
+                "lastUpdated": snapshot.snapshot_last_updated,
+                "products": {
+                    item_key: {
+                        "price": entry.price,
+                        "auctioneerUuid": entry.auctioneer_uuid,
+                    }
+                    for item_key, entry in snapshot.items.items()
+                },
+            },
             headers={
                 "Cache-Control": response.headers["Cache-Control"],
                 "X-Data-Stale": response.headers["X-Data-Stale"],

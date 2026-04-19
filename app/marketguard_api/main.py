@@ -13,7 +13,17 @@ def create_marketguard_app(
     service: LowestBinService | None = None,
     bazaar_service: BazaarService | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="MarketGuard API", version="1.0.0")
+    runtime_settings = settings or MarketGuardSettings.from_env()
+    docs_url = "/docs" if runtime_settings.api_docs_enabled else None
+    redoc_url = "/redoc" if runtime_settings.api_docs_enabled else None
+    openapi_url = "/openapi.json" if runtime_settings.api_docs_enabled else None
+    app = FastAPI(
+        title="MarketGuard API",
+        version="1.0.0",
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
+    )
     app.state.rate_limiter = InMemoryRateLimiter()
 
     @app.middleware("http")
@@ -24,5 +34,5 @@ def create_marketguard_app(
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
-    register_marketguard_routes(app, settings=settings, service=service, bazaar_service=bazaar_service)
+    register_marketguard_routes(app, settings=runtime_settings, service=service, bazaar_service=bazaar_service)
     return app
