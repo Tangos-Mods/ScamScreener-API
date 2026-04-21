@@ -6,7 +6,7 @@ from .marketguard_api.config import MarketGuardSettings
 from .marketguard_api.routes import register_marketguard_routes
 from .marketguard_api.service import BazaarService, LowestBinService
 from .training_hub.config.settings import TrainingHubSettings
-from .training_hub.main import create_training_hub_app
+from .training_hub.main import create_training_hub_app, install_filtered_openapi
 
 
 def create_app(
@@ -21,6 +21,10 @@ def create_app(
         settings=marketguard_settings,
         service=marketguard_service,
         bazaar_service=marketguard_bazaar_service,
+    )
+    install_filtered_openapi(
+        app,
+        route_filter=lambda route: str(route.endpoint.__module__) == "app.marketguard_api.routes",
     )
     app.title = "ScamScreener Platform"
     app.version = "3.0.0"

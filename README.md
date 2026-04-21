@@ -86,7 +86,7 @@ Open:
 - `http://localhost:8080` (Training Hub landing page)
 - `http://localhost:8080/hub` (redirects to login/dashboard)
 - `http://localhost:8081/api/v1/lowestbin` (deprecated MarketGuard Lowest BIN JSON)
-- `http://localhost:8081/api/v2/lowestbin` (MarketGuard Lowest BIN JSON with `lastUpdated`, `products`, and seller UUID)
+- `http://localhost:8081/api/v2/lowestbin` (MarketGuard Lowest BIN JSON with `lastUpdated`, `products`, seller UUID, and auction `item_name`)
 - `http://localhost:8081/api/v1/bazaar` (MarketGuard Bazaar summary JSON)
 - `http://localhost:8081/docs` (interactive OpenAPI docs for local validation)
 
@@ -281,7 +281,7 @@ Supply-chain checks:
 
 `/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
 `/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices. This endpoint is deprecated and emits `Deprecation: true` plus `Sunset: Mon, 01 Jun 2026 00:00:00 GMT`.
-`/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price` and seller `auctioneerUuid`.
+`/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, and Hypixel auction `item_name`.
 
 Example `GET /api/v1/lowestbin` response:
 
@@ -300,11 +300,13 @@ Example `GET /api/v2/lowestbin` response:
   "products": {
     "HYPERION": {
       "price": 98000000.0,
-      "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "item_name": "Hyperion"
     },
     "TRUE_ESSENCE": {
       "price": 23437.5,
-      "auctioneerUuid": "cccccccccccccccccccccccccccccccc"
+      "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
+      "item_name": "True Essence"
     }
   }
 }

@@ -4,10 +4,13 @@ import asyncio
 import contextlib
 import logging
 from pathlib import Path
+from collections.abc import Callable
 
 from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -27,6 +30,35 @@ from .routes import register_admin_routes, register_public_routes
 from .config.settings import CSRF_COOKIE_NAME, TrainingHubSettings
 
 logger = logging.getLogger(__name__)
+
+
+def install_filtered_openapi(
+    app: FastAPI,
+    *,
+    route_filter: Callable[[APIRoute], bool],
+) -> None:
+    def _custom_openapi() -> dict:
+        cached_schema = app.openapi_schema
+        if cached_schema is not None:
+            return cached_schema
+
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=[route for route in app.routes if not isinstance(route, APIRoute) or route_filter(route)],
+        )
+        app.openapi_schema = openapi_schema
+        return openapi_schema
+
+    app.openapi = _custom_openapi
+
+
+def _install_api_only_openapi(app: FastAPI) -> None:
+    install_filtered_openapi(
+        app,
+        route_filter=lambda route: str(route.path).startswith("/api"),
+    )
 
 
 def create_training_hub_app(settings: TrainingHubSettings | None = None) -> FastAPI:
@@ -124,12 +156,12 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
             https_url = request.url.replace(scheme="https")
             redirect = RedirectResponse(url=str(https_url), status_code=307)
             _apply_no_store_headers(redirect, request)
-            return _apply_security_headers(redirect, settings.enforce_https)
+            return _apply_security_headers(redirect, settings.enforce_https, request.url.path)
 
         if settings.enforce_origin_check and not _is_same_origin_post(request, settings):
             rejected = PlainTextResponse("Invalid request origin.", status_code=403)
             _apply_no_store_headers(rejected, request)
-            return _apply_security_headers(rejected, settings.enforce_https)
+            return _apply_security_headers(rejected, settings.enforce_https, request.url.path)
 
         request.state.user = await run_in_threadpool(_current_user_from_request, request, settings)
 
@@ -166,7 +198,7 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
                             path="/",
                         )
                     _apply_no_store_headers(limited, request)
-                    return _apply_security_headers(limited, settings.enforce_https)
+                    return _apply_security_headers(limited, settings.enforce_https, request.url.path)
 
         response = await call_next(request)
         if should_manage_csrf_cookie and set_csrf_cookie:
@@ -180,10 +212,11 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
                 path="/",
             )
         _apply_no_store_headers(response, request)
-        return _apply_security_headers(response, settings.enforce_https)
+        return _apply_security_headers(response, settings.enforce_https, request.url.path)
 
     register_public_routes(app, settings)
     register_admin_routes(app, settings)
+    _install_api_only_openapi(app)
     return app
 
 

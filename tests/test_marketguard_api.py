@@ -103,7 +103,7 @@ def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) ->
     assert requests == [0, 1]
 
 
-def test_lowestbin_v2_returns_price_and_auctioneer_uuid(tmp_path: Path) -> None:
+def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -115,17 +115,20 @@ def test_lowestbin_v2_returns_price_and_auctioneer_uuid(tmp_path: Path) -> None:
                     _auction(
                         "HYPERION",
                         100_000_000,
+                        item_name="Hyperion",
                         auctioneer="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     ),
                     _auction(
                         "HYPERION",
                         98_000_000,
+                        item_name="Hyperion",
                         auctioneer="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     ),
                     _auction(
                         "TRUE_ESSENCE",
                         1_500_000,
                         count=64,
+                        item_name="True Essence",
                         auctioneer="cccccccccccccccccccccccccccccccc",
                     ),
                 ],
@@ -152,11 +155,55 @@ def test_lowestbin_v2_returns_price_and_auctioneer_uuid(tmp_path: Path) -> None:
             "HYPERION": {
                 "price": 98_000_000.0,
                 "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "item_name": "Hyperion",
             },
             "TRUE_ESSENCE": {
                 "price": 23_437.5,
                 "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
+                "item_name": "True Essence",
             },
+        },
+    }
+
+
+def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction(
+                        "HYPERION",
+                        98_000_000,
+                        item_name="   ",
+                        auctioneer="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v2/lowestbin")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "lastUpdated": 1_700_000_000_000,
+        "products": {
+            "HYPERION": {
+                "price": 98_000_000.0,
+                "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "item_name": "HYPERION",
+            }
         },
     }
 
@@ -175,6 +222,44 @@ def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
     schema = response.json()
     assert schema["paths"]["/api/v1/lowestbin"]["get"]["deprecated"] is True
     assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
+
+
+def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Path) -> None:
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+
+    bazaar_get = schema["paths"]["/api/v1/bazaar"]["get"]
+    assert set(bazaar_get["responses"]) == {"200", "429", "503"}
+    assert bazaar_get["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("/BazaarResponse")
+    assert bazaar_get["responses"]["429"]["content"]["application/json"]["example"] == {"detail": "Too many requests."}
+    assert bazaar_get["responses"]["503"]["content"]["application/json"]["example"] == {
+        "detail": "Bazaar data is temporarily unavailable."
+    }
+
+    lowestbin_get = schema["paths"]["/api/v1/lowestbin"]["get"]
+    assert set(lowestbin_get["responses"]) == {"200", "429", "503"}
+    assert lowestbin_get["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/LowestBinV1Response"
+    )
+    assert lowestbin_get["responses"]["503"]["content"]["application/json"]["example"] == {
+        "detail": "Lowest BIN data is temporarily unavailable."
+    }
+
+    schemas = schema["components"]["schemas"]
+    assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
+    assert schemas["LowestBinV1Response"]["example"]["HYPERION"] == 98000000.0
+    assert (
+        schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
+    )
 
 
 def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
@@ -205,6 +290,65 @@ def test_combined_app_exposes_docs_when_api_docs_enabled(tmp_path: Path) -> None
 
     assert docs_response.status_code == 200
     assert openapi_response.status_code == 200
+
+
+def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=_marketguard_settings(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    schema = response.json()
+    assert schema["paths"]
+    assert all(str(path).startswith("/api") for path in schema["paths"])
+    assert "/" not in schema["paths"]
+    assert "/login" not in schema["paths"]
+    assert "/dashboard" not in schema["paths"]
+    assert "/admin" not in schema["paths"]
+    assert "/api/v1/health" not in schema["paths"]
+    assert "/api/v1/metrics" not in schema["paths"]
+    assert "/api/v1/client/auth/login" not in schema["paths"]
+    assert "/api/v1/client/uploads" not in schema["paths"]
+    assert "/api/v1/lowestbin" in schema["paths"]
+    assert "/api/v2/lowestbin" in schema["paths"]
+    assert "/api/v1/bazaar" in schema["paths"]
+
+
+def test_combined_app_docs_csp_allows_swagger_assets(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=_marketguard_settings(),
+    )
+
+    with TestClient(app) as client:
+        docs_response = client.get("/docs")
+
+    assert docs_response.status_code == 200
+    csp = docs_response.headers["content-security-policy"]
+    assert "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" in csp
+    assert "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net" in csp
+
+
+def test_combined_app_non_docs_csp_remains_strict(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=_marketguard_settings(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v2/lowestbin")
+
+    assert response.status_code in {200, 502, 503}
+    csp = response.headers["content-security-policy"]
+    assert "script-src 'self';" in csp
+    assert "https://cdn.jsdelivr.net" not in csp
 
 
 def test_lowestbin_v2_does_not_emit_deprecation_headers(tmp_path: Path) -> None:

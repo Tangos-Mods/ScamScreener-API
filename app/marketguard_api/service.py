@@ -53,6 +53,7 @@ class LowestBinService:
         self._clock = clock or time.monotonic
         self._cache: _CachedLowestBinSnapshot | None = None
         self._last_auctioneer_uuids: dict[str, str] = {}
+        self._last_item_names: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
     async def aclose(self) -> None:
@@ -89,7 +90,11 @@ class LowestBinService:
             auctioneer_uuid = self._find_auctioneer_uuid_for_price(item_key, price)
             if auctioneer_uuid is None:
                 continue
-            items[item_key] = LowestBinV2Entry(price=price, auctioneer_uuid=auctioneer_uuid)
+            items[item_key] = LowestBinV2Entry(
+                price=price,
+                auctioneer_uuid=auctioneer_uuid,
+                item_name=self._find_item_name_for_key(item_key),
+            )
 
         return LowestBinV2Snapshot(
             generated_at=snapshot.generated_at,
@@ -105,6 +110,7 @@ class LowestBinService:
         auction_snapshot = await self._client.fetch_snapshot()
         lowest_bins: dict[str, float] = {}
         auctioneer_uuids: dict[str, str] = {}
+        item_names: dict[str, str] = {}
         total_bin_auctions = 0
 
         for auction in auction_snapshot.auctions:
@@ -125,6 +131,7 @@ class LowestBinService:
                 if current_lowest is None or resolved_item.unit_price < current_lowest:
                     lowest_bins[item_key] = resolved_item.unit_price
                     auctioneer_uuids[item_key] = auctioneer_uuid
+                    item_names[item_key] = _parse_item_name(auction.get("item_name"), item_key)
 
         snapshot = LowestBinSnapshot(
             generated_at=datetime.now(timezone.utc),
@@ -136,6 +143,7 @@ class LowestBinService:
             is_stale=False,
         )
         self._last_auctioneer_uuids = auctioneer_uuids
+        self._last_item_names = item_names
         return snapshot
 
     def _find_auctioneer_uuid_for_price(self, item_key: str, price: float) -> str | None:
@@ -145,6 +153,14 @@ class LowestBinService:
             logger.warning("Missing auctioneer UUID for Lowest BIN key %s at price %s.", item_key, price)
             return None
         return auctioneer_uuid
+
+    def _find_item_name_for_key(self, item_key: str) -> str:
+        item_names = getattr(self, "_last_item_names", {})
+        item_name = item_names.get(item_key)
+        if item_name:
+            return item_name
+        logger.warning("Missing item_name for Lowest BIN key %s.", item_key)
+        return item_key
 
 
 class BazaarService:
@@ -243,3 +259,8 @@ def _parse_auctioneer_uuid(value: object) -> str | None:
     if len(parsed) != 32 or not all(character in "0123456789abcdef" for character in parsed):
         return None
     return parsed
+
+
+def _parse_item_name(value: object, fallback: str) -> str:
+    parsed = str(value or "").strip()
+    return parsed or fallback

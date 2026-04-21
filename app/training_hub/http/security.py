@@ -76,18 +76,33 @@ def _is_client_api_post(request: Request) -> bool:
     return False
 
 
-def _apply_security_headers(response: Response, enforce_https: bool) -> Response:
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "0"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-    response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
-    response.headers["Permissions-Policy"] = (
-        "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-    )
-    response.headers["Content-Security-Policy"] = (
+def _content_security_policy_for_path(path: str) -> str:
+    normalized_path = str(path or "").strip() or "/"
+    if normalized_path in {"/docs", "/docs/oauth2-redirect"}:
+        return (
+            "default-src 'self'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "connect-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https://fastapi.tiangolo.com"
+        )
+    if normalized_path == "/redoc":
+        return (
+            "default-src 'self'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "connect-src 'self'; "
+            "script-src 'self' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data: https://fastapi.tiangolo.com"
+        )
+    return (
         "default-src 'self'; "
         "base-uri 'self'; "
         "form-action 'self'; "
@@ -98,6 +113,20 @@ def _apply_security_headers(response: Response, enforce_https: bool) -> Response
         "style-src 'self'; "
         "img-src 'self' data:"
     )
+
+
+def _apply_security_headers(response: Response, enforce_https: bool, path: str = "/") -> Response:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "0"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    response.headers["Permissions-Policy"] = (
+        "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+    )
+    response.headers["Content-Security-Policy"] = _content_security_policy_for_path(path)
     if enforce_https:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response

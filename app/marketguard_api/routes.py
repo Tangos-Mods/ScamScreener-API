@@ -8,10 +8,33 @@ from fastapi.responses import JSONResponse
 
 from .config import MarketGuardSettings
 from .exceptions import HypixelRateLimitError, HypixelUpstreamError
+from .models import ApiErrorResponse, BazaarResponse, LowestBinV1Response, LowestBinV2Response
 from .service import BazaarService, LowestBinService
 
 _LOWESTBIN_V1_DEPRECATION_HEADER = "true"
 _LOWESTBIN_V1_SUNSET_HEADER = "Mon, 01 Jun 2026 00:00:00 GMT"
+_RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
+
+
+def _error_response_docs(detail: str, *, retry_after: bool = False) -> dict[str, object]:
+    response_docs: dict[str, object] = {
+        "model": ApiErrorResponse,
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": detail,
+                }
+            }
+        },
+    }
+    if retry_after:
+        response_docs["headers"] = {
+            "Retry-After": {
+                "description": "Seconds until the caller should retry.",
+                "schema": {"type": "string", "example": _RATE_LIMIT_RETRY_AFTER_EXAMPLE},
+            }
+        }
+    return response_docs
 
 
 def register_marketguard_routes(
@@ -34,7 +57,15 @@ def register_marketguard_routes(
     app.add_event_handler("shutdown", marketguard_service.aclose)
     app.add_event_handler("shutdown", marketguard_bazaar_service.aclose)
 
-    @app.get("/api/v1/lowestbin", deprecated=True)
+    @app.get(
+        "/api/v1/lowestbin",
+        deprecated=True,
+        response_model=LowestBinV1Response,
+        responses={
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
+        },
+    )
     async def lowestbin(request: Request, response: Response) -> JSONResponse:
         await _apply_rate_limit(
             request,
@@ -74,7 +105,14 @@ def register_marketguard_routes(
             },
         )
 
-    @app.get("/api/v2/lowestbin")
+    @app.get(
+        "/api/v2/lowestbin",
+        response_model=LowestBinV2Response,
+        responses={
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
+        },
+    )
     async def lowestbin_v2(request: Request, response: Response) -> JSONResponse:
         await _apply_rate_limit(
             request,
@@ -110,6 +148,7 @@ def register_marketguard_routes(
                     item_key: {
                         "price": entry.price,
                         "auctioneerUuid": entry.auctioneer_uuid,
+                        "item_name": entry.item_name,
                     }
                     for item_key, entry in snapshot.items.items()
                 },
@@ -121,7 +160,14 @@ def register_marketguard_routes(
             },
         )
 
-    @app.get("/api/v1/bazaar")
+    @app.get(
+        "/api/v1/bazaar",
+        response_model=BazaarResponse,
+        responses={
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Bazaar data is temporarily unavailable.", retry_after=True),
+        },
+    )
     async def bazaar(request: Request, response: Response) -> JSONResponse:
         await _apply_rate_limit(
             request,
