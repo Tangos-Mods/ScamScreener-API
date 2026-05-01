@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 from .client import HypixelAuctionClient, HypixelBazaarClient
 from .config import MarketGuardSettings
-from .exceptions import HypixelUpstreamError
+from .exceptions import HypixelUpstreamError, LowestBinHistoryError
+from .history import LowestBinHistoryStore, snapshot_day_from_last_updated
 from .item_keys import resolve_auction_item
 from .models import BazaarSnapshot, LowestBinSnapshot, LowestBinV2Entry, LowestBinV2Snapshot
 
@@ -54,6 +55,8 @@ class LowestBinService:
         self._cache: _CachedLowestBinSnapshot | None = None
         self._last_auctioneer_uuids: dict[str, str] = {}
         self._last_item_names: dict[str, str] = {}
+        self._history_store = LowestBinHistoryStore(settings.storage_dir, settings.history_retention_days)
+        self._last_recorded_snapshot_last_updated: int | None = None
         self._lock = asyncio.Lock()
 
     async def aclose(self) -> None:
@@ -79,21 +82,34 @@ class LowestBinService:
                     return replace(cached.snapshot, is_stale=True)
                 raise
 
+            await self._record_snapshot_history(snapshot, raise_on_error=False)
             self._cache = _CachedLowestBinSnapshot(snapshot=snapshot, fetched_at_monotonic=now)
             return snapshot
 
     async def get_lowest_bins_v2(self) -> LowestBinV2Snapshot:
         snapshot = await self.get_lowest_bins()
+        if not snapshot.is_stale and self._last_recorded_snapshot_last_updated != snapshot.snapshot_last_updated:
+            await self._record_snapshot_history(snapshot, raise_on_error=True)
+
+        anchor_day = snapshot_day_from_last_updated(snapshot.snapshot_last_updated)
+        averages = await asyncio.to_thread(
+            self._history_store.get_averages,
+            list(snapshot.items.keys()),
+            anchor_day=anchor_day,
+        )
         items: dict[str, LowestBinV2Entry] = {}
 
         for item_key, price in snapshot.items.items():
             auctioneer_uuid = self._find_auctioneer_uuid_for_price(item_key, price)
             if auctioneer_uuid is None:
                 continue
+            average_window = averages.get(item_key)
             items[item_key] = LowestBinV2Entry(
                 price=price,
                 auctioneer_uuid=auctioneer_uuid,
                 item_name=self._find_item_name_for_key(item_key),
+                avg_7d=None if average_window is None else average_window.avg_7d,
+                avg_30d=None if average_window is None else average_window.avg_30d,
             )
 
         return LowestBinV2Snapshot(
@@ -145,6 +161,25 @@ class LowestBinService:
         self._last_auctioneer_uuids = auctioneer_uuids
         self._last_item_names = item_names
         return snapshot
+
+    async def _record_snapshot_history(self, snapshot: LowestBinSnapshot, *, raise_on_error: bool) -> None:
+        if snapshot.is_stale:
+            return
+        try:
+            await asyncio.to_thread(
+                self._history_store.record_snapshot,
+                snapshot.snapshot_last_updated,
+                snapshot.items,
+            )
+        except LowestBinHistoryError:
+            logger.exception(
+                "Failed to persist Lowest BIN history for snapshot %s.",
+                snapshot.snapshot_last_updated,
+            )
+            if raise_on_error:
+                raise
+            return
+        self._last_recorded_snapshot_last_updated = snapshot.snapshot_last_updated
 
     def _find_auctioneer_uuid_for_price(self, item_key: str, price: float) -> str | None:
         auctioneer_uuids = getattr(self, "_last_auctioneer_uuids", {})

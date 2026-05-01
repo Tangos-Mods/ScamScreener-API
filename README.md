@@ -233,6 +233,8 @@ docker run -d --name scamscreener `
 - `MARKETGUARD_SNAPSHOT_RETRIES` default `3`
 - `MARKETGUARD_CACHE_TTL_SECONDS` default `60`
 - `MARKETGUARD_STALE_IF_ERROR_SECONDS` default `300`
+- `MARKETGUARD_STORAGE_DIR` default `/app/data` (falls back to `TRAINING_HUB_STORAGE_DIR` when set and `MARKETGUARD_STORAGE_DIR` is unset)
+- `MARKETGUARD_HISTORY_RETENTION_DAYS` default `45`
 - `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
 - `MARKETGUARD_HTTP_USER_AGENT` default `ScamScreener-MarketGuard/1.0`
 - `MARKETGUARD_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (falls back to `TRAINING_HUB_TRUSTED_PROXIES` when unset)
@@ -281,7 +283,7 @@ Supply-chain checks:
 
 `/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
 `/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices. This endpoint is deprecated and emits `Deprecation: true` plus `Sunset: Mon, 01 Jun 2026 00:00:00 GMT`.
-`/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, and Hypixel auction `item_name`.
+`/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
 
 Example `GET /api/v1/lowestbin` response:
 
@@ -301,12 +303,16 @@ Example `GET /api/v2/lowestbin` response:
     "HYPERION": {
       "price": 98000000.0,
       "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "item_name": "Hyperion"
+      "item_name": "Hyperion",
+      "avg7d": 97500000.0,
+      "avg30d": 96000000.0
     },
     "TRUE_ESSENCE": {
       "price": 23437.5,
       "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
-      "item_name": "True Essence"
+      "item_name": "True Essence",
+      "avg7d": 22850.0,
+      "avg30d": 22120.0
     }
   }
 }

@@ -7,7 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from .config import MarketGuardSettings
-from .exceptions import HypixelRateLimitError, HypixelUpstreamError
+from .exceptions import HypixelRateLimitError, HypixelUpstreamError, LowestBinHistoryError
 from .models import ApiErrorResponse, BazaarResponse, LowestBinV1Response, LowestBinV2Response
 from .service import BazaarService, LowestBinService
 
@@ -82,7 +82,7 @@ def register_marketguard_routes(
                 detail="Lowest BIN data is temporarily unavailable.",
                 headers=headers,
             ) from exc
-        except HypixelUpstreamError as exc:
+        except (HypixelUpstreamError, LowestBinHistoryError) as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Lowest BIN data is temporarily unavailable.",
@@ -149,6 +149,8 @@ def register_marketguard_routes(
                         "price": entry.price,
                         "auctioneerUuid": entry.auctioneer_uuid,
                         "item_name": entry.item_name,
+                        "avg7d": entry.avg_7d,
+                        "avg30d": entry.avg_30d,
                     }
                     for item_key, entry in snapshot.items.items()
                 },

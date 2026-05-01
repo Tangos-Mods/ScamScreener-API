@@ -5,6 +5,8 @@ import base64
 import gzip
 import json
 import struct
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.marketguard_api.client import HypixelAuctionClient, HypixelBazaarClient
 from app.marketguard_api.config import MarketGuardSettings
+from app.marketguard_api.history import LowestBinHistoryStore
 from app.marketguard_api.item_keys import resolve_auction_item
 from app.marketguard_api.main import create_marketguard_app
 from app.marketguard_api.service import BazaarService, LowestBinService
@@ -156,11 +159,15 @@ def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path
                 "price": 98_000_000.0,
                 "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "item_name": "Hyperion",
+                "avg7d": 98_000_000.0,
+                "avg30d": 98_000_000.0,
             },
             "TRUE_ESSENCE": {
                 "price": 23_437.5,
                 "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
                 "item_name": "True Essence",
+                "avg7d": 23_437.5,
+                "avg30d": 23_437.5,
             },
         },
     }
@@ -203,6 +210,8 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
                 "price": 98_000_000.0,
                 "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "item_name": "HYPERION",
+                "avg7d": 98_000_000.0,
+                "avg30d": 98_000_000.0,
             }
         },
     }
@@ -257,9 +266,9 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
     schemas = schema["components"]["schemas"]
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
     assert schemas["LowestBinV1Response"]["example"]["HYPERION"] == 98000000.0
-    assert (
-        schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
-    )
+    assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
+    assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000.0
+    assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000.0
 
 
 def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
@@ -569,6 +578,231 @@ def test_lowestbin_returns_stale_cache_when_refresh_fails() -> None:
     assert request_count == 2
 
 
+def test_lowestbin_v2_averages_deduplicate_snapshot_last_updated() -> None:
+    clock = [0.0]
+    request_count = 0
+    duplicate_snapshot_last_updated = _epoch_millis(2025, 1, 10, 12, 0)
+    newer_snapshot_last_updated = _epoch_millis(2025, 1, 10, 12, 5)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        if request_count < 3:
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "totalPages": 1,
+                    "lastUpdated": duplicate_snapshot_last_updated,
+                    "auctions": [
+                        _auction("HYPERION", 100_000_000, item_name="Hyperion"),
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": newer_snapshot_last_updated,
+                "auctions": [
+                    _auction("HYPERION", 200_000_000, item_name="Hyperion"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=30)
+    service = _marketguard_service(settings, _handler, clock=lambda: clock[0])
+
+    async def _exercise_service() -> tuple[Any, Any, Any]:
+        first_snapshot = await service.get_lowest_bins_v2()
+        clock[0] = 6.0
+        second_snapshot = await service.get_lowest_bins_v2()
+        clock[0] = 12.0
+        third_snapshot = await service.get_lowest_bins_v2()
+        await service.aclose()
+        return first_snapshot, second_snapshot, third_snapshot
+
+    first, second, third = asyncio.run(_exercise_service())
+
+    assert first.items["HYPERION"].avg_7d == 100_000_000.0
+    assert first.items["HYPERION"].avg_30d == 100_000_000.0
+    assert second.items["HYPERION"].avg_7d == 100_000_000.0
+    assert second.items["HYPERION"].avg_30d == 100_000_000.0
+    assert third.items["HYPERION"].avg_7d == 150_000_000.0
+    assert third.items["HYPERION"].avg_30d == 150_000_000.0
+    assert request_count == 3
+
+
+def test_lowestbin_v2_averages_respect_7d_and_30d_windows() -> None:
+    clock = [0.0]
+    request_count = 0
+    snapshots = [
+        (_epoch_millis(2025, 1, 1, 12, 0), 10_000_000),
+        (_epoch_millis(2025, 1, 24, 12, 0), 20_000_000),
+        (_epoch_millis(2025, 1, 30, 12, 0), 30_000_000),
+        (_epoch_millis(2025, 2, 1, 12, 0), 40_000_000),
+    ]
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        snapshot_last_updated, price = snapshots[request_count]
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": snapshot_last_updated,
+                "auctions": [
+                    _auction("HYPERION", price, item_name="Hyperion"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=30)
+    service = _marketguard_service(settings, _handler, clock=lambda: clock[0])
+
+    async def _exercise_service() -> Any:
+        await service.get_lowest_bins_v2()
+        clock[0] = 6.0
+        await service.get_lowest_bins_v2()
+        clock[0] = 12.0
+        await service.get_lowest_bins_v2()
+        clock[0] = 18.0
+        final_snapshot = await service.get_lowest_bins_v2()
+        await service.aclose()
+        return final_snapshot
+
+    final_snapshot = asyncio.run(_exercise_service())
+    entry = final_snapshot.items["HYPERION"]
+
+    assert entry.price == 40_000_000.0
+    assert entry.avg_7d == 35_000_000.0
+    assert entry.avg_30d == 30_000_000.0
+    assert request_count == 4
+
+
+def test_lowestbin_v2_stale_cache_keeps_existing_averages_without_new_history_writes() -> None:
+    clock = [0.0]
+    request_count = 0
+    first_snapshot_last_updated = _epoch_millis(2025, 2, 1, 12, 0)
+    second_snapshot_last_updated = _epoch_millis(2025, 2, 1, 12, 5)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "totalPages": 1,
+                    "lastUpdated": first_snapshot_last_updated,
+                    "auctions": [
+                        _auction("HYPERION", 100_000_000, item_name="Hyperion"),
+                    ],
+                },
+            )
+        if request_count == 2:
+            return httpx.Response(503, json={"success": False, "cause": "maintenance"})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": second_snapshot_last_updated,
+                "auctions": [
+                    _auction("HYPERION", 200_000_000, item_name="Hyperion"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=30)
+    service = _marketguard_service(settings, _handler, clock=lambda: clock[0])
+
+    async def _exercise_service() -> tuple[Any, Any, Any]:
+        first_snapshot = await service.get_lowest_bins_v2()
+        clock[0] = 6.0
+        stale_snapshot = await service.get_lowest_bins_v2()
+        clock[0] = 12.0
+        refreshed_snapshot = await service.get_lowest_bins_v2()
+        await service.aclose()
+        return first_snapshot, stale_snapshot, refreshed_snapshot
+
+    first, stale, refreshed = asyncio.run(_exercise_service())
+
+    assert first.items["HYPERION"].avg_7d == 100_000_000.0
+    assert stale.is_stale is True
+    assert stale.items["HYPERION"].avg_7d == 100_000_000.0
+    assert refreshed.items["HYPERION"].avg_7d == 150_000_000.0
+    assert refreshed.items["HYPERION"].avg_30d == 150_000_000.0
+    assert request_count == 3
+
+
+def test_lowestbin_history_store_returns_none_for_missing_item_keys(tmp_path: Path) -> None:
+    store = LowestBinHistoryStore(tmp_path / "marketguard-history", retention_days=45)
+    averages = store.get_averages(["HYPERION"], anchor_day=datetime(2025, 2, 1, tzinfo=timezone.utc).date())
+
+    assert averages["HYPERION"].avg_7d is None
+    assert averages["HYPERION"].avg_30d is None
+
+
+def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_path: Path) -> None:
+    history_dir = tmp_path / "marketguard-history"
+    settings = _marketguard_settings(storage_dir=history_dir)
+    first_snapshot_last_updated = _epoch_millis(2025, 2, 1, 12, 0)
+    second_snapshot_last_updated = _epoch_millis(2025, 2, 2, 12, 0)
+
+    async def _first_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": first_snapshot_last_updated,
+                "auctions": [
+                    _auction("HYPERION", 100_000_000, item_name="Hyperion"),
+                ],
+            },
+        )
+
+    async def _second_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": second_snapshot_last_updated,
+                "auctions": [
+                    _auction("HYPERION", 200_000_000, item_name="Hyperion"),
+                ],
+            },
+        )
+
+    combined_app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _first_handler),
+    )
+    with TestClient(combined_app) as client:
+        first_response = client.get("/api/v2/lowestbin")
+
+    assert first_response.status_code == 200
+    assert first_response.json()["products"]["HYPERION"]["avg30d"] == 100_000_000.0
+
+    standalone_app = create_marketguard_app(
+        settings=settings,
+        service=_marketguard_service(settings, _second_handler),
+    )
+    with TestClient(standalone_app) as client:
+        second_response = client.get("/api/v2/lowestbin")
+
+    assert second_response.status_code == 200
+    assert second_response.json()["products"]["HYPERION"]["avg7d"] == 150_000_000.0
+    assert second_response.json()["products"]["HYPERION"]["avg30d"] == 150_000_000.0
+
+
 def test_bazaar_returns_stale_cache_when_refresh_fails() -> None:
     clock = [0.0]
     request_count = 0
@@ -859,15 +1093,19 @@ def _marketguard_bazaar_service(
 
 def _marketguard_settings(
     *,
+    storage_dir: Path | None = None,
     cache_ttl_seconds: int = 60,
     stale_if_error_seconds: int = 300,
+    history_retention_days: int = 45,
     lowestbin_rate_limit_per_minute: int = 30,
     api_docs_enabled: bool = True,
 ) -> MarketGuardSettings:
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
+        storage_dir=(storage_dir or Path(tempfile.mkdtemp(prefix="marketguard-test-"))).resolve(),
         cache_ttl_seconds=cache_ttl_seconds,
         stale_if_error_seconds=stale_if_error_seconds,
+        history_retention_days=history_retention_days,
         lowestbin_rate_limit_per_minute=lowestbin_rate_limit_per_minute,
         api_docs_enabled=api_docs_enabled,
     )
@@ -929,6 +1167,10 @@ def _encode_item_bytes(*, count: int, extra_attributes: dict[str, Any]) -> str:
     )
     root = bytes([10]) + _string_payload("") + _compound_payload(_tag_list("i", 10, item_compound))
     return base64.b64encode(gzip.compress(root)).decode("ascii")
+
+
+def _epoch_millis(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    return int(datetime(year, month, day, hour, minute, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def _encode_compound_fields(values: dict[str, Any]) -> bytes:
