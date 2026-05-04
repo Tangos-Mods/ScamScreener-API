@@ -85,6 +85,8 @@ def _rate_limit_rule(
             return "upload.submit", 12, 600
         if path == "/api/v1/client/uploads":
             return "upload.api-submit", 12, 600
+        if path == "/api/v1/client/uploads/anonymous":
+            return "upload.api-anonymous-submit", 12, 600
         if path == "/api/v1/client/auth/logout":
             return "auth.api-logout", 30, 600
         if path == "/dashboard/password":

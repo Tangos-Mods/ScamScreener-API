@@ -3,7 +3,7 @@ services:
     build: .
     container_name: scamscreener
     env_file:
-      - .env.production
+      - ${ENV_FILE:-.env.production}
     environment:
       SCAMSCREENER_EXTRA_TRUSTED_PROXIES: "172.31.255.10"
     volumes:
@@ -35,7 +35,7 @@ services:
     image: caddy:2.8
     container_name: scamscreener-caddy
     env_file:
-      - .env.production
+      - ${ENV_FILE:-.env.production}
     depends_on:
       scamscreener:
         condition: service_healthy

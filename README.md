@@ -279,6 +279,7 @@ Supply-chain checks:
 - `GET /api/v1/bazaar`
 - `POST /api/v1/client/auth/login`
 - `POST /api/v1/client/uploads`
+- `POST /api/v1/client/uploads/anonymous`
 - `POST /api/v1/client/auth/logout`
 
 `/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
@@ -331,9 +332,22 @@ API documentation:
 - the combined production app disables them by default when `TRAINING_HUB_ENV=production`
 - the standalone MarketGuard app can disable them explicitly with `MARKETGUARD_API_DOCS_ENABLED=false`
 
-The client upload API is meant for non-browser clients such as a Minecraft mod. It uses the same account database and server-side sessions as the web app, but the client authenticates with a Bearer session token over HTTPS instead of cookies. Do not add custom application-layer crypto on top of it unless you have a concrete threat model for that; the transport encryption here is TLS.
+The client upload API is meant for non-browser clients such as a Minecraft mod. The preferred mod path is the anonymous endpoint authenticated by a normalized local `clientId` plus server-verified SHA-256 headers over the raw NDJSON payload. The legacy session-based login flow remains available for explicit API clients, but the mod should use the anonymous upload contract. Do not add custom application-layer crypto on top of TLS without a concrete threat model.
 
-Example login:
+Example anonymous upload:
+
+```bash
+curl -sS https://scamscreener.creepans.net/api/v1/client/uploads/anonymous \
+  -X POST \
+  -H "Content-Type: application/x-ndjson" \
+  -H "X-ScamScreener-Filename: training-cases-v2.jsonl" \
+  -H "X-ScamScreener-Client-Id: your-normalized-client-id" \
+  -H "X-ScamScreener-Payload-Sha256: YOUR_PAYLOAD_SHA256" \
+  -H "X-ScamScreener-Handshake-Sha256: YOUR_HANDSHAKE_SHA256" \
+  --data-binary @training-cases-v2.jsonl
+```
+
+Legacy login flow:
 
 ```bash
 curl -sS https://scamscreener.creepans.net/api/v1/client/auth/login \
@@ -341,30 +355,14 @@ curl -sS https://scamscreener.creepans.net/api/v1/client/auth/login \
   -d '{"usernameOrEmail":"alice","password":"supersecret"}'
 ```
 
-Example upload:
-
-```bash
-curl -sS https://scamscreener.creepans.net/api/v1/client/uploads \
-  -X POST \
-  -H "Authorization: Bearer YOUR_SESSION_TOKEN" \
-  -H "Content-Type: application/x-ndjson" \
-  -H "X-ScamScreener-Filename: training-cases-v2.jsonl" \
-  --data-binary @training-cases-v2.jsonl
-```
-
-Example logout:
-
-```bash
-curl -sS https://scamscreener.creepans.net/api/v1/client/auth/logout \
-  -X POST \
-  -H "Authorization: Bearer YOUR_SESSION_TOKEN"
-```
-
 Notes:
 
-- Admin accounts are intentionally blocked from API login when `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`; use a non-admin uploader account for the Minecraft client.
+- The anonymous mod endpoint is `POST /api/v1/client/uploads/anonymous`.
+- The server recalculates `X-ScamScreener-Payload-Sha256` and `X-ScamScreener-Handshake-Sha256`; mismatches are rejected with `400`.
+- Admin accounts are intentionally blocked from the legacy API login flow when `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`; use the anonymous mod contract or a non-admin uploader account for the session-based client API.
 - `/api/v1/client/auth/login` requires `application/json`.
 - `/api/v1/client/uploads` accepts the raw JSONL body and applies the same validation, quotas, deduplication, and audit logging as the dashboard upload form.
+- `/api/v1/client/uploads/anonymous` accepts the raw JSONL body and applies the same validation, quotas, deduplication, and audit logging without requiring a web login.
 - Full mod-side integration guidance: `MINECRAFT_MOD_INTEGRATION.md`
 
 ## License

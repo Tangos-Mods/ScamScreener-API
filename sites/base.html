@@ -4,47 +4,203 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}ScamScreener Training Hub{% endblock %}</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css">
     <link rel="stylesheet" href="/css/training-hub.css">
 </head>
-<body>
-<div class="backdrop"></div>
-<div class="shell">
-    <header class="topbar glass">
-        <a class="brand" href="/">ScamScreener</a>
-        <nav>
-            <ul class="nav">
-                <li><a href="/">Home</a></li>
-                {% if current_user %}
-                    <li><a href="/dashboard">Dashboard</a></li>
-                    {% if current_user.is_admin == 1 %}
-                        <li><a href="/admin">Admin</a></li>
-                    {% endif %}
-                    <li>
-                        <form method="post" action="/logout" class="inline-form">
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                            <button type="submit">Logout</button>
-                        </form>
+{% set shell_mode %}{% block shell_mode %}public{% endblock %}{% endset %}
+{% set page_eyebrow %}{% block page_eyebrow %}{% endblock %}{% endset %}
+{% set page_title %}{% block page_title %}{% endblock %}{% endset %}
+{% set page_intro %}{% block page_intro %}{% endblock %}{% endset %}
+{% set main_content %}{% block content %}{% endblock %}{% endset %}
+{% set path = request.url.path %}
+{% set workspace_open = path in ['/dashboard/uploads', '/dashboard/account'] %}
+{% set admin_open = path.startswith('/admin') %}
+{% set reference_open = path in ['/legal-notice', '/privacy'] %}
+<body class="hub-body hub-shell-{{ shell_mode|trim }}">
+<a class="skip-link" href="#main-content">Skip to content</a>
+{% if shell_mode|trim == "app" and current_user %}
+    <div class="app-shell">
+        <aside class="app-sidebar" aria-label="Workspace navigation">
+            <div class="sidebar-branding">
+                <a class="sidebar-brand" href="/dashboard">ScamScreener</a>
+                <p class="sidebar-tagline">Training Hub</p>
+            </div>
+
+            <nav class="workspace-nav" aria-label="Primary">
+                <ul class="workspace-nav-list">
+                    <li class="workspace-nav-item">
+                        <a
+                            class="workspace-nav-link{% if path == '/dashboard' %} is-active{% endif %}"
+                            href="/dashboard"
+                            {% if path == '/dashboard' %}aria-current="page"{% endif %}
+                        >Overview</a>
                     </li>
-                {% else %}
-                    <li><a href="/login">Login</a></li>
-                    <li><a href="/register">Register</a></li>
-                {% endif %}
-            </ul>
-        </nav>
-    </header>
-    <main class="content">
-        {% block content %}{% endblock %}
-    </main>
-    <footer class="site-footer">
-        <div class="footer-copy">ScamScreener © 2026 Pankraz01</div>
-        <div class="footer-disclaimer">ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang.</div>
-        <nav aria-label="Legal">
-            <ul class="footer-links">
-                <li><a href="/legal-notice">Legal Notice</a></li>
-                <li><a href="/privacy">Privacy</a></li>
-            </ul>
-        </nav>
-    </footer>
-</div>
+                    <li class="workspace-nav-item workspace-nav-group">
+                        <details class="workspace-disclosure" {% if workspace_open %}open{% endif %}>
+                            <summary class="workspace-disclosure-toggle{% if workspace_open %} is-open{% endif %}">
+                                <span>Workspace</span>
+                            </summary>
+                            <ul class="workspace-subnav-list" aria-label="Workspace sections">
+                                <li>
+                                    <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/dashboard/uploads' %} is-active{% endif %}"
+                                        href="/dashboard/uploads"
+                                        {% if path == '/dashboard/uploads' %}aria-current="page"{% endif %}
+                                    >Uploads</a>
+                                </li>
+                                <li>
+                                    <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/dashboard/account' %} is-active{% endif %}"
+                                        href="/dashboard/account"
+                                        {% if path == '/dashboard/account' %}aria-current="page"{% endif %}
+                                    >Account</a>
+                                </li>
+                            </ul>
+                        </details>
+                    </li>
+                    {% if current_user.is_admin == 1 %}
+                        <li class="workspace-nav-item workspace-nav-group">
+                            <details class="workspace-disclosure" {% if admin_open %}open{% endif %}>
+                                <summary class="workspace-disclosure-toggle{% if admin_open %} is-open{% endif %}">
+                                    <span>Admin</span>
+                                </summary>
+                                <ul class="workspace-subnav-list" aria-label="Admin sections">
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin' %} is-active{% endif %}"
+                                            href="/admin"
+                                            {% if path == '/admin' %}aria-current="page"{% endif %}
+                                        >Overview</a>
+                                    </li>
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/users' %} is-active{% endif %}"
+                                            href="/admin/users"
+                                            {% if path == '/admin/users' %}aria-current="page"{% endif %}
+                                        >Users</a>
+                                    </li>
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/cases' or path.startswith('/admin/cases/') %} is-active{% endif %}"
+                                            href="/admin/cases"
+                                            {% if path == '/admin/cases' or path.startswith('/admin/cases/') %}aria-current="page"{% endif %}
+                                        >Cases</a>
+                                    </li>
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/runs' %} is-active{% endif %}"
+                                            href="/admin/runs"
+                                            {% if path == '/admin/runs' %}aria-current="page"{% endif %}
+                                        >Runs</a>
+                                    </li>
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/system' %} is-active{% endif %}"
+                                            href="/admin/system"
+                                            {% if path == '/admin/system' %}aria-current="page"{% endif %}
+                                        >System</a>
+                                    </li>
+                                </ul>
+                            </details>
+                        </li>
+                    {% endif %}
+                </ul>
+            </nav>
+
+            <div class="sidebar-secondary">
+                <nav class="workspace-nav workspace-nav-secondary" aria-label="Reference">
+                    <ul class="workspace-nav-list">
+                        <li class="workspace-nav-item workspace-nav-group">
+                            <details class="workspace-disclosure" {% if reference_open %}open{% endif %}>
+                                <summary class="workspace-disclosure-toggle{% if reference_open %} is-open{% endif %}">
+                                    <span>Reference</span>
+                                </summary>
+                                <ul class="workspace-subnav-list" aria-label="Reference pages">
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/legal-notice' %} is-active{% endif %}"
+                                            href="/legal-notice"
+                                            {% if path == '/legal-notice' %}aria-current="page"{% endif %}
+                                        >Legal Notice</a>
+                                    </li>
+                                    <li>
+                                        <a
+                                            class="workspace-nav-link workspace-subnav-link{% if path == '/privacy' %} is-active{% endif %}"
+                                            href="/privacy"
+                                            {% if path == '/privacy' %}aria-current="page"{% endif %}
+                                        >Privacy</a>
+                                    </li>
+                                </ul>
+                            </details>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+
+            <div class="sidebar-user">
+                <p class="sidebar-section-label">Signed In</p>
+                <div class="sidebar-user-meta">
+                    <strong>{{ current_user.username }}</strong>
+                    <span>{{ current_user.email }}</span>
+                </div>
+                <form method="post" action="/logout" class="sidebar-logout">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-outline-secondary btn-sm">Logout</button>
+                </form>
+            </div>
+        </aside>
+
+        <div class="app-main">
+            <header class="app-topbar">
+                <div class="app-topbar-copy">
+                    {% if page_eyebrow|trim %}
+                        <p class="page-kicker">{{ page_eyebrow|trim }}</p>
+                    {% endif %}
+                    {% if page_title|trim %}
+                        <h1 class="page-title">{{ page_title|trim }}</h1>
+                    {% endif %}
+                    {% if page_intro|trim %}
+                        <div class="page-intro">{{ page_intro|trim|safe }}</div>
+                    {% endif %}
+                </div>
+                <div class="app-topbar-actions">
+                    {% block page_actions %}{% endblock %}
+                </div>
+            </header>
+
+            <main id="main-content" class="app-content">{{ main_content|safe }}</main>
+        </div>
+    </div>
+{% else %}
+    <div class="public-shell">
+        <header class="public-header">
+            <div class="public-header-inner">
+                <a class="public-brand" href="/dashboard">
+                    <span class="public-brand-mark">ScamScreener</span>
+                    <span class="public-brand-subtitle">Training Hub</span>
+                </a>
+                <nav class="public-nav" aria-label="Primary">
+                    <a href="/login">Login</a>
+                    <a class="public-nav-cta" href="/register">Register</a>
+                </nav>
+            </div>
+        </header>
+
+        <main id="main-content" class="public-main">{{ main_content|safe }}</main>
+
+        <footer class="public-footer">
+            <div>
+                <div class="footer-copy">ScamScreener © 2026 Pankraz01</div>
+                <div class="footer-disclaimer">ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang.</div>
+            </div>
+            <nav aria-label="Legal">
+                <ul class="footer-links">
+                    <li><a href="/legal-notice">Legal Notice</a></li>
+                    <li><a href="/privacy">Privacy</a></li>
+                </ul>
+            </nav>
+        </footer>
+    </div>
+{% endif %}
 </body>
 </html>

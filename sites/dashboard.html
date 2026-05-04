@@ -1,219 +1,116 @@
 {% extends "base.html" %}
 
-{% block title %}Training Hub Dashboard{% endblock %}
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Overview{% endblock %}
+{% block page_eyebrow %}Workspace Overview{% endblock %}
+{% block page_title %}Your Case Contributions{% endblock %}
+{% block page_intro %}Start with the next upload, review recent activity, or move to account controls when you need a security or privacy action.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-primary" href="/dashboard/uploads">Upload Cases</a>
+    <a class="btn btn-outline-primary" href="/dashboard/account">Account Settings</a>
+{% endblock %}
 
 {% block content %}
-<section class="glass hero">
-    <p class="eyebrow">User Dashboard</p>
-    <h1>Your Case Contributions</h1>
-    <p class="lead">Signed in as <strong>{{ current_user.username }}</strong>.</p>
-    {% if notice %}
-        <div class="message ok">{{ notice }}</div>
-    {% endif %}
-    {% if error %}
-        <div class="message error">{{ error }}</div>
-    {% endif %}
-    <div class="stats-grid">
-        <div class="stat glass-soft"><span>My Uploads</span><strong>{{ uploads|length }}</strong></div>
-        <div class="stat glass-soft"><span>My Cases</span><strong>{{ total_cases }}</strong></div>
-        <div class="stat glass-soft"><span>Export Requests</span><strong>{{ data_export_requests|length }}</strong></div>
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="overview-strip">
+    <article class="overview-stat">
+        <span>Uploads</span>
+        <strong>{{ uploads|length }}</strong>
+    </article>
+    <article class="overview-stat">
+        <span>Cases</span>
+        <strong>{{ total_cases }}</strong>
+    </article>
+    <article class="overview-stat">
+        <span>Active Sessions</span>
+        <strong>{{ active_session_count }}</strong>
+    </article>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Next step</p>
+            <h2>Upload new training data</h2>
+            <p class="section-copy">The main intake flow lives on a dedicated page so your history and security controls stay out of the way.</p>
+        </div>
+    </div>
+    <div class="surface-actions">
+        <a class="btn btn-primary" href="/dashboard/uploads">Go to Uploads</a>
+        <a class="btn btn-outline-secondary" href="/dashboard/account">Open Account Settings</a>
     </div>
 </section>
 
-<section class="glass card">
-    <h2>Upload Cases</h2>
-    <p>Upload your <code>training-cases-v2.jsonl</code> file. Max size: {{ max_mb }} MB.</p>
-    <form method="post" action="/dashboard/upload" enctype="multipart/form-data" class="upload-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="file" name="training_file" accept=".jsonl,.ndjson,text/plain,application/json" required>
-        <button type="submit">Upload File</button>
-    </form>
-</section>
-
-<section class="glass card">
-    <h2>My Uploads</h2>
-    <table>
-        <thead>
-        <tr>
-            <th>ID</th>
-            <th>Created</th>
-            <th>File</th>
-            <th>Cases</th>
-            <th>Size</th>
-            <th>SHA-256</th>
-            <th>Actions</th>
-        </tr>
-        </thead>
-        <tbody>
-        {% if uploads %}
-            {% for row in uploads %}
-                <tr>
-                    <td>{{ row.id }}</td>
-                    <td>{{ row.created_at|datetime_utc }}</td>
-                    <td>{{ row.original_file_name }}</td>
-                    <td>{{ row.case_count }}</td>
-                    <td>{{ row.size_bytes }} B</td>
-                    <td><code>{{ row.payload_sha256[:16] }}...</code></td>
-                    <td>
-                        <div class="table-actions">
-                            <a href="/dashboard/uploads/{{ row.id }}/download">download</a>
-                            <form method="post" action="/dashboard/uploads/{{ row.id }}/delete" class="inline-form">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="button-small delete-button">Delete</button>
-                            </form>
-                        </div>
-                    </td>
-                </tr>
-            {% endfor %}
-        {% else %}
-            <tr><td colspan="7">No uploads yet.</td></tr>
-        {% endif %}
-        </tbody>
-    </table>
-</section>
-
-<section class="glass card">
-    <h2>Data Export</h2>
-    <p>Request a ZIP export of the account data currently stored for you. The archive is sent to <code>{{ current_user.email }}</code>.</p>
-    {% if data_export_requests %}
-        <table>
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Recent activity</p>
+            <h2>Latest uploads</h2>
+        </div>
+        <a class="button-small" href="/dashboard/uploads">See full history</a>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
             <thead>
             <tr>
                 <th>ID</th>
-                <th>Requested</th>
-                <th>Status</th>
-                <th>Finished</th>
-                <th>Size</th>
+                <th>Created</th>
+                <th>File</th>
+                <th>Cases</th>
+                <th>Action</th>
             </tr>
             </thead>
             <tbody>
-            {% for row in data_export_requests %}
-                <tr>
-                    <td>{{ row.id }}</td>
-                    <td>{{ row.created_at|datetime_utc }}</td>
-                    <td>{{ row.status }}</td>
-                    <td>
-                        {% if row.completed_at %}
-                            {{ row.completed_at|datetime_utc }}
-                        {% elif row.failed_at %}
-                            {{ row.failed_at|datetime_utc }}
-                        {% else %}
-                            <span class="muted">pending</span>
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if row.size_bytes %}
-                            {{ row.size_bytes }} B
-                        {% elif row.delivery_error %}
-                            <span class="muted">{{ row.delivery_error }}</span>
-                        {% else %}
-                            <span class="muted">-</span>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
+            {% if recent_uploads %}
+                {% for row in recent_uploads %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>{{ row.original_file_name }}</td>
+                        <td>{{ row.case_count }}</td>
+                        <td><a class="btn btn-outline-primary btn-sm" href="/dashboard/uploads/{{ row.id }}/download">Download</a></td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="5" class="table-empty">No uploads yet.</td></tr>
+            {% endif %}
             </tbody>
         </table>
-    {% endif %}
-    {% if email_exports_enabled %}
-        <form method="post" action="/dashboard/data-export/request" class="auth-form stacked-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label>Current Password</label>
-            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
-            <button type="submit">Email My Data Export</button>
-        </form>
-        <p class="muted">You can request another export after {{ data_export_cooldown_minutes }} minutes.</p>
-    {% else %}
-        <div class="message error">Account data export email is currently unavailable because SMTP is not configured.</div>
-    {% endif %}
+    </div>
 </section>
 
-<section class="glass card">
-    <h2>Active Sessions</h2>
-    <p>Review active logins and revoke stale devices.</p>
-    <form method="post" action="/dashboard/sessions/revoke-others" class="inline-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="button-small alt">Revoke Other Sessions</button>
-    </form>
-    <table>
-        <thead>
-        <tr>
-            <th>ID</th>
-            <th>Created</th>
-            <th>Expires</th>
-            <th>IP</th>
-            <th>User Agent</th>
-            <th>Action</th>
-        </tr>
-        </thead>
-        <tbody>
-        {% if sessions %}
-            {% for row in sessions %}
-                <tr>
-                    <td>{{ row.id }}</td>
-                    <td>{{ row.created_at|datetime_utc }}</td>
-                    <td>{{ row.expires_at|datetime_utc }}</td>
-                    <td>{{ row.remote_addr }}</td>
-                    <td>{{ row.user_agent }}</td>
-                    <td>
-                        {% if row.is_current %}
-                            <span class="muted">current session</span>
-                        {% else %}
-                            <form method="post" action="/dashboard/sessions/{{ row.id }}/revoke" class="inline-form">
-                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="button-small alt">Revoke</button>
-                            </form>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-        {% else %}
-            <tr><td colspan="6">No active sessions.</td></tr>
-        {% endif %}
-        </tbody>
-    </table>
-</section>
-
-<section class="glass card">
-    <h2>Security</h2>
-    <p>Change your account password. Other active sessions will be revoked.</p>
-    <form method="post" action="/dashboard/password" class="auth-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label>Current Password</label>
-        <input type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
-        <label>New Password</label>
-        <input type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password" required>
-        <label>Confirm New Password</label>
-        <input type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
-        <button type="submit">Update Password</button>
-    </form>
-</section>
-
-<section class="detail-grid">
-    <article class="glass card danger-card">
-        <h2>Delete Uploads And Cases</h2>
-        <p>Delete all uploads from your account and rebuild any affected cases from remaining uploads owned by other users.</p>
-        <form method="post" action="/dashboard/data/purge" class="auth-form stacked-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label>Type <code>ERASE MY DATA</code> to confirm</label>
-            <input type="text" name="confirmation" maxlength="64" autocomplete="off" required>
-            <label>Current Password</label>
-            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
-            <button type="submit" class="delete-button">Delete My Uploads And Cases</button>
-        </form>
-    </article>
-
-    <article class="glass card danger-card">
-        <h2>Delete Account</h2>
-        <p>Permanently delete your account, sessions, uploads, and account-linked records. This cannot be undone.</p>
-        <form method="post" action="/dashboard/account/delete" class="auth-form stacked-form">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label>Type <code>DELETE MY ACCOUNT</code> to confirm</label>
-            <input type="text" name="confirmation" maxlength="64" autocomplete="off" required>
-            <label>Current Password</label>
-            <input type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
-            <button type="submit" class="delete-button">Delete My Account</button>
-        </form>
-    </article>
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Account</p>
+            <h2>Security and data controls</h2>
+            <p class="section-copy">Password changes, session revocation, data exports, and destructive account actions are grouped on one page.</p>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">Data exports</p>
+            <strong class="summary-metric">{{ data_export_requests|length }}</strong>
+            <p>Review requests and trigger a fresh export from the account page.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Pending exports</p>
+            <strong class="summary-metric">{{ pending_export_count }}</strong>
+            <p>Queued or processing exports remain visible in the same settings surface.</p>
+        </article>
+    </div>
+    <div class="surface-actions">
+        <a class="btn btn-outline-primary" href="/dashboard/account">Open Account Page</a>
+    </div>
 </section>
 {% endblock %}

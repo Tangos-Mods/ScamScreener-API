@@ -45,6 +45,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 user=user,
                 error="No file uploaded.",
                 status_code=400,
+                page="uploads",
             )
 
         try:
@@ -58,6 +59,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 user=user,
                 error=str(exception.detail),
                 status_code=exception.status_code,
+                page="uploads",
             )
         user_id = int(user["id"])
         source_ip, user_agent = _request_meta(request, settings)
@@ -81,6 +83,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 user=user,
                 error=str(exception.detail),
                 status_code=exception.status_code,
+                page="uploads",
             )
 
         if str(upload_result.get("status", "")) == "quota-exceeded":
@@ -92,6 +95,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 user=user,
                 error=str(upload_result["error"]),
                 status_code=429,
+                page="uploads",
             )
         if str(upload_result.get("status", "")) == "duplicate":
             return await run_in_threadpool(
@@ -101,6 +105,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 settings=settings,
                 user=user,
                 notice=f"File already uploaded in your account (upload #{int(upload_result['upload_id'])}).",
+                page="uploads",
             )
 
         upload_id = int(upload_result["upload_id"])
@@ -119,6 +124,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 f"Cases inserted: {inserted_cases}, updated: {updated_cases}."
             ),
             status_code=201,
+            page="uploads",
         )
 
     @app.get("/dashboard/uploads/{upload_id}/download")
@@ -131,13 +137,23 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             with sqlite3.connect(settings.database_path) as connection:
                 connection.row_factory = sqlite3.Row
                 row = connection.execute(
-                    "SELECT user_id, original_file_name, stored_path FROM uploads WHERE id = ?",
+                    """
+                    SELECT
+                        up.user_id,
+                        up.original_file_name,
+                        up.stored_path,
+                        ci.linked_user_id AS linked_user_id
+                    FROM uploads up
+                    LEFT JOIN client_identities ci ON ci.id = up.client_identity_id
+                    WHERE up.id = ?
+                    """,
                     (target_upload_id,),
                 ).fetchone()
             if row is None:
                 return None
             return {
-                "user_id": int(row["user_id"]),
+                "user_id": int(row["user_id"]) if row["user_id"] is not None else None,
+                "linked_user_id": int(row["linked_user_id"]) if row["linked_user_id"] is not None else None,
                 "original_file_name": str(row["original_file_name"]),
                 "stored_path": str(row["stored_path"]),
             }
@@ -145,7 +161,11 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
         upload_row = await run_in_threadpool(_load_upload_sync, upload_id)
         if upload_row is None:
             raise HTTPException(status_code=404, detail="Upload not found.")
-        if upload_row["user_id"] != int(user["id"]) and int(user["is_admin"]) != 1:
+        if (
+            upload_row["user_id"] != int(user["id"])
+            and upload_row["linked_user_id"] != int(user["id"])
+            and int(user["is_admin"]) != 1
+        ):
             raise HTTPException(status_code=403, detail="Not allowed.")
 
         file_path = Path(str(upload_row["stored_path"]))
@@ -196,6 +216,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 user=user,
                 error=str(delete_result.get("error", "Upload deletion failed.")),
                 status_code=int(delete_result.get("status_code", 400)),
+                page="uploads",
             )
 
         source_ip, user_agent = _request_meta(request, settings)
@@ -225,5 +246,6 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
                 f"Deleted upload #{int(upload_id)}. "
                 f"Cases removed: {int(delete_result['deleted_cases'])}, rebuilt from remaining uploads: {int(delete_result['rebuilt_cases'])}."
             ),
+            page="uploads",
         )
 

@@ -79,6 +79,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
                 user=user,
                 error="No backup file uploaded.",
                 status_code=400,
+                page="system",
             )
 
         try:
@@ -92,6 +93,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
                 user=user,
                 error=str(exception.detail),
                 status_code=exception.status_code,
+                page="system",
             )
         if not payload:
             return await run_in_threadpool(
@@ -102,6 +104,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
                 user=user,
                 error="Uploaded backup file is empty.",
                 status_code=400,
+                page="system",
             )
 
         temp_restore_file = settings.backups_dir / f"restore-{secrets.token_hex(16)}.tar.gz"
@@ -128,6 +131,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
                 user=user,
                 error=f"Backup restore failed: {exception}",
                 status_code=400,
+                page="system",
             )
         except Exception:
             return await run_in_threadpool(
@@ -138,6 +142,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
                 user=user,
                 error="Backup restore failed due to an internal error.",
                 status_code=500,
+                page="system",
             )
 
         source_ip, user_agent = _request_meta(request, settings)
@@ -159,6 +164,7 @@ def register_admin_backup_routes(app: FastAPI, settings: TrainingHubSettings) ->
             settings=settings,
             user=user,
             notice="Backup restore completed successfully.",
+            page="system",
         )
 
 

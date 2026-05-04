@@ -10,13 +10,19 @@ from .admin_utils import request_meta as _request_meta
 
 
 def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
-    @app.get("/admin", response_class=HTMLResponse)
-    async def admin_dashboard(request: Request, notice: str = "", error: str = ""):
+    def _require_admin(request: Request):
         user = request.state.user
         if user is None:
-            return RedirectResponse(url="/login", status_code=303)
+            return None, RedirectResponse(url="/login", status_code=303)
         if int(user["is_admin"]) != 1:
             raise HTTPException(status_code=403, detail="Admin access required.")
+        return user, None
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_dashboard(request: Request, notice: str = "", error: str = ""):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
         return await run_in_threadpool(
             _render_admin,
             request=request,
@@ -25,15 +31,78 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
             user=user,
             notice=notice,
             error=error,
+            page="overview",
+        )
+
+    @app.get("/admin/users", response_class=HTMLResponse)
+    async def admin_users_page(request: Request, notice: str = "", error: str = ""):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
+        return await run_in_threadpool(
+            _render_admin,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            notice=notice,
+            error=error,
+            page="users",
+        )
+
+    @app.get("/admin/cases", response_class=HTMLResponse)
+    async def admin_cases_page(request: Request, notice: str = "", error: str = ""):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
+        return await run_in_threadpool(
+            _render_admin,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            notice=notice,
+            error=error,
+            page="cases",
+        )
+
+    @app.get("/admin/runs", response_class=HTMLResponse)
+    async def admin_runs_page(request: Request, notice: str = "", error: str = ""):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
+        return await run_in_threadpool(
+            _render_admin,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            notice=notice,
+            error=error,
+            page="runs",
+        )
+
+    @app.get("/admin/system", response_class=HTMLResponse)
+    async def admin_system_page(request: Request, notice: str = "", error: str = ""):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
+        return await run_in_threadpool(
+            _render_admin,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            notice=notice,
+            error=error,
+            page="system",
         )
 
     @app.post("/admin/train", response_class=HTMLResponse)
     async def admin_train(request: Request, csrf_token: str = Form(...)):
-        user = request.state.user
-        if user is None:
-            return RedirectResponse(url="/login", status_code=303)
-        if int(user["is_admin"]) != 1:
-            raise HTTPException(status_code=403, detail="Admin access required.")
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
         _validate_csrf_token(request, csrf_token)
 
         result = await run_in_threadpool(_run_training_pipeline, settings, int(user["id"]))
@@ -59,6 +128,7 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
                 settings=settings,
                 user=user,
                 error=str(result.get("message", "Pipeline failed.")),
+                page="overview",
             )
         return await run_in_threadpool(
             _render_admin,
@@ -67,15 +137,14 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
             settings=settings,
             user=user,
             notice=str(result.get("message", "Pipeline completed.")),
+            page="overview",
         )
 
     @app.post("/admin/retention/run", response_class=HTMLResponse)
     async def admin_run_retention(request: Request, csrf_token: str = Form(...)):
-        user = request.state.user
-        if user is None:
-            return RedirectResponse(url="/login", status_code=303)
-        if int(user["is_admin"]) != 1:
-            raise HTTPException(status_code=403, detail="Admin access required.")
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
         _validate_csrf_token(request, csrf_token)
 
         cleanup = await run_in_threadpool(_run_retention_cleanup, settings)
@@ -107,6 +176,7 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
             settings=settings,
             user=user,
             notice=summary,
+            page="overview",
         )
 
 

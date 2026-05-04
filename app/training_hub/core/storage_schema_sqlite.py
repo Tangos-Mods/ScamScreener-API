@@ -4,9 +4,11 @@ from pathlib import Path
 
 from ..infra import db as sqlite3
 from .storage_migrations import (
+    _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
     _migrate_password_reset_token_columns,
+    _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,
@@ -49,10 +51,24 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS client_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                normalized_client_id TEXT NOT NULL UNIQUE,
+                linked_user_id INTEGER,
+                linked_at TEXT,
+                last_seen_at TEXT NOT NULL,
+                FOREIGN KEY (linked_user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS uploads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
-                user_id INTEGER NOT NULL,
+                user_id INTEGER,
+                client_identity_id INTEGER,
                 original_file_name TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
                 payload_sha256 TEXT NOT NULL,
@@ -62,6 +78,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 duplicate_of_upload_id INTEGER,
                 source_ip TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads(id)
             )
             """
@@ -89,7 +106,8 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 case_id TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                created_by_user_id INTEGER NOT NULL,
+                created_by_user_id INTEGER,
+                created_by_client_identity_id INTEGER,
                 source_upload_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'submitted',
                 label TEXT NOT NULL DEFAULT '',
@@ -97,6 +115,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 tag_ids_json TEXT NOT NULL DEFAULT '[]',
                 payload_json TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+                FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (source_upload_id) REFERENCES uploads(id)
             )
             """
@@ -120,7 +139,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,
-                actor_user_id INTEGER NOT NULL,
+                actor_user_id INTEGER,
                 action TEXT NOT NULL,
                 target_type TEXT NOT NULL DEFAULT '',
                 target_id INTEGER,
@@ -193,16 +212,25 @@ def _init_database_sqlite(database_path: Path | str) -> None:
             )
             """
         )
+        _migrate_client_identity_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
         _migrate_audit_log_columns(connection)
         _migrate_password_reset_token_columns(connection)
         _migrate_admin_mfa_challenge_columns(connection)
         _migrate_training_cases_payload_json(connection)
+        _migrate_training_case_identity_columns(connection)
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_user_sha ON uploads(user_id, payload_sha256)")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_client_identity_sha ON uploads(client_identity_id, payload_sha256)"
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_uploads_created_at ON uploads(created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_client_identities_linked_user ON client_identities(linked_user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_training_runs_created_at ON training_runs(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_training_cases_status ON training_cases(status)")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_cases_created_by_client_identity ON training_cases(created_by_client_identity_id)"
+        )
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_cases_upload_case ON upload_cases(upload_id, case_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_upload_cases_case_id ON upload_cases(case_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")

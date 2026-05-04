@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin Runs{% endblock %}
+{% block page_eyebrow %}Admin Runs{% endblock %}
+{% block page_title %}Training Run History{% endblock %}
+{% block page_intro %}Inspect completed or pending bundle runs without mixing the run log into user management or case review screens.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Runs</p>
+            <h2>Training runs</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Created</th>
+                <th>Status</th>
+                <th>Uploads</th>
+                <th>Cases</th>
+                <th>Started By</th>
+                <th>Bundle</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if runs %}
+                {% for row in runs %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>{{ row.status }}</td>
+                        <td>{{ row.upload_count }}</td>
+                        <td>{{ row.case_count }}</td>
+                        <td>{{ row.started_by }}</td>
+                        <td><a class="btn btn-outline-primary btn-sm" href="/admin/runs/{{ row.id }}/bundle">Download</a></td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="7" class="table-empty">No training runs yet.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

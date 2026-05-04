@@ -23,11 +23,14 @@ from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TRAINING_FO
 
 from .common import _now_utc_iso
 
+CLIENT_ID_MAX_LENGTH = 128
+
 
 def _upload_quota_violation(
     database_path: Path,
     settings: TrainingHubSettings,
-    user_id: int,
+    user_id: int | None,
+    client_identity_id: int | None,
     source_ip: str,
     new_size_bytes: int,
     new_case_count: int,
@@ -39,28 +42,51 @@ def _upload_quota_violation(
     day_end_iso = day_end.isoformat().replace("+00:00", "Z")
 
     with sqlite3.connect(database_path) as connection:
-        user_row = connection.execute(
-            """
-            SELECT
-                COUNT(*) AS upload_count,
-                COALESCE(SUM(size_bytes), 0) AS total_bytes,
-                COALESCE(SUM(case_count), 0) AS total_cases
-            FROM uploads
-            WHERE status = 'accepted' AND user_id = ? AND created_at >= ? AND created_at < ?
-            """,
-            (int(user_id), day_start_iso, day_end_iso),
-        ).fetchone()
+        if user_id is not None:
+            user_row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS upload_count,
+                    COALESCE(SUM(size_bytes), 0) AS total_bytes,
+                    COALESCE(SUM(case_count), 0) AS total_cases
+                FROM uploads
+                WHERE status = 'accepted' AND user_id = ? AND created_at >= ? AND created_at < ?
+                """,
+                (int(user_id), day_start_iso, day_end_iso),
+            ).fetchone()
 
-        user_upload_count = int(user_row[0] if user_row is not None else 0)
-        user_total_bytes = int(user_row[1] if user_row is not None else 0)
-        user_total_cases = int(user_row[2] if user_row is not None else 0)
+            user_upload_count = int(user_row[0] if user_row is not None else 0)
+            user_total_bytes = int(user_row[1] if user_row is not None else 0)
+            user_total_cases = int(user_row[2] if user_row is not None else 0)
 
-        if user_upload_count + 1 > settings.max_uploads_per_day_per_user:
-            return "Daily upload count limit reached for your account."
-        if user_total_bytes + int(new_size_bytes) > settings.max_upload_bytes_per_day_per_user:
-            return "Daily upload size limit reached for your account."
-        if user_total_cases + int(new_case_count) > settings.max_upload_cases_per_day_per_user:
-            return "Daily case-count limit reached for your account."
+            if user_upload_count + 1 > settings.max_uploads_per_day_per_user:
+                return "Daily upload count limit reached for your account."
+            if user_total_bytes + int(new_size_bytes) > settings.max_upload_bytes_per_day_per_user:
+                return "Daily upload size limit reached for your account."
+            if user_total_cases + int(new_case_count) > settings.max_upload_cases_per_day_per_user:
+                return "Daily case-count limit reached for your account."
+        elif client_identity_id is not None:
+            client_row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS upload_count,
+                    COALESCE(SUM(size_bytes), 0) AS total_bytes,
+                    COALESCE(SUM(case_count), 0) AS total_cases
+                FROM uploads
+                WHERE status = 'accepted' AND client_identity_id = ? AND created_at >= ? AND created_at < ?
+                """,
+                (int(client_identity_id), day_start_iso, day_end_iso),
+            ).fetchone()
+            client_upload_count = int(client_row[0] if client_row is not None else 0)
+            client_total_bytes = int(client_row[1] if client_row is not None else 0)
+            client_total_cases = int(client_row[2] if client_row is not None else 0)
+
+            if client_upload_count + 1 > settings.max_uploads_per_day_per_user:
+                return "Daily upload count limit reached for this client ID."
+            if client_total_bytes + int(new_size_bytes) > settings.max_upload_bytes_per_day_per_user:
+                return "Daily upload size limit reached for this client ID."
+            if client_total_cases + int(new_case_count) > settings.max_upload_cases_per_day_per_user:
+                return "Daily case-count limit reached for this client ID."
 
         normalized_ip = (source_ip or "").strip()
         if normalized_ip:
@@ -105,9 +131,69 @@ def _extract_case_fields(payload: dict[str, Any]) -> tuple[str, str, list[str]]:
     return label, outcome, tags
 
 
+def _normalize_client_id(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="X-ScamScreener-Client-Id is required.")
+    if len(normalized) > CLIENT_ID_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"X-ScamScreener-Client-Id must be <= {CLIENT_ID_MAX_LENGTH} characters.",
+        )
+    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        raise HTTPException(status_code=400, detail="X-ScamScreener-Client-Id contains invalid control characters.")
+    return normalized
+
+
+def _ensure_client_identity(connection, normalized_client_id: str) -> sqlite3.Row:
+    now = _now_utc_iso()
+    row = connection.execute(
+        """
+        SELECT id, normalized_client_id, linked_user_id, linked_at, last_seen_at
+        FROM client_identities
+        WHERE normalized_client_id = ?
+        """,
+        (normalized_client_id,),
+    ).fetchone()
+    if row is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO client_identities (created_at, normalized_client_id, linked_user_id, linked_at, last_seen_at)
+            VALUES (?, ?, NULL, NULL, ?)
+            """,
+            (now, normalized_client_id, now),
+        )
+        row = connection.execute(
+            """
+            SELECT id, normalized_client_id, linked_user_id, linked_at, last_seen_at
+            FROM client_identities
+            WHERE id = ?
+            """,
+            (int(cursor.lastrowid),),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=500, detail="Failed to create client identity.")
+        return row
+
+    connection.execute(
+        "UPDATE client_identities SET last_seen_at = ? WHERE id = ?",
+        (now, int(row["id"])),
+    )
+    refreshed = connection.execute(
+        """
+        SELECT id, normalized_client_id, linked_user_id, linked_at, last_seen_at
+        FROM client_identities
+        WHERE id = ?
+        """,
+        (int(row["id"]),),
+    ).fetchone()
+    return refreshed if refreshed is not None else row
+
+
 def _ingest_cases_from_upload(
     database_path: Path,
-    user_id: int,
+    user_id: int | None,
+    client_identity_id: int | None,
     upload_id: int,
     parsed_cases: list[dict[str, Any]],
 ) -> tuple[int, int]:
@@ -132,19 +218,21 @@ def _ingest_cases_from_upload(
                         created_at,
                         updated_at,
                         created_by_user_id,
+                        created_by_client_identity_id,
                         source_upload_id,
                         status,
                         label,
                         outcome,
                         tag_ids_json,
                         payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         case_id,
                         now,
                         now,
                         user_id,
+                        client_identity_id,
                         upload_id,
                         "submitted",
                         label,
@@ -234,13 +322,54 @@ def _user_uploads(database_path: Path, user_id: int) -> list[sqlite3.Row]:
         connection.row_factory = sqlite3.Row
         return connection.execute(
             """
-            SELECT id, created_at, original_file_name, case_count, size_bytes, payload_sha256, duplicate_of_upload_id
-            FROM uploads
-            WHERE user_id = ?
-            ORDER BY created_at DESC
+            SELECT
+                up.id,
+                up.created_at,
+                up.original_file_name,
+                up.case_count,
+                up.size_bytes,
+                up.payload_sha256,
+                up.duplicate_of_upload_id,
+                ci.normalized_client_id
+            FROM uploads up
+            LEFT JOIN client_identities ci ON ci.id = up.client_identity_id
+            WHERE
+                up.user_id = ?
+                OR up.client_identity_id IN (
+                    SELECT id FROM client_identities WHERE linked_user_id = ?
+                )
+            ORDER BY up.created_at DESC, up.id DESC
             """,
-            (user_id,),
+            (user_id, user_id),
         ).fetchall()
+
+
+def _user_owned_upload_ids(connection, user_id: int) -> list[int]:
+    rows = connection.execute(
+        """
+        SELECT up.id
+        FROM uploads up
+        WHERE
+            up.user_id = ?
+            OR up.client_identity_id IN (
+                SELECT id FROM client_identities WHERE linked_user_id = ?
+            )
+        ORDER BY up.created_at ASC, up.id ASC
+        """,
+        (int(user_id), int(user_id)),
+    ).fetchall()
+    ids: list[int] = []
+    for row in rows:
+        try:
+            ids.append(int(row["id"]))
+            continue
+        except (TypeError, ValueError, KeyError, IndexError):
+            pass
+        try:
+            ids.append(int(row[0]))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return ids
 
 
 def _parse_training_cases(payload_text: str) -> list[dict[str, Any]]:

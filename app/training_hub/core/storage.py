@@ -5,9 +5,11 @@ from pathlib import Path
 from ..infra import db as sqlite3
 from .storage_fs import _ensure_storage
 from .storage_migrations import (
+    _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
     _migrate_password_reset_token_columns,
+    _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,

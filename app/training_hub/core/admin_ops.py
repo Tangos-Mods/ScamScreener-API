@@ -38,7 +38,14 @@ def _admin_users(database_path: Path) -> list[sqlite3.Row]:
                 COUNT(up.id) AS upload_count,
                 COALESCE(SUM(up.case_count), 0) AS case_count
             FROM users u
-            LEFT JOIN uploads up ON up.user_id = u.id
+            LEFT JOIN uploads up ON (
+                up.user_id = u.id
+                OR EXISTS (
+                    SELECT 1
+                    FROM client_identities ci
+                    WHERE ci.id = up.client_identity_id AND ci.linked_user_id = u.id
+                )
+            )
             GROUP BY u.id
             ORDER BY u.created_at ASC
             """
@@ -63,9 +70,10 @@ def _admin_cases(database_path: Path) -> list[sqlite3.Row]:
                 c.status,
                 c.label,
                 c.outcome,
-                u.username AS created_by
+                COALESCE(u.username, ci.normalized_client_id, 'unknown') AS created_by
             FROM training_cases c
-            JOIN users u ON u.id = c.created_by_user_id
+            LEFT JOIN users u ON u.id = c.created_by_user_id
+            LEFT JOIN client_identities ci ON ci.id = c.created_by_client_identity_id
             ORDER BY c.updated_at DESC
             LIMIT 200
             """
@@ -87,10 +95,11 @@ def _admin_case_detail(database_path: Path, case_db_id: int) -> dict[str, Any] |
                 c.outcome,
                 c.tag_ids_json,
                 c.payload_json,
-                u.username AS created_by,
+                COALESCE(u.username, ci.normalized_client_id, 'unknown') AS created_by,
                 up.original_file_name AS source_file_name
             FROM training_cases c
-            JOIN users u ON u.id = c.created_by_user_id
+            LEFT JOIN users u ON u.id = c.created_by_user_id
+            LEFT JOIN client_identities ci ON ci.id = c.created_by_client_identity_id
             LEFT JOIN uploads up ON up.id = c.source_upload_id
             WHERE c.id = ?
             """,
@@ -289,7 +298,7 @@ def _delete_training_case(database_path: Path, case_db_id: int) -> dict[str, Any
 
 def _create_audit_log(
     database_path: Path,
-    actor_user_id: int,
+    actor_user_id: int | None,
     action: str,
     target_type: str = "",
     target_id: int | None = None,
@@ -305,7 +314,7 @@ def _create_audit_log(
             """,
             (
                 _now_utc_iso(),
-                actor_user_id,
+                int(actor_user_id) if actor_user_id is not None else None,
                 (action or "").strip() or "unknown.action",
                 (target_type or "").strip(),
                 target_id,

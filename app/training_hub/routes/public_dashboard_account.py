@@ -33,6 +33,35 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
             templates=app.state.templates,
             settings=settings,
             user=user,
+            page="overview",
+        )
+
+    @app.get("/dashboard/uploads", response_class=HTMLResponse)
+    async def dashboard_uploads(request: Request):
+        user = request.state.user
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
+        return await run_in_threadpool(
+            _render_dashboard,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            page="uploads",
+        )
+
+    @app.get("/dashboard/account", response_class=HTMLResponse)
+    async def dashboard_account(request: Request):
+        user = request.state.user
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
+        return await run_in_threadpool(
+            _render_dashboard,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            page="account",
         )
 
     @app.post("/dashboard/password", response_class=HTMLResponse)
@@ -57,6 +86,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error="New password confirmation does not match.",
                 status_code=400,
+                page="account",
             )
 
         change_result = await run_in_threadpool(
@@ -75,6 +105,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(change_result.get("error", "Password update failed.")),
                 status_code=int(change_result.get("status_code", 400)),
+                page="account",
             )
 
         current_session_id = getattr(request.state, "session_id", None)
@@ -105,6 +136,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
             settings=settings,
             user=refreshed_user,
             notice="Password updated successfully.",
+            page="account",
         )
 
     @app.post("/dashboard/sessions/revoke-others", response_class=HTMLResponse)
@@ -142,6 +174,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
             settings=settings,
             user=refreshed_user,
             notice=f"Revoked {revoked_count} other sessions.",
+            page="account",
         )
 
     @app.post("/dashboard/sessions/{session_id}/revoke", response_class=HTMLResponse)
@@ -161,6 +194,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error="Use logout to end your current session.",
                 status_code=400,
+                page="account",
             )
 
         revoked = await run_in_threadpool(
@@ -179,6 +213,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error="Session not found or already revoked.",
                 status_code=404,
+                page="account",
             )
 
         source_ip, user_agent = _request_meta(request, settings)
@@ -201,6 +236,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
             settings=settings,
             user=refreshed_user,
             notice=f"Revoked session #{session_id}.",
+            page="account",
         )
 
     @app.post("/dashboard/data-export/request", response_class=HTMLResponse)
@@ -229,6 +265,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(password_result.get("error", "Current password is incorrect.")),
                 status_code=int(password_result.get("status_code", 400)),
+                page="account",
             )
 
         source_ip, user_agent = _request_meta(request, settings)
@@ -248,6 +285,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(queue_result.get("error", "Could not queue account data export.")),
                 status_code=int(queue_result.get("status_code", 400)),
+                page="account",
             )
 
         await run_in_threadpool(
@@ -277,6 +315,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 f"It will be emailed to {_mask_email(str(queue_result['recipient_email']))}."
             ),
             status_code=202,
+            page="account",
         )
 
     @app.post("/dashboard/data/purge", response_class=HTMLResponse)
@@ -300,6 +339,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error="Type ERASE MY DATA exactly to confirm deleting your uploads and cases.",
                 status_code=400,
+                page="account",
             )
 
         password_result = await run_in_threadpool(
@@ -317,6 +357,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(password_result.get("error", "Current password is incorrect.")),
                 status_code=int(password_result.get("status_code", 400)),
+                page="account",
             )
 
         purge_result = await run_in_threadpool(_purge_user_uploads, settings, int(user["id"]))
@@ -347,6 +388,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 f"Deleted {int(purge_result['deleted_uploads'])} uploads. "
                 f"Cases removed: {int(purge_result['deleted_cases'])}, rebuilt from remaining uploads: {int(purge_result['rebuilt_cases'])}."
             ),
+            page="account",
         )
 
     @app.post("/dashboard/account/delete", response_class=HTMLResponse)
@@ -370,6 +412,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error="Type DELETE MY ACCOUNT exactly to confirm permanent account deletion.",
                 status_code=400,
+                page="account",
             )
 
         password_result = await run_in_threadpool(
@@ -387,6 +430,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(password_result.get("error", "Current password is incorrect.")),
                 status_code=int(password_result.get("status_code", 400)),
+                page="account",
             )
 
         delete_result = await run_in_threadpool(_delete_user_account, settings, int(user["id"]))
@@ -399,6 +443,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
                 user=user,
                 error=str(delete_result.get("error", "Account deletion failed.")),
                 status_code=int(delete_result.get("status_code", 400)),
+                page="account",
             )
 
         response = RedirectResponse(url="/login?notice=Account+deleted", status_code=303)

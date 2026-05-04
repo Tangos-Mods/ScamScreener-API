@@ -4,9 +4,11 @@ from pathlib import Path
 
 from ..infra import db as sqlite3
 from .storage_migrations import (
+    _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
     _migrate_password_reset_token_columns,
+    _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,
@@ -48,10 +50,25 @@ def _init_database_mariadb(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS client_identities (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                normalized_client_id VARCHAR(128) NOT NULL UNIQUE,
+                linked_user_id BIGINT NULL,
+                linked_at VARCHAR(40),
+                last_seen_at VARCHAR(40) NOT NULL,
+                FOREIGN KEY (linked_user_id) REFERENCES users(id),
+                KEY idx_client_identities_linked_user (linked_user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS uploads (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
                 created_at VARCHAR(40) NOT NULL,
-                user_id BIGINT NOT NULL,
+                user_id BIGINT NULL,
+                client_identity_id BIGINT NULL,
                 original_file_name VARCHAR(255) NOT NULL,
                 stored_path VARCHAR(1024) NOT NULL,
                 payload_sha256 CHAR(64) NOT NULL,
@@ -61,8 +78,10 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 duplicate_of_upload_id BIGINT,
                 source_ip VARCHAR(80) NOT NULL DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads(id),
                 UNIQUE KEY idx_uploads_user_sha (user_id, payload_sha256),
+                UNIQUE KEY idx_uploads_client_identity_sha (client_identity_id, payload_sha256),
                 KEY idx_uploads_created_at (created_at),
                 KEY idx_uploads_source_ip (source_ip)
             )
@@ -92,7 +111,8 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 case_id VARCHAR(128) NOT NULL UNIQUE,
                 created_at VARCHAR(40) NOT NULL,
                 updated_at VARCHAR(40) NOT NULL,
-                created_by_user_id BIGINT NOT NULL,
+                created_by_user_id BIGINT NULL,
+                created_by_client_identity_id BIGINT NULL,
                 source_upload_id BIGINT,
                 status VARCHAR(32) NOT NULL DEFAULT 'submitted',
                 label VARCHAR(128) NOT NULL DEFAULT '',
@@ -100,8 +120,10 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 tag_ids_json LONGTEXT NOT NULL,
                 payload_json LONGTEXT NOT NULL,
                 FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+                FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (source_upload_id) REFERENCES uploads(id),
-                KEY idx_training_cases_status (status)
+                KEY idx_training_cases_status (status),
+                KEY idx_training_cases_created_by_client_identity (created_by_client_identity_id)
             )
             """
         )
@@ -126,7 +148,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
             CREATE TABLE IF NOT EXISTS audit_logs (
                 id BIGINT PRIMARY KEY AUTO_INCREMENT,
                 created_at VARCHAR(40) NOT NULL,
-                actor_user_id BIGINT NOT NULL,
+                actor_user_id BIGINT NULL,
                 action VARCHAR(128) NOT NULL,
                 target_type VARCHAR(64) NOT NULL DEFAULT '',
                 target_id BIGINT,
@@ -209,11 +231,13 @@ def _init_database_mariadb(database_path: Path | str) -> None:
             )
             """
         )
+        _migrate_client_identity_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
         _migrate_audit_log_columns(connection)
         _migrate_password_reset_token_columns(connection)
         _migrate_admin_mfa_challenge_columns(connection)
         _migrate_training_cases_payload_json(connection)
+        _migrate_training_case_identity_columns(connection)
         connection.commit()
 

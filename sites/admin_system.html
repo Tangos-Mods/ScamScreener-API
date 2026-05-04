@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin System{% endblock %}
+{% block page_eyebrow %}Admin System{% endblock %}
+{% block page_title %}System Controls and Audit{% endblock %}
+{% block page_intro %}Rare, high-impact administrative actions are isolated from daily moderation and data review tasks.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Backups</p>
+            <h2>System recovery controls</h2>
+        </div>
+        <form method="post" action="/admin/retention/run" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-outline-secondary btn-sm">Run Retention Cleanup</button>
+        </form>
+    </div>
+    <div class="danger-grid">
+        <section class="summary-panel">
+            <p class="summary-panel-label">Create backup</p>
+            <p>Create a point-in-time archive of stored data and generated assets.</p>
+            <form method="post" action="/admin/backups/create" class="inline-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-outline-secondary btn-sm">Create Backup</button>
+            </form>
+        </section>
+        <section class="summary-panel">
+            <p class="summary-panel-label">Restore backup</p>
+            <p>Restore a controlled archive when recovery is required.</p>
+            <form method="post" action="/admin/backups/restore" enctype="multipart/form-data" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="backup_file">Restore backup archive (.tar.gz)</label>
+                    <input id="backup_file" class="form-control" type="file" name="backup_file" accept=".tar,.tar.gz,.tgz,application/gzip" required>
+                </div>
+                <button type="submit" class="btn btn-outline-primary btn-sm">Restore Backup</button>
+            </form>
+        </section>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Audit</p>
+            <h2>Audit log</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Time</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>IP</th>
+                <th>User Agent</th>
+                <th>Details</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if audit_logs %}
+                {% for row in audit_logs %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>{{ row.actor_username }}</td>
+                        <td>{{ row.action }}</td>
+                        <td>
+                            {% if row.target_type %}
+                                {{ row.target_type }}{% if row.target_id %} #{{ row.target_id }}{% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>{{ row.source_ip or "-" }}</td>
+                        <td class="table-wrap">{{ row.user_agent or "-" }}</td>
+                        <td class="table-wrap">{{ row.details or "-" }}</td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="8" class="table-empty">No audit events yet.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

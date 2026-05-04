@@ -58,6 +58,7 @@ def register_admin_case_routes(app: FastAPI, settings: TrainingHubSettings) -> N
                 user=user,
                 error="Case not found.",
                 status_code=404,
+                page="cases",
             )
 
         source_ip, user_agent = _request_meta(request, settings)
@@ -75,7 +76,7 @@ def register_admin_case_routes(app: FastAPI, settings: TrainingHubSettings) -> N
 
         notice = f"Deleted case {deleted['case_id']}."
         if return_to == "detail":
-            return RedirectResponse(url=f"/admin?notice={quote_plus(notice)}", status_code=303)
+            return RedirectResponse(url=f"/admin/cases?notice={quote_plus(notice)}", status_code=303)
         return await run_in_threadpool(
             _render_admin,
             request=request,
@@ -83,5 +84,6 @@ def register_admin_case_routes(app: FastAPI, settings: TrainingHubSettings) -> N
             settings=settings,
             user=user,
             notice=notice,
+            page="cases",
         )
 

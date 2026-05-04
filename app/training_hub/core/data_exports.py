@@ -313,14 +313,39 @@ def _build_user_data_export_archive(
 
         upload_rows = connection.execute(
             """
-            SELECT id, created_at, original_file_name, stored_path, payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip
-            FROM uploads
-            WHERE user_id = ?
+            SELECT
+                up.id,
+                up.created_at,
+                up.original_file_name,
+                up.stored_path,
+                up.payload_sha256,
+                up.case_count,
+                up.size_bytes,
+                up.status,
+                up.duplicate_of_upload_id,
+                up.source_ip,
+                ci.normalized_client_id
+            FROM uploads up
+            LEFT JOIN client_identities ci ON ci.id = up.client_identity_id
+            WHERE
+                up.user_id = ?
+                OR up.client_identity_id IN (
+                    SELECT id FROM client_identities WHERE linked_user_id = ?
+                )
+            ORDER BY up.created_at ASC, up.id ASC
+            """,
+            (int(user_id), int(user_id)),
+        ).fetchall()
+        upload_ids = [int(row["id"]) for row in upload_rows]
+        client_identity_rows = connection.execute(
+            """
+            SELECT id, created_at, normalized_client_id, linked_at, last_seen_at
+            FROM client_identities
+            WHERE linked_user_id = ?
             ORDER BY created_at ASC, id ASC
             """,
             (int(user_id),),
         ).fetchall()
-        upload_ids = [int(row["id"]) for row in upload_rows]
 
         sessions = connection.execute(
             """
@@ -389,10 +414,14 @@ def _build_user_data_export_archive(
             """
             SELECT id, case_id, created_at, updated_at, status, label, outcome, tag_ids_json, payload_json, source_upload_id
             FROM training_cases
-            WHERE created_by_user_id = ?
+            WHERE
+                created_by_user_id = ?
+                OR created_by_client_identity_id IN (
+                    SELECT id FROM client_identities WHERE linked_user_id = ?
+                )
             ORDER BY updated_at DESC, id DESC
             """,
-            (int(user_id),),
+            (int(user_id), int(user_id)),
         ).fetchall()
         sourced_case_rows = []
         if upload_ids:
@@ -467,9 +496,20 @@ def _build_user_data_export_archive(
                 "status": str(row["status"]),
                 "duplicateOfUploadId": int(row["duplicate_of_upload_id"]) if row["duplicate_of_upload_id"] is not None else None,
                 "sourceIp": str(row["source_ip"] or ""),
+                "linkedClientId": str(row["normalized_client_id"] or ""),
                 "serverPathRedacted": True,
             }
             for row in upload_rows
+        ],
+        "linkedClientIdentities": [
+            {
+                "id": int(row["id"]),
+                "createdAt": str(row["created_at"]),
+                "clientId": str(row["normalized_client_id"]),
+                "linkedAt": str(row["linked_at"] or ""),
+                "lastSeenAt": str(row["last_seen_at"] or ""),
+            }
+            for row in client_identity_rows
         ],
         "trainingCasesCreatedByAccount": [_serialize_case_row(row) for row in created_case_rows],
         "trainingCasesCurrentlySourcedFromAccountUploads": [_serialize_case_row(row) for row in sourced_case_rows],
@@ -527,6 +567,7 @@ def _build_user_data_export_archive(
         "warnings": warnings,
         "counts": {
             "uploads": len(upload_rows),
+            "linkedClientIdentities": len(client_identity_rows),
             "sessions": len(sessions),
             "createdCases": len(created_case_rows),
             "sourcedCases": len(sourced_case_rows),

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin Cases{% endblock %}
+{% block page_eyebrow %}Admin Cases{% endblock %}
+{% block page_title %}Case Review Queue{% endblock %}
+{% block page_intro %}Browse case records and jump into the full review document when you need to inspect message flow or pipeline trace details.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Training data</p>
+            <h2>Cases</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Case ID</th>
+                <th>Status</th>
+                <th>Label</th>
+                <th>Outcome</th>
+                <th>Updated</th>
+                <th>Created By</th>
+                <th>Delete</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if cases %}
+                {% for row in cases %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td><a href="/admin/cases/{{ row.id }}">{{ row.case_id }}</a></td>
+                        <td>
+                            <span class="chip chip-table {% if row.status|lower == 'submitted' %}chip-status-submitted{% endif %}">
+                                {{ row.status }}
+                            </span>
+                        </td>
+                        <td>{{ row.label or "-" }}</td>
+                        <td>
+                            <span class="chip chip-table {% if row.outcome|lower == 'safe' %}chip-outcome-safe{% elif row.outcome|lower == 'review' %}chip-outcome-review{% endif %}">
+                                {{ row.outcome or "-" }}
+                            </span>
+                        </td>
+                        <td>{{ row.updated_at|datetime_utc }}</td>
+                        <td>{{ row.created_by }}</td>
+                        <td>
+                            <form method="post" action="/admin/cases/{{ row.id }}/delete" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="btn btn-outline-danger btn-sm" aria-label="Delete case {{ row.case_id }}" title="Delete case">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="8" class="table-empty">No cases available.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

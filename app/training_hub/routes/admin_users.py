@@ -37,6 +37,7 @@ def register_admin_user_routes(app: FastAPI, settings: TrainingHubSettings) -> N
                 user=user,
                 error="Invalid user-management action.",
                 status_code=400,
+                page="users",
             )
 
         actor_user_id = int(user["id"])
@@ -129,6 +130,7 @@ def register_admin_user_routes(app: FastAPI, settings: TrainingHubSettings) -> N
                 user=user,
                 error=str(result["error"]),
                 status_code=int(result.get("status_code", 400)),
+                page="users",
             )
 
         return await run_in_threadpool(
@@ -139,6 +141,7 @@ def register_admin_user_routes(app: FastAPI, settings: TrainingHubSettings) -> N
             user=user,
             notice=str(result.get("notice", "")),
             status_code=int(result.get("status_code", 200)),
+            page="users",
         )
 
 

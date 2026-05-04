@@ -18,88 +18,40 @@ https://scamscreener.creepans.net
 ## Security rules
 
 - Never ask the player for Minecraft, Microsoft, or Mojang credentials.
-- Only use ScamScreener account credentials.
 - Only send requests over `https://`.
 - Do not disable TLS verification.
-- Do not store the ScamScreener password after login.
-- Prefer keeping the API session token in memory only.
-- Never log passwords or Bearer tokens.
+- Never log raw request payloads, client IDs, or derived handshake hashes without a clear operational need.
 - Do not send multipart form data for uploads.
 - Do not wrap training cases in an outer JSON object or array.
 
 ## Authentication
 
-Endpoint:
+The mod does not use the web-account login flow anymore. It authenticates only with its local `clientId`.
 
-```text
-POST /api/v1/client/auth/login
-```
+Normalize the `clientId` exactly like the server:
 
-Headers:
+- trim leading and trailing whitespace
+- convert to lowercase
 
-```text
-Content-Type: application/json
-```
-
-Request body:
-
-```json
-{
-  "usernameOrEmail": "alice",
-  "password": "supersecret"
-}
-```
-
-The server also accepts `username_or_email`, but `usernameOrEmail` is the preferred field name for clients.
-
-Success response:
-
-```json
-{
-  "status": "ok",
-  "sessionToken": "TOKEN_VALUE",
-  "expiresAt": "2026-03-30T20:15:00Z",
-  "user": {
-    "id": 1,
-    "username": "alice",
-    "isAdmin": false
-  }
-}
-```
-
-Use the returned token in all subsequent API requests:
-
-```text
-Authorization: Bearer TOKEN_VALUE
-```
-
-Important responses:
-
-- `200` with `status=ok`: login succeeded
-- `401`: invalid credentials
-- `403`: admin account blocked for API use when web MFA is required
-- `429` with `status=locked`: login temporarily locked; respect `retryAfter`
-
-Logout endpoint:
-
-```text
-POST /api/v1/client/auth/logout
-```
+The normalized value is the only mod-side identity for anonymous uploads.
 
 ## Upload transport contract
 
 Endpoint:
 
 ```text
-POST /api/v1/client/uploads
+POST /api/v1/client/uploads/anonymous
 ```
 
 Send these headers:
 
 ```text
-Authorization: Bearer TOKEN_VALUE
 Content-Type: application/x-ndjson
 X-ScamScreener-Filename: training-cases-v2.jsonl
+X-ScamScreener-Client-Id: <normalized clientId>
+X-ScamScreener-Payload-Sha256: <sha256(raw request body)>
+X-ScamScreener-Handshake-Sha256: <sha256(normalized clientId + ":" + payload sha256)>
+User-Agent: ScamScreener/<version>+<mc>
 ```
 
 Notes:
@@ -108,6 +60,7 @@ Notes:
 - Do not send multipart form data.
 - Do not gzip the request unless the server explicitly adds support for it later.
 - `X-ScamScreener-Filename` should be a plain file name, not a path.
+- The server recalculates both SHA-256 headers. Any mismatch is rejected with `400`.
 
 Request body rules:
 
@@ -152,7 +105,7 @@ Accepted:
 }
 ```
 
-Duplicate for the same account:
+Duplicate for the same client ID:
 
 ```json
 {
@@ -168,7 +121,7 @@ Quota exceeded:
 ```json
 {
   "status": "quota-exceeded",
-  "detail": "Daily upload count limit reached for your account.",
+  "detail": "Daily upload count limit reached for this client ID.",
   "caseCount": 34,
   "sha256": "..."
 }
@@ -177,10 +130,10 @@ Quota exceeded:
 Relevant status codes:
 
 - `201`: upload accepted
-- `200`: duplicate upload for the same account
+- `200`: duplicate upload for the same client ID
 - `400`: invalid UTF-8, invalid JSON, invalid schema, or missing `caseId`
-- `401`: missing or invalid Bearer token
 - `413`: upload too large
+- `415`: invalid content type
 - `429`: upload quota exceeded
 
 ## Minimal validation the server enforces
@@ -505,7 +458,7 @@ These rules affect how the mod should serialize and resend files.
 - Duplicate detection is based on the SHA-256 hash of the exact raw uploaded file bytes.
 - For the same ScamScreener account, uploading byte-identical NDJSON again returns `status=duplicate`.
 - Changing any byte changes the hash. This includes whitespace, field order, number formatting, and line order.
-- If a different ScamScreener account uploads the exact same bytes, the upload is still accepted for that account. It is only linked internally as a duplicate of the first upload.
+- If a different client ID uploads the exact same bytes, the upload is still accepted for that client ID. It is only linked internally as a duplicate of the first upload.
 - Case updates are keyed by `caseId`.
 - Re-uploading a known `caseId` replaces the stored case summary and payload with the newest version for that `caseId`.
 - Do not include the same `caseId` multiple times in one file. Later lines can overwrite earlier lines for that case during ingestion.
@@ -516,21 +469,21 @@ If you want stable duplicate behavior, serialize JSON deterministically and keep
 
 Recommended lifecycle inside the mod:
 
-1. Show a ScamScreener-specific login form.
-2. Make it explicit that players must not enter Minecraft credentials there.
-3. Call `/api/v1/client/auth/login`.
-4. Cache the returned session token in memory.
-5. Build the NDJSON payload deterministically.
-6. Upload the raw bytes to `/api/v1/client/uploads`.
-7. On `401`, discard the token and force a new login.
-8. On explicit logout, call `/api/v1/client/auth/logout`.
-9. On shutdown, clear any in-memory token.
+1. Generate or load the local ScamScreener `clientId`.
+2. Normalize it with `trim().lowercase()`.
+3. Make it explicit that players must not enter Minecraft credentials anywhere in the mod.
+4. Build the NDJSON payload deterministically.
+5. Hash the raw NDJSON bytes with SHA-256.
+6. Hash `normalizedClientId + ":" + payloadSha256` with SHA-256.
+7. Upload the raw bytes to `/api/v1/client/uploads/anonymous`.
+8. On `400`, keep the rejected payload and header values for developer inspection.
+9. On shutdown, clear any transient upload buffers that should not remain on disk.
 
 Recommended error handling:
 
 - `400` on upload: keep the rejected payload for developer inspection
-- `401` on upload: clear the token and require re-login
-- `429` on login: wait for `retryAfter`
+- `413` on upload: split or reduce the file before retrying
+- `415` on upload: fix the request content type
 - `429` on upload: retry later, do not spam retries
 
 ## Short summary

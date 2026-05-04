@@ -1,64 +1,101 @@
 {% extends "base.html" %}
 
+{% block shell_mode %}{% if current_user %}app{% else %}public{% endif %}{% endblock %}
 {% block html_lang %}en{% endblock %}
 {% block title %}Legal Notice - ScamScreener{% endblock %}
+{% block page_eyebrow %}{% if current_user %}Reference{% endif %}{% endblock %}
+{% block page_title %}{% if current_user %}Legal Notice{% endif %}{% endblock %}
+{% block page_intro %}{% if current_user %}Provider identification and operator contact details for this deployment.{% endif %}{% endblock %}
 
 {% block content %}
-<section class="hero glass">
-    <p class="eyebrow">ScamScreener</p>
-    <h1>Legal Notice</h1>
-    <p class="lead">
-        Provider identification for this deployed ScamScreener community project instance.
-    </p>
-    <div class="meta-row">
-        <span class="chip">{{ site_project_classification }}</span>
-        {% if current_user and current_user.is_admin == 1 %}
-            {% if site_operator_identity_complete %}
-                <span class="chip chip-status-submitted">Operator details configured</span>
-            {% else %}
-                <span class="chip">Operator details incomplete</span>
-            {% endif %}
-        {% endif %}
-    </div>
-</section>
-
-{% include "_legal_warning.html" %}
-
-<section class="detail-grid">
-    <article class="card glass legal-card">
-        <h2>Provider</h2>
-        <div class="stack-group">
-            <div class="kv-item">
-                <span>Name</span>
-                <strong>{{ site_operator_name }}</strong>
-            </div>
-            <div class="kv-item">
-                <span>Postal address</span>
-                <p class="legal-block">{{ site_postal_address }}</p>
-            </div>
-            <div class="kv-item">
-                <span>Contact</span>
-                <p class="legal-block">{{ site_contact_channel }}</p>
+<section class="{% if current_user %}section-shell workspace-section{% else %}document-shell{% endif %}">
+    {% if not current_user %}
+        <div class="public-page-header">
+            <p class="section-kicker">ScamScreener</p>
+            <h1>Legal Notice</h1>
+            <p class="document-lead">Provider identification for this deployed ScamScreener community project instance.</p>
+            <div class="overview-strip compact">
+                <article class="overview-stat">
+                    <span>Project classification</span>
+                    <strong>{{ site_project_classification }}</strong>
+                </article>
+                <article class="overview-stat">
+                    <span>Operator details</span>
+                    <strong>
+                        {% if site_operator_identity_complete %}
+                            Configured
+                        {% else %}
+                            Incomplete
+                        {% endif %}
+                    </strong>
+                </article>
             </div>
         </div>
-    </article>
+    {% else %}
+        <div class="section-header">
+            <div>
+                <p class="section-kicker">Provider</p>
+                <h2>Operator identity and deployment context</h2>
+            </div>
+        </div>
+        <div class="overview-strip compact">
+            <article class="overview-stat">
+                <span>Project classification</span>
+                <strong>{{ site_project_classification }}</strong>
+            </article>
+            <article class="overview-stat">
+                <span>Operator details</span>
+                <strong>
+                    {% if site_operator_identity_complete %}
+                        Configured
+                    {% else %}
+                        Incomplete
+                    {% endif %}
+                </strong>
+            </article>
+        </div>
+    {% endif %}
 
-    <article class="card glass legal-card">
-        <h2>Project status</h2>
-        <div class="stack-group">
+    {% include "_legal_warning.html" %}
+
+    <div class="public-section-grid">
+        <section class="public-section-panel">
+            <p class="section-kicker">Provider</p>
+            <h2>Operator identity</h2>
+            <dl class="public-kv-list">
+                <div>
+                    <dt>Name</dt>
+                    <dd>{{ site_operator_name }}</dd>
+                </div>
+                <div>
+                    <dt>Postal address</dt>
+                    <dd class="legal-block">{{ site_postal_address }}</dd>
+                </div>
+                <div>
+                    <dt>Contact</dt>
+                    <dd class="legal-block">{{ site_contact_channel }}</dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="public-section-panel">
+            <p class="section-kicker">Project status</p>
+            <h2>Deployment context</h2>
             <p>
                 This deployment is labeled as a {{ site_project_classification|lower }}. A lack of commercial intent
                 does not automatically remove provider-identification or privacy obligations.
             </p>
             <p>
-                If the service publishes editorial content or is made available to the public, additional disclosures may
-                be required.
+                If the service publishes editorial content or is made available to the public, additional disclosures
+                may be required.
             </p>
-            <div class="kv-item">
-                <span>Public base URL</span>
-                <p class="legal-block">{{ public_base_url }}</p>
-            </div>
-        </div>
-    </article>
+            <dl class="public-kv-list">
+                <div>
+                    <dt>Public base URL</dt>
+                    <dd class="legal-block">{{ public_base_url }}</dd>
+                </div>
+            </dl>
+        </section>
+    </div>
 </section>
 {% endblock %}

@@ -17,6 +17,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.training_hub.main import TrainingHubSettings, create_app
 
 CSRF_COOKIE_NAME = "training_hub_csrf"
+THEME_CSS_PATH = Path(__file__).resolve().parents[1] / "css" / "training-hub.css"
 
 
 def test_register_upload_and_dashboard(tmp_path: Path) -> None:
@@ -42,7 +43,7 @@ def test_register_upload_and_dashboard(tmp_path: Path) -> None:
 
     dashboard = client.get("/dashboard")
     assert dashboard.status_code == 200
-    assert "My Uploads" in dashboard.text
+    assert "Latest uploads" in dashboard.text
     assert "case_000001" not in dashboard.text
 
     with sqlite3.connect(settings.database_path) as connection:
@@ -386,6 +387,100 @@ def test_api_client_upload_requires_bearer_session(tmp_path: Path) -> None:
     assert response.json()["detail"] == "Bearer session token required."
 
 
+def test_anonymous_api_client_upload_accepts_client_id_handshake(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    response = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="  local-mod-01  ", filename="linked-history.jsonl"),
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["caseCount"] == 1
+    assert body["insertedCases"] == 1
+    assert body["updatedCases"] == 0
+
+    with sqlite3.connect(settings.database_path) as connection:
+        upload_row = connection.execute(
+            """
+            SELECT up.user_id, up.client_identity_id, ci.normalized_client_id
+            FROM uploads up
+            JOIN client_identities ci ON ci.id = up.client_identity_id
+            WHERE up.id = 1
+            """
+        ).fetchone()
+        case_row = connection.execute(
+            """
+            SELECT created_by_user_id, created_by_client_identity_id, source_upload_id
+            FROM training_cases
+            WHERE case_id = 'case_000001'
+            """
+        ).fetchone()
+
+    assert upload_row == (None, 1, "local-mod-01")
+    assert case_row == (None, 1, 1)
+
+
+def test_anonymous_api_client_upload_rejects_handshake_mismatch(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+    payload = _valid_payload()
+    headers = _anonymous_upload_headers(payload, client_id="local-mod-01")
+    headers["X-ScamScreener-Handshake-Sha256"] = "0" * 64
+
+    response = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "Handshake" in response.json()["detail"]
+
+
+def test_linked_client_uploads_appear_in_dashboard_history(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="linked-client", filename="linked-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE client_identities
+            SET linked_user_id = ?, linked_at = ?
+            WHERE normalized_client_id = ?
+            """,
+            (1, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "linked-client"),
+        )
+        connection.commit()
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "linked-history.jsonl" in dashboard.text
+
+    download = client.get("/dashboard/uploads/1/download")
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("application/x-ndjson")
+
+
 def test_api_client_login_blocks_admin_accounts_when_mfa_is_required(tmp_path: Path) -> None:
     settings = _settings(
         tmp_path,
@@ -426,7 +521,7 @@ def test_first_registered_user_is_admin(tmp_path: Path) -> None:
     admin_page = client.get("/admin")
 
     assert admin_page.status_code == 200
-    assert "Bundle Control" in admin_page.text
+    assert "Operations Overview" in admin_page.text
 
 
 def test_admin_page_formats_last_login_timestamp_in_utc(tmp_path: Path) -> None:
@@ -746,10 +841,12 @@ def test_legal_notice_page_shows_operator_status_badge_for_admins(tmp_path: Path
         follow_redirects=True,
     )
 
-    response = client.get("/legal-notice")
+    response = client.get("/legal-notice", follow_redirects=False)
 
     assert response.status_code == 200
-    assert "Operator details configured" in response.text
+    assert "app-sidebar" in response.text
+    assert "Legal Notice" in response.text
+    assert 'href="/legal-notice"' in response.text
 
 
 def test_login_page_shows_minecraft_credential_warning_and_footer_disclaimer(tmp_path: Path) -> None:
@@ -761,6 +858,153 @@ def test_login_page_shows_minecraft_credential_warning_and_footer_disclaimer(tmp
     assert "Do NOT enter your Minecraft credentials!" in response.text
     assert "ScamScreener © 2026 Pankraz01" in response.text
     assert "ScamScreener is in no way affiliated with Minecraft, Microsoft, or Mojang." in response.text
+
+
+def test_hub_pages_use_local_bootstrap_assets(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    landing = client.get("/", follow_redirects=False)
+    login = client.get("/login")
+
+    assert landing.status_code == 303
+    assert landing.headers.get("location") == "/dashboard"
+    assert login.status_code == 200
+    assert '/css/bootstrap.min.css' in login.text
+    assert '/css/training-hub.css' in login.text
+    assert "cdn.jsdelivr.net" not in login.text
+    assert "tailwindcss" not in login.text
+
+
+def test_theme_css_uses_the_new_brand_palette_without_legacy_primary_blue() -> None:
+    css = THEME_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "#B006F9".lower() in css.lower()
+    assert "#CC60FB".lower() in css.lower()
+    assert "#F7E6FE".lower() in css.lower()
+    assert "--hub-nav-bg: #b006f9;" in css.lower()
+    assert "--hub-nav-active-bg: rgba(255, 255, 255, 0.96);" in css.lower()
+    assert "#1f5f8b" not in css.lower()
+    assert "#214f71" not in css.lower()
+    assert "#163e5b" not in css.lower()
+    assert "31, 95, 139" not in css
+
+
+def test_dashboard_renders_workspace_sidebar_and_account_navigation(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "app-sidebar" in response.text
+    assert "workspace-nav" in response.text
+    assert "Workspace" in response.text
+    assert "Reference" in response.text
+    assert 'href="/dashboard/uploads"' in response.text
+    assert 'href="/dashboard/account"' in response.text
+    assert 'href="/legal-notice"' in response.text
+    assert 'href="/privacy"' in response.text
+    assert re.search(r'href="/dashboard"[^>]*aria-current="page"', response.text) is not None
+    assert "Go to Uploads" in response.text
+    assert "Delete My Account" not in response.text
+
+
+def test_sidebar_disclosure_opens_the_relevant_group_for_each_context(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    uploads_page = client.get("/dashboard/uploads")
+    account_page = client.get("/dashboard/account")
+    privacy_page = client.get("/privacy")
+
+    assert uploads_page.status_code == 200
+    assert uploads_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/dashboard/uploads"[^>]*aria-current="page"', uploads_page.text) is not None
+    assert "Upload training cases" in uploads_page.text
+    assert "Delete My Account" not in uploads_page.text
+
+    assert account_page.status_code == 200
+    assert account_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/dashboard/account"[^>]*aria-current="page"', account_page.text) is not None
+    assert "Email My Data Export" in account_page.text
+    assert "Revoke Other Sessions" in account_page.text
+    assert "Delete My Account" in account_page.text
+
+    assert privacy_page.status_code == 200
+    assert privacy_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/privacy"[^>]*aria-current="page"', privacy_page.text) is not None
+
+
+def test_admin_renders_workspace_sidebar_and_primary_controls(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = client.get("/admin")
+
+    assert response.status_code == 200
+    assert "app-sidebar" in response.text
+    assert "workspace-nav" in response.text
+    assert "Admin" in response.text
+    assert "Build Training Bundle" in response.text
+    assert 'href="/admin/users"' in response.text
+    assert 'href="/admin/system"' in response.text
+    assert response.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/admin"[^>]*aria-current="page"', response.text) is not None
+    assert "Choose a focused area" in response.text
+
+
+def test_admin_subpages_render_separate_operational_areas(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    users_page = client.get("/admin/users")
+    cases_page = client.get("/admin/cases")
+    runs_page = client.get("/admin/runs")
+    system_page = client.get("/admin/system")
+
+    assert users_page.status_code == 200
+    assert "User Management" in users_page.text
+    assert "Audit log" not in users_page.text
+
+    assert cases_page.status_code == 200
+    assert "Case Review Queue" in cases_page.text
+    assert "Training runs" not in cases_page.text
+
+    assert runs_page.status_code == 200
+    assert "Training Run History" in runs_page.text
+    assert "User Management" not in runs_page.text
+    assert runs_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/admin/runs"[^>]*aria-current="page"', runs_page.text) is not None
+
+    assert system_page.status_code == 200
+    assert "System Controls and Audit" in system_page.text
+    assert "Restore Backup" in system_page.text
+    assert system_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/admin/system"[^>]*aria-current="page"', system_page.text) is not None
 
 
 def test_privacy_page_lists_us_hosting_and_security_storage(tmp_path: Path) -> None:
@@ -789,6 +1033,24 @@ def test_privacy_page_lists_us_hosting_and_security_storage(tmp_path: Path) -> N
     assert "training_hub_csrf" in response.text
     assert "smtp.example.com" in response.text
     assert "Password reset" in response.text
+
+
+def test_privacy_page_redirects_logged_in_users_to_dashboard_section(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = client.get("/privacy", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert "app-sidebar" in response.text
+    assert "Privacy Notice" in response.text
+    assert 'href="/privacy"' in response.text
 
 
 def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> None:
@@ -846,7 +1108,7 @@ def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> N
 
     admin_page = client.get("/admin")
     assert admin_page.status_code == 200
-    assert "Bundle Control" in admin_page.text
+    assert "Operations Overview" in admin_page.text
 
     with sqlite3.connect(settings.database_path) as connection:
         issued_audit = connection.execute(
@@ -1200,7 +1462,7 @@ def test_admin_user_management_grant_and_revoke(tmp_path: Path) -> None:
         assert revoke_audit is not None
 
 
-def test_admin_page_shows_case_list_and_audit_log(tmp_path: Path) -> None:
+def test_admin_pages_show_case_list_and_audit_log_on_their_separate_views(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
 
@@ -1216,12 +1478,14 @@ def test_admin_page_shows_case_list_and_audit_log(tmp_path: Path) -> None:
         files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
     )
 
-    admin_page = client.get("/admin")
-    assert admin_page.status_code == 200
-    assert "Basic Case List" in admin_page.text
-    assert "/admin/cases/1" in admin_page.text
-    assert "Audit Log" in admin_page.text
-    assert "upload.accepted" in admin_page.text
+    cases_page = client.get("/admin/cases")
+    system_page = client.get("/admin/system")
+    assert cases_page.status_code == 200
+    assert "Case Review Queue" in cases_page.text
+    assert "/admin/cases/1" in cases_page.text
+    assert system_page.status_code == 200
+    assert "Audit log" in system_page.text
+    assert "upload.accepted" in system_page.text
 
 
 def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
@@ -1247,6 +1511,53 @@ def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
     assert "Conversation" in detail.text
     assert "Stage Results" in detail.text
     assert "case_000001" in detail.text
+
+
+def test_dashboard_and_admin_core_controls_remain_visible_after_reskin(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
+    )
+
+    dashboard = client.get("/dashboard")
+    admin = client.get("/admin")
+    uploads_page = client.get("/dashboard/uploads")
+    account_page = client.get("/dashboard/account")
+    system_page = client.get("/admin/system")
+    cases_page = client.get("/admin/cases")
+
+    assert dashboard.status_code == 200
+    assert "Go to Uploads" in dashboard.text
+    assert "Open Account Page" in dashboard.text
+
+    assert uploads_page.status_code == 200
+    assert "Upload File" in uploads_page.text
+
+    assert account_page.status_code == 200
+    assert "Email My Data Export" in account_page.text
+    assert "Revoke Other Sessions" in account_page.text
+    assert "Delete My Account" in account_page.text
+
+    assert admin.status_code == 200
+    assert "Build Training Bundle" in admin.text
+    assert "Choose a focused area" in admin.text
+
+    assert system_page.status_code == 200
+    assert "Restore Backup" in system_page.text
+    assert "Audit log" in system_page.text
+
+    assert cases_page.status_code == 200
+    assert "Case Review Queue" in cases_page.text
 
 
 def test_admin_can_delete_case_from_table(tmp_path: Path) -> None:
@@ -1300,7 +1611,7 @@ def test_admin_can_delete_case_from_detail_page(tmp_path: Path) -> None:
     )
     assert deleted.status_code == 200
     assert "Deleted case case_000001." in deleted.text
-    assert "Basic Case List" in deleted.text
+    assert "Case Review Queue" in deleted.text
 
     with sqlite3.connect(settings.database_path) as connection:
         case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
@@ -2297,6 +2608,26 @@ def _post_form(
     if headers:
         request_headers.update(headers)
     return client.post(path, data=form_data, files=files, headers=request_headers, follow_redirects=follow_redirects)
+
+
+def _anonymous_upload_headers(
+    payload: str,
+    *,
+    client_id: str,
+    filename: str = "training-cases-v2.jsonl",
+    user_agent: str = "ScamScreener/1.0.0+1.20.1",
+) -> dict[str, str]:
+    normalized_client_id = client_id.strip().lower()
+    payload_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    handshake_sha = hashlib.sha256(f"{normalized_client_id}:{payload_sha}".encode("utf-8")).hexdigest()
+    return {
+        "Content-Type": "application/x-ndjson",
+        "X-ScamScreener-Filename": filename,
+        "X-ScamScreener-Client-Id": client_id,
+        "X-ScamScreener-Payload-Sha256": payload_sha,
+        "X-ScamScreener-Handshake-Sha256": handshake_sha,
+        "User-Agent": user_agent,
+    }
 
 
 def _valid_payload(

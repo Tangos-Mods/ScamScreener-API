@@ -59,6 +59,52 @@ def _migrate_training_cases_payload_json(connection: sqlite3.Connection) -> None
     )
 
 
+def _migrate_client_identity_tables(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS client_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                normalized_client_id TEXT NOT NULL UNIQUE,
+                linked_user_id INTEGER,
+                linked_at TEXT,
+                last_seen_at TEXT NOT NULL,
+                FOREIGN KEY (linked_user_id) REFERENCES users(id)
+            )
+            """
+        )
+    except Exception:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS client_identities (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                normalized_client_id VARCHAR(128) NOT NULL UNIQUE,
+                linked_user_id BIGINT NULL,
+                linked_at VARCHAR(40),
+                last_seen_at VARCHAR(40) NOT NULL,
+                FOREIGN KEY (linked_user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+    _add_column_if_missing(
+        connection,
+        "uploads",
+        "client_identity_id",
+        "ALTER TABLE uploads ADD COLUMN client_identity_id INTEGER",
+        "ALTER TABLE uploads ADD COLUMN client_identity_id BIGINT NULL",
+    )
+    _add_column_if_missing(
+        connection,
+        "training_cases",
+        "created_by_client_identity_id",
+        "ALTER TABLE training_cases ADD COLUMN created_by_client_identity_id INTEGER",
+        "ALTER TABLE training_cases ADD COLUMN created_by_client_identity_id BIGINT NULL",
+    )
+
+
 def _migrate_users_security_columns(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(
         connection,
@@ -84,6 +130,63 @@ def _migrate_uploads_security_columns(connection: sqlite3.Connection) -> None:
         "ALTER TABLE uploads ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE uploads ADD COLUMN source_ip VARCHAR(80) NOT NULL DEFAULT ''",
     )
+    columns = _table_columns(connection, "uploads")
+    if not columns:
+        return
+
+    if "client_identity_id" not in columns:
+        return
+
+    # SQLite does not support altering nullability in place.
+    try:
+        pragma_rows = connection.execute("PRAGMA table_info(uploads)").fetchall()
+    except Exception:
+        pragma_rows = []
+    if pragma_rows:
+        user_id_row = next((row for row in pragma_rows if str(row[1]).strip().lower() == "user_id"), None)
+        if user_id_row is not None and int(user_id_row[3] or 0) == 1:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS uploads__migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    user_id INTEGER,
+                    client_identity_id INTEGER,
+                    original_file_name TEXT NOT NULL,
+                    stored_path TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    case_count INTEGER NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    duplicate_of_upload_id INTEGER,
+                    source_ip TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
+                    FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads__migration(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO uploads__migration (
+                    id, created_at, user_id, client_identity_id, original_file_name, stored_path,
+                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip
+                )
+                SELECT
+                    id, created_at, user_id, client_identity_id, original_file_name, stored_path,
+                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip
+                FROM uploads
+                """
+            )
+            connection.execute("DROP TABLE uploads")
+            connection.execute("ALTER TABLE uploads__migration RENAME TO uploads")
+            return
+
+    # MariaDB path.
+    try:
+        connection.execute("ALTER TABLE uploads MODIFY user_id BIGINT NULL")
+    except Exception:
+        pass
 
 
 def _migrate_audit_log_columns(connection: sqlite3.Connection) -> None:
@@ -101,6 +204,47 @@ def _migrate_audit_log_columns(connection: sqlite3.Connection) -> None:
         "ALTER TABLE audit_logs ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE audit_logs ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''",
     )
+    try:
+        pragma_rows = connection.execute("PRAGMA table_info(audit_logs)").fetchall()
+    except Exception:
+        pragma_rows = []
+    if pragma_rows:
+        actor_row = next((row for row in pragma_rows if str(row[1]).strip().lower() == "actor_user_id"), None)
+        if actor_row is not None and int(actor_row[3] or 0) == 1:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_logs__migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    actor_user_id INTEGER,
+                    action TEXT NOT NULL,
+                    target_type TEXT NOT NULL DEFAULT '',
+                    target_id INTEGER,
+                    details TEXT NOT NULL DEFAULT '',
+                    source_ip TEXT NOT NULL DEFAULT '',
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (actor_user_id) REFERENCES users(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_logs__migration (
+                    id, created_at, actor_user_id, action, target_type, target_id, details, source_ip, user_agent
+                )
+                SELECT
+                    id, created_at, actor_user_id, action, target_type, target_id, details, source_ip, user_agent
+                FROM audit_logs
+                """
+            )
+            connection.execute("DROP TABLE audit_logs")
+            connection.execute("ALTER TABLE audit_logs__migration RENAME TO audit_logs")
+            return
+
+    try:
+        connection.execute("ALTER TABLE audit_logs MODIFY actor_user_id BIGINT NULL")
+    except Exception:
+        pass
 
 
 def _migrate_password_reset_token_columns(connection: sqlite3.Connection) -> None:
@@ -148,4 +292,59 @@ def _migrate_admin_mfa_challenge_columns(connection: sqlite3.Connection) -> None
         "ALTER TABLE admin_mfa_challenges ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE admin_mfa_challenges ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''",
     )
+
+
+def _migrate_training_case_identity_columns(connection: sqlite3.Connection) -> None:
+    columns = _table_columns(connection, "training_cases")
+    if not columns or "created_by_client_identity_id" not in columns:
+        return
+
+    try:
+        pragma_rows = connection.execute("PRAGMA table_info(training_cases)").fetchall()
+    except Exception:
+        pragma_rows = []
+    if pragma_rows:
+        user_id_row = next((row for row in pragma_rows if str(row[1]).strip().lower() == "created_by_user_id"), None)
+        if user_id_row is not None and int(user_id_row[3] or 0) == 1:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS training_cases__migration (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    created_by_user_id INTEGER,
+                    created_by_client_identity_id INTEGER,
+                    source_upload_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'submitted',
+                    label TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL DEFAULT '',
+                    tag_ids_json TEXT NOT NULL DEFAULT '[]',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+                    FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
+                    FOREIGN KEY (source_upload_id) REFERENCES uploads(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO training_cases__migration (
+                    id, case_id, created_at, updated_at, created_by_user_id, created_by_client_identity_id,
+                    source_upload_id, status, label, outcome, tag_ids_json, payload_json
+                )
+                SELECT
+                    id, case_id, created_at, updated_at, created_by_user_id, created_by_client_identity_id,
+                    source_upload_id, status, label, outcome, tag_ids_json, payload_json
+                FROM training_cases
+                """
+            )
+            connection.execute("DROP TABLE training_cases")
+            connection.execute("ALTER TABLE training_cases__migration RENAME TO training_cases")
+            return
+
+    try:
+        connection.execute("ALTER TABLE training_cases MODIFY created_by_user_id BIGINT NULL")
+    except Exception:
+        pass
 

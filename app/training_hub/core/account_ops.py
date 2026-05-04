@@ -45,11 +45,17 @@ def _delete_user_upload(settings: TrainingHubSettings, user_id: int, upload_id: 
         connection.row_factory = sqlite3.Row
         target_rows = connection.execute(
             """
-            SELECT id, user_id, stored_path, payload_sha256, case_count
+            SELECT id, user_id, client_identity_id, stored_path, payload_sha256, case_count
             FROM uploads
-            WHERE id = ? AND user_id = ?
+            WHERE id = ?
+              AND (
+                    user_id = ?
+                    OR client_identity_id IN (
+                        SELECT id FROM client_identities WHERE linked_user_id = ?
+                    )
+              )
             """,
-            (int(upload_id), int(user_id)),
+            (int(upload_id), int(user_id), int(user_id)),
         ).fetchall()
         if not target_rows:
             return {"ok": False, "error": "Upload not found.", "status_code": 404}
@@ -73,12 +79,16 @@ def _purge_user_uploads(settings: TrainingHubSettings, user_id: int) -> dict[str
         connection.row_factory = sqlite3.Row
         upload_rows = connection.execute(
             """
-            SELECT id, user_id, stored_path, payload_sha256, case_count
+            SELECT id, user_id, client_identity_id, stored_path, payload_sha256, case_count
             FROM uploads
-            WHERE user_id = ?
+            WHERE
+                user_id = ?
+                OR client_identity_id IN (
+                    SELECT id FROM client_identities WHERE linked_user_id = ?
+                )
             ORDER BY created_at ASC, id ASC
             """,
-            (int(user_id),),
+            (int(user_id), int(user_id)),
         ).fetchall()
         summary = _purge_upload_rows_in_connection(connection, settings, int(user_id), list(upload_rows))
         connection.commit()
@@ -131,12 +141,16 @@ def _delete_user_account(settings: TrainingHubSettings, user_id: int) -> dict[st
 
         upload_rows = connection.execute(
             """
-            SELECT id, user_id, stored_path, payload_sha256, case_count
+            SELECT id, user_id, client_identity_id, stored_path, payload_sha256, case_count
             FROM uploads
-            WHERE user_id = ?
+            WHERE
+                user_id = ?
+                OR client_identity_id IN (
+                    SELECT id FROM client_identities WHERE linked_user_id = ?
+                )
             ORDER BY created_at ASC, id ASC
             """,
-            (int(user_id),),
+            (int(user_id), int(user_id)),
         ).fetchall()
         purge_summary = _purge_upload_rows_in_connection(connection, settings, int(user_id), list(upload_rows))
 
@@ -164,6 +178,10 @@ def _delete_user_account(settings: TrainingHubSettings, user_id: int) -> dict[st
         connection.execute("DELETE FROM admin_mfa_challenges WHERE user_id = ?", (int(user_id),))
         if export_request_ids:
             _delete_rows_for_ids(connection, "data_export_requests", "id", export_request_ids)
+        connection.execute(
+            "UPDATE client_identities SET linked_user_id = NULL, linked_at = NULL WHERE linked_user_id = ?",
+            (int(user_id),),
+        )
 
         _delete_audit_logs_for_user_resources(
             connection,
@@ -268,8 +286,16 @@ def _purge_upload_rows_in_connection(
 
 def _case_ids_created_by_user(connection, user_id: int) -> set[str]:
     rows = connection.execute(
-        "SELECT DISTINCT case_id FROM training_cases WHERE created_by_user_id = ?",
-        (int(user_id),),
+        """
+        SELECT DISTINCT case_id
+        FROM training_cases
+        WHERE
+            created_by_user_id = ?
+            OR created_by_client_identity_id IN (
+                SELECT id FROM client_identities WHERE linked_user_id = ?
+            )
+        """,
+        (int(user_id), int(user_id)),
     ).fetchall()
     return {str(row["case_id"] or "").strip() for row in rows if str(row["case_id"] or "").strip()}
 
@@ -289,9 +315,11 @@ def _collect_affected_case_ids(connection, user_id: int, upload_ids: list[int]) 
         training_rows = connection.execute(
             (
                 "SELECT DISTINCT case_id FROM training_cases "
-                f"WHERE created_by_user_id = ? OR source_upload_id IN ({_placeholders(len(batch))})"
+                "WHERE (created_by_user_id = ? "
+                "OR created_by_client_identity_id IN (SELECT id FROM client_identities WHERE linked_user_id = ?)) "
+                f"OR source_upload_id IN ({_placeholders(len(batch))})"
             ),
-            (int(user_id), *batch),
+            (int(user_id), int(user_id), *batch),
         ).fetchall()
         for row in training_rows:
             case_id = str(row["case_id"] or "").strip()
@@ -363,19 +391,21 @@ def _rebuild_training_cases(connection, affected_case_ids: set[str]) -> dict[str
                     created_at,
                     updated_at,
                     created_by_user_id,
+                    created_by_client_identity_id,
                     source_upload_id,
                     status,
                     label,
                     outcome,
                     tag_ids_json,
                     payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     case_id,
                     str(version["first_created_at"]),
                     now,
-                    int(version["first_user_id"]),
+                    int(version["first_user_id"]) if version["first_user_id"] is not None else None,
+                    int(version["first_client_identity_id"]) if version["first_client_identity_id"] is not None else None,
                     int(version["latest_upload_id"]),
                     "submitted",
                     str(version["latest_label"]),
@@ -390,14 +420,15 @@ def _rebuild_training_cases(connection, affected_case_ids: set[str]) -> dict[str
         connection.execute(
             """
             UPDATE training_cases
-            SET created_at = ?, updated_at = ?, created_by_user_id = ?, source_upload_id = ?,
+            SET created_at = ?, updated_at = ?, created_by_user_id = ?, created_by_client_identity_id = ?, source_upload_id = ?,
                 status = ?, label = ?, outcome = ?, tag_ids_json = ?, payload_json = ?
             WHERE case_id = ?
             """,
             (
                 str(version["first_created_at"]),
                 now,
-                int(version["first_user_id"]),
+                int(version["first_user_id"]) if version["first_user_id"] is not None else None,
+                int(version["first_client_identity_id"]) if version["first_client_identity_id"] is not None else None,
                 int(version["latest_upload_id"]),
                 "submitted",
                 str(version["latest_label"]),
@@ -424,7 +455,8 @@ def _remaining_case_versions(connection, affected_case_ids: set[str]) -> dict[st
                 uc.payload_json,
                 up.id AS upload_id,
                 up.created_at AS upload_created_at,
-                up.user_id AS upload_user_id
+                up.user_id AS upload_user_id,
+                up.client_identity_id AS upload_client_identity_id
             FROM upload_cases uc
             JOIN uploads up ON up.id = uc.upload_id
             """
@@ -441,13 +473,17 @@ def _remaining_case_versions(connection, affected_case_ids: set[str]) -> dict[st
                 "payload_json": str(row["payload_json"] or "{}"),
                 "upload_id": int(row["upload_id"]),
                 "upload_created_at": str(row["upload_created_at"]),
-                "upload_user_id": int(row["upload_user_id"]),
+                "upload_user_id": int(row["upload_user_id"]) if row["upload_user_id"] is not None else None,
+                "upload_client_identity_id": (
+                    int(row["upload_client_identity_id"]) if row["upload_client_identity_id"] is not None else None
+                ),
             }
             current = versions.get(case_id)
             if current is None:
                 current = {
                     "first_created_at": payload["upload_created_at"],
                     "first_user_id": payload["upload_user_id"],
+                    "first_client_identity_id": payload["upload_client_identity_id"],
                     "latest_upload_id": payload["upload_id"],
                     "latest_label": payload["label"],
                     "latest_outcome": payload["outcome"],
