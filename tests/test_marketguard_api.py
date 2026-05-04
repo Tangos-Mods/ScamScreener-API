@@ -159,15 +159,15 @@ def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path
                 "price": 98_000_000.0,
                 "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "item_name": "Hyperion",
-                "avg7d": 98_000_000.0,
-                "avg30d": 98_000_000.0,
+                "avg7d": 98_000_000,
+                "avg30d": 98_000_000,
             },
             "TRUE_ESSENCE": {
                 "price": 23_437.5,
                 "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
                 "item_name": "True Essence",
-                "avg7d": 23_437.5,
-                "avg30d": 23_437.5,
+                "avg7d": 23_438,
+                "avg30d": 23_438,
             },
         },
     }
@@ -210,8 +210,8 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
                 "price": 98_000_000.0,
                 "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "item_name": "HYPERION",
-                "avg7d": 98_000_000.0,
-                "avg30d": 98_000_000.0,
+                "avg7d": 98_000_000,
+                "avg30d": 98_000_000,
             }
         },
     }
@@ -267,8 +267,8 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
     assert schemas["LowestBinV1Response"]["example"]["HYPERION"] == 98000000.0
     assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
-    assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000.0
-    assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000.0
+    assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
+    assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000
 
 
 def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
@@ -789,7 +789,7 @@ def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_
         first_response = client.get("/api/v2/lowestbin")
 
     assert first_response.status_code == 200
-    assert first_response.json()["products"]["HYPERION"]["avg30d"] == 100_000_000.0
+    assert first_response.json()["products"]["HYPERION"]["avg30d"] == 100_000_000
 
     standalone_app = create_marketguard_app(
         settings=settings,
@@ -799,8 +799,53 @@ def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_
         second_response = client.get("/api/v2/lowestbin")
 
     assert second_response.status_code == 200
-    assert second_response.json()["products"]["HYPERION"]["avg7d"] == 150_000_000.0
-    assert second_response.json()["products"]["HYPERION"]["avg30d"] == 150_000_000.0
+    assert second_response.json()["products"]["HYPERION"]["avg7d"] == 150_000_000
+    assert second_response.json()["products"]["HYPERION"]["avg30d"] == 150_000_000
+
+
+def test_lowestbin_v2_rounds_average_values_half_up(tmp_path: Path) -> None:
+    history_dir = tmp_path / "marketguard-data"
+    store = LowestBinHistoryStore(history_dir, retention_days=31)
+    store.record_snapshot(
+        snapshot_last_updated=_epoch_millis(2025, 1, 10, 12, 0),
+        item_prices={"TRUE_ESSENCE": 23_437.0},
+    )
+    store.record_snapshot(
+        snapshot_last_updated=_epoch_millis(2025, 1, 11, 12, 0),
+        item_prices={"TRUE_ESSENCE": 23_438.0},
+    )
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 1, 11, 12, 0),
+                "auctions": [
+                    _auction(
+                        "TRUE_ESSENCE",
+                        23_437.5,
+                        item_name="True Essence",
+                        auctioneer="cccccccccccccccccccccccccccccccc",
+                    ),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(storage_dir=history_dir)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v2/lowestbin")
+
+    assert response.status_code == 200
+    assert response.json()["products"]["TRUE_ESSENCE"]["avg7d"] == 23_438
+    assert response.json()["products"]["TRUE_ESSENCE"]["avg30d"] == 23_438
 
 
 def test_bazaar_returns_stale_cache_when_refresh_fails() -> None:

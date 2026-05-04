@@ -304,15 +304,15 @@ Example `GET /api/v2/lowestbin` response:
       "price": 98000000.0,
       "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "item_name": "Hyperion",
-      "avg7d": 97500000.0,
-      "avg30d": 96000000.0
+      "avg7d": 97500000,
+      "avg30d": 96000000
     },
     "TRUE_ESSENCE": {
       "price": 23437.5,
       "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
       "item_name": "True Essence",
-      "avg7d": 22850.0,
-      "avg30d": 22120.0
+      "avg7d": 22850,
+      "avg30d": 22120
     }
   }
 }

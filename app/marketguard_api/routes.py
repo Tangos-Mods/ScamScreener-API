@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -14,6 +15,12 @@ from .service import BazaarService, LowestBinService
 _LOWESTBIN_V1_DEPRECATION_HEADER = "true"
 _LOWESTBIN_V1_SUNSET_HEADER = "Mon, 01 Jun 2026 00:00:00 GMT"
 _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
+
+
+def _round_lowestbin_average(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _error_response_docs(detail: str, *, retry_after: bool = False) -> dict[str, object]:
@@ -149,8 +156,8 @@ def register_marketguard_routes(
                         "price": entry.price,
                         "auctioneerUuid": entry.auctioneer_uuid,
                         "item_name": entry.item_name,
-                        "avg7d": entry.avg_7d,
-                        "avg30d": entry.avg_30d,
+                        "avg7d": _round_lowestbin_average(entry.avg_7d),
+                        "avg30d": _round_lowestbin_average(entry.avg_30d),
                     }
                     for item_key, entry in snapshot.items.items()
                 },

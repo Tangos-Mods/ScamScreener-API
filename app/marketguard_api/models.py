@@ -92,8 +92,8 @@ class LowestBinV2Product(BaseModel):
     price: float = Field(..., examples=[98000000.0])
     auctioneerUuid: str = Field(..., examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
     item_name: str = Field(..., examples=["Hyperion"])
-    avg7d: float | None = Field(None, examples=[97500000.0])
-    avg30d: float | None = Field(None, examples=[96000000.0])
+    avg7d: int | None = Field(None, examples=[97500000])
+    avg30d: int | None = Field(None, examples=[96000000])
 
 
 class LowestBinV2Response(BaseModel):
@@ -106,15 +106,15 @@ class LowestBinV2Response(BaseModel):
                     "price": 98000000.0,
                     "auctioneerUuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "item_name": "Hyperion",
-                    "avg7d": 97500000.0,
-                    "avg30d": 96000000.0,
+                    "avg7d": 97500000,
+                    "avg30d": 96000000,
                 },
                 "TRUE_ESSENCE": {
                     "price": 23437.5,
                     "auctioneerUuid": "cccccccccccccccccccccccccccccccc",
                     "item_name": "True Essence",
-                    "avg7d": 22850.0,
-                    "avg30d": 22120.0,
+                    "avg7d": 22850,
+                    "avg30d": 22120,
                 },
             }
         ],
