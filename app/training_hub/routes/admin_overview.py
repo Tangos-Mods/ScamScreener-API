@@ -151,7 +151,8 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
         summary = (
             f"Retention cleanup completed. Sessions: {cleanup['sessions']}, "
             f"Reset tokens: {cleanup['password_reset_tokens']}, "
-            f"MFA challenges: {cleanup['admin_mfa_challenges']}, "
+            f"Legacy MFA challenges: {cleanup['admin_mfa_challenges']}, "
+            f"Auth flows: {cleanup.get('auth_flow_tokens', 0)}, "
             f"Audit logs: {cleanup['audit_logs']}, "
             f"Uploads: {cleanup['uploads']}, Bundles: {cleanup['bundles']}, "
             f"Backups: {cleanup.get('backups', 0)}, "

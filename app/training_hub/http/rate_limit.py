@@ -71,10 +71,18 @@ def _rate_limit_rule(
     if normalized_method == "POST":
         if path == "/login":
             return "auth.login", 12, 300
+        if path == "/login/passkey/options":
+            return "auth.passkey-login-options", 12, 300
+        if path == "/login/passkey/verify":
+            return "auth.passkey-login-verify", 12, 600
         if path == "/api/v1/client/auth/login":
             return "auth.api-login", 12, 300
-        if path == "/admin/mfa":
+        if path in {"/admin/mfa", "/mfa"}:
             return "auth.admin-mfa", 12, 600
+        if path == "/mfa/passkey/options":
+            return "auth.mfa-passkey-options", 12, 300
+        if path == "/mfa/passkey/verify":
+            return "auth.mfa-passkey-verify", 12, 600
         if path == "/forgot-password":
             return "auth.password-reset-request", 10, 600
         if path == "/reset-password":
@@ -89,7 +97,7 @@ def _rate_limit_rule(
             return "upload.api-anonymous-submit", 12, 600
         if path == "/api/v1/client/auth/logout":
             return "auth.api-logout", 30, 600
-        if path == "/dashboard/password":
+        if path in {"/dashboard/password", "/account/security/password"}:
             return "auth.password-change", 10, 600
         if path == "/admin/train":
             return "admin.train", 4, 600

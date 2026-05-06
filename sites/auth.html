@@ -63,6 +63,13 @@
                 </div>
                 <button type="submit" class="btn btn-primary w-100">{{ title }}</button>
             </form>
+            {% if mode == "login" %}
+                <div class="surface-actions" style="margin-top: 1rem;">
+                    <button id="passkey_login_button" type="button" class="btn btn-outline-primary w-100">Login with Passkey</button>
+                </div>
+                <p class="muted" style="margin-top: 0.5rem;">Username or email is optional when your browser already has a discoverable passkey for this account.</p>
+                <p id="passkey_login_status" class="muted" aria-live="polite" style="margin-top: 0.75rem;"></p>
+            {% endif %}
         {% endif %}
 
         <div class="auth-switch">
@@ -79,4 +86,10 @@
         </div>
     </div>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+{% if mode == "login" %}
+<script src="/js/passkeys.js"></script>
+{% endif %}
 {% endblock %}

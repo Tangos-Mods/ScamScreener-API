@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% from "_action_disclosure.html" import sensitive_action %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Account Security{% endblock %}
+{% block page_eyebrow %}Account{% endblock %}
+{% block page_title %}Security{% endblock %}
+{% block page_intro %}Manage password, MFA methods, passkeys, and recovery codes from one place.{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+{% if mfa_state.admin_setup_required %}
+    <section class="message warning" role="alert">
+        Your admin account still uses the temporary email bridge. Set up Authenticator App or Passkey now to finish migration.
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Status</p>
+            <h2>MFA overview</h2>
+            <p class="section-copy">
+                Standard methods: {{ mfa_state.standard_factor_count }}.
+                Authenticator apps: {{ mfa_state.totp_factor_count }}.
+                Passkeys: {{ mfa_state.passkey_count }}.
+                Backup codes left: {{ mfa_state.backup_code_count }}.
+            </p>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">MFA</p>
+            <strong class="summary-metric">{% if mfa_state.mfa_enabled %}Enabled{% else %}Disabled{% endif %}</strong>
+            <p>{% if mfa_state.admin_setup_required %}Admin setup required.{% elif mfa_state.is_admin %}Required for this admin account.{% else %}Optional for this account.{% endif %}</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Recovery</p>
+            <strong class="summary-metric">{{ mfa_state.backup_code_count }}</strong>
+            <p>Unused one-time recovery codes currently stored for this account.</p>
+        </article>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Password</p>
+            <h2>Update password</h2>
+            <p class="section-copy">Changing your password revokes all other active sessions.</p>
+        </div>
+        {% call sensitive_action("password-change", active_action, action_error, "Update Password", "primary") %}
+            <form method="post" action="/account/security/password" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="new_password">New password</label>
+                    <input id="new_password" class="form-control" type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password" required>
+                </div>
+                <div class="form-row">
+                    <label for="new_password_confirm">Confirm new password</label>
+                    <input id="new_password_confirm" class="form-control" type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
+                </div>
+                <div class="surface-actions">
+                    <button type="submit" class="btn btn-primary">Continue</button>
+                </div>
+            </form>
+        {% endcall %}
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Authenticator App</p>
+            <h2>TOTP setup</h2>
+            <p class="section-copy">Add an app-based second factor using a standard 6-digit authenticator code.</p>
+        </div>
+        {% call sensitive_action("totp-enroll", active_action, action_error, "Start Authenticator Setup", "primary") %}
+            <form method="post" action="/account/security/totp/enroll" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="totp_label">Label</label>
+                    <input id="totp_label" class="form-control" type="text" name="label" maxlength="80" autocomplete="off" placeholder="Authenticator App" value="{{ action_values.get('label', '') }}" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Continue</button>
+            </form>
+        {% endcall %}
+    </div>
+
+    {% if pending_totp_enrollment %}
+        <div class="summary-grid" style="margin-top: 1rem;">
+            <article class="summary-panel">
+                <p class="summary-panel-label">QR Code</p>
+                <div style="display:flex;justify-content:center;padding:0.5rem 0;">
+                    <img
+                        src="{{ pending_totp_enrollment.qr_code_svg_data_uri }}"
+                        alt="TOTP QR code for authenticator app setup"
+                        style="width:192px;height:192px;max-width:100%;background:#fff;padding:0.75rem;border-radius:8px;"
+                    >
+                </div>
+                <p>Scan this code with your authenticator app.</p>
+            </article>
+            <article class="summary-panel">
+                <p class="summary-panel-label">Secret</p>
+                <strong class="summary-metric" style="font-size:1rem;">{{ pending_totp_enrollment.secret }}</strong>
+                <p>Add this key to your authenticator app if QR import is unavailable.</p>
+            </article>
+            <article class="summary-panel">
+                <p class="summary-panel-label">Provisioning URI</p>
+                <p class="table-wrap"><code>{{ pending_totp_enrollment.otpauth_uri }}</code></p>
+                <p>Expires at {{ pending_totp_enrollment.expires_at|datetime_utc }}.</p>
+            </article>
+        </div>
+        <form method="post" action="/account/security/totp/verify" class="surface-form" style="margin-top: 1rem;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="enrollment_token" value="{{ pending_totp_enrollment.token }}">
+            <div class="form-row">
+                <label for="totp_verify_code">Verify current app code</label>
+                <input id="totp_verify_code" class="form-control" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="one-time-code" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Verify Authenticator App</button>
+        </form>
+    {% endif %}
+
+    <div class="table-shell" style="margin-top: 1rem;">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Label</th>
+                <th>Added</th>
+                <th>Last Used</th>
+                <th>Action</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if totp_factors %}
+                {% for row in totp_factors %}
+                    <tr>
+                        <td>{{ row.label }}</td>
+                        <td>{{ row.verified_at|datetime_utc }}</td>
+                        <td>{% if row.last_used_at %}{{ row.last_used_at|datetime_utc }}{% else %}<span class="muted">never</span>{% endif %}</td>
+                        <td>
+                            {% call sensitive_action("totp-remove-" ~ row.id, active_action, action_error, "Remove", "secondary", "sm") %}
+                                <form method="post" action="/account/security/totp/{{ row.id }}/remove" class="surface-form surface-form-compact">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Continue</button>
+                                </form>
+                            {% endcall %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="4" class="table-empty">No authenticator apps configured.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Passkeys</p>
+            <h2>Registered passkeys</h2>
+            <p class="section-copy">Passkeys work both as a standard MFA method and for passwordless identifier-first login.</p>
+        </div>
+        {% call sensitive_action("passkey-register", active_action, action_error, "Register Passkey", "primary") %}
+            <form method="post" action="/account/security/passkeys/register" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="passkey_label_start">Label</label>
+                    <input id="passkey_label_start" class="form-control" type="text" name="label" maxlength="80" autocomplete="off" placeholder="This device" value="{{ action_values.get('label', '') }}">
+                </div>
+                <button type="submit" class="btn btn-primary">Continue</button>
+            </form>
+        {% endcall %}
+    </div>
+    <div class="table-shell" style="margin-top: 1rem;">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Label</th>
+                <th>Added</th>
+                <th>Last Used</th>
+                <th>Action</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if passkeys %}
+                {% for row in passkeys %}
+                    <tr>
+                        <td>{{ row.label }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>{% if row.last_used_at %}{{ row.last_used_at|datetime_utc }}{% else %}<span class="muted">never</span>{% endif %}</td>
+                        <td>
+                            {% call sensitive_action("passkey-remove-" ~ row.id, active_action, action_error, "Remove", "secondary", "sm") %}
+                                <form method="post" action="/account/security/passkeys/{{ row.id }}/remove" class="surface-form surface-form-compact">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Continue</button>
+                                </form>
+                            {% endcall %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="4" class="table-empty">No passkeys configured.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Recovery</p>
+            <h2>Backup codes</h2>
+            <p class="section-copy">Backup codes are one-time recovery tokens. Regenerating them invalidates all previous codes.</p>
+        </div>
+        {% call sensitive_action("backup-codes-regenerate", active_action, action_error, "Regenerate Backup Codes", "primary") %}
+            <form method="post" action="/account/security/backup-codes/regenerate" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="surface-actions surface-actions-between">
+                    <button type="submit" class="btn btn-primary">Continue</button>
+                    <span class="muted">{{ mfa_state.backup_code_count }} unused codes currently stored.</span>
+                </div>
+            </form>
+        {% endcall %}
+    </div>
+    {% if generated_backup_codes %}
+        <div class="message warning" role="alert">These backup codes are shown only once.</div>
+        <div class="table-shell" style="margin-bottom: 1rem;">
+            <table class="table align-middle mb-0">
+                <tbody>
+                {% for code in generated_backup_codes %}
+                    <tr><td><code>{{ code }}</code></td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
+</section>
+
+{% if mfa_state.can_disable_mfa %}
+<section class="section-shell workspace-section danger-zone">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Danger zone</p>
+            <h2>Disable MFA</h2>
+            <p class="section-copy">Disabling MFA removes authenticator apps, passkeys, and backup codes from this account.</p>
+        </div>
+        {% call sensitive_action("mfa-disable", active_action, action_error, "Disable MFA", "danger") %}
+            <form method="post" action="/account/security/mfa/disable" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="disable_mfa_confirmation">Confirmation</label>
+                    <input id="disable_mfa_confirmation" class="form-control" type="text" name="confirmation" placeholder="DISABLE MFA" autocomplete="off" value="{{ action_values.get('confirmation', '') }}" required>
+                </div>
+                <button type="submit" class="btn btn-outline-danger">Continue</button>
+            </form>
+        {% endcall %}
+    </div>
+</section>
+{% endif %}
+{% endblock %}

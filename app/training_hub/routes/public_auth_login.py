@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI, Form, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from ..config.settings import SESSION_COOKIE_NAME, TrainingHubSettings
 from ..core.hub_core import (
     _consume_login_attempt,
-    _create_admin_mfa_challenge,
     _create_audit_log,
     _maybe_raise_security_alert,
     _refresh_user,
@@ -15,8 +17,51 @@ from ..core.hub_core import (
     _set_session_cookie,
     _validate_csrf_token,
 )
-from ..config.settings import SESSION_COOKIE_NAME, TrainingHubSettings
-from .public_utils import ADMIN_MFA_COOKIE_NAME, logger, request_meta as _request_meta
+from ..core.mfa import (
+    LOGIN_CHALLENGE_COOKIE_NAME,
+    _create_login_challenge,
+    _generate_passkey_auth_options,
+    _mfa_state,
+    _resolve_user_by_identifier,
+    _verify_passkey_authentication,
+)
+from .public_utils import logger, request_meta as _request_meta
+
+
+def _clear_login_challenge_cookie(response: RedirectResponse | JSONResponse, settings: TrainingHubSettings) -> None:
+    response.delete_cookie(
+        LOGIN_CHALLENGE_COOKIE_NAME,
+        httponly=True,
+        samesite="strict",
+        secure=settings.enforce_https,
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: RedirectResponse | JSONResponse, settings: TrainingHubSettings) -> None:
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        httponly=True,
+        samesite="strict",
+        secure=settings.enforce_https,
+        path="/",
+    )
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _webauthn_request_context(request: Request) -> tuple[str, str]:
+    rp_id = (request.url.hostname or "").strip().lower()
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        origin = str(request.base_url).rstrip("/")
+    return rp_id, origin
 
 
 def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
@@ -49,10 +94,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                     action="auth.login.locked",
                     target_type="user",
                     target_id=actor_user_id,
-                    details=(
-                        f"Login blocked due to lockout. Retry after "
-                        f"{int(login_result.get('retry_after', 60))}s."
-                    ),
+                    details=f"Login blocked due to lockout. Retry after {int(login_result.get('retry_after', 60))}s.",
                     source_ip=source_ip,
                     user_agent=user_agent,
                 )
@@ -78,6 +120,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 registration_mode=settings.registration_mode,
                 status_code=429,
             )
+
         if status != "ok":
             if "user_id" in login_result:
                 actor_user_id = int(login_result["user_id"])
@@ -127,59 +170,50 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 status_code=404,
             )
 
-        if settings.admin_mfa_required and int(user_row["is_admin"]) == 1:
+        mfa_state = await run_in_threadpool(_mfa_state, settings, actor_user_id)
+        if bool(mfa_state.get("mfa_required_for_login")):
             challenge = await run_in_threadpool(
-                _create_admin_mfa_challenge,
-                settings.database_path,
-                actor_user_id,
-                settings.admin_mfa_ttl_minutes,
-                source_ip,
-                user_agent,
-                settings.secret_key,
+                _create_login_challenge,
+                settings,
+                user_id=actor_user_id,
+                source_ip=source_ip,
+                user_agent=user_agent,
             )
-            if not bool(challenge.get("issued")):
-                return _render_auth(
-                    request=request,
-                    templates=app.state.templates,
-                    mode="login",
-                    error="Could not create admin verification challenge.",
-                    registration_mode=settings.registration_mode,
-                    status_code=500,
-                )
-            try:
-                await run_in_threadpool(
-                    __import__("app.training_hub.routes.public", fromlist=["send_admin_mfa_email"]).send_admin_mfa_email,
-                    settings,
-                    str(challenge["user_email"]),
-                    str(challenge["code"]),
-                    str(challenge["expires_at"]),
-                )
-            except Exception as exception:
-                logger.exception(
-                    "Admin MFA email delivery failed for user_id=%s via smtp_host=%s smtp_port=%s.",
-                    actor_user_id,
-                    settings.smtp_host,
-                    settings.smtp_port,
-                )
-                await run_in_threadpool(
-                    _create_audit_log,
-                    settings.database_path,
-                    actor_user_id=actor_user_id,
-                    action="auth.mfa.challenge.email.failed",
-                    target_type="user",
-                    target_id=actor_user_id,
-                    details=f"Admin MFA code delivery failed: {exception}",
-                    source_ip=source_ip,
-                    user_agent=user_agent,
-                )
-                return _render_auth(
-                    request=request,
-                    templates=app.state.templates,
-                    mode="login",
-                    error="Admin verification code could not be delivered.",
-                    registration_mode=settings.registration_mode,
-                    status_code=503,
-                )
+            if bool(challenge.get("allow_email_bridge")):
+                try:
+                    await run_in_threadpool(
+                        __import__("app.training_hub.routes.public", fromlist=["send_admin_mfa_email"]).send_admin_mfa_email,
+                        settings,
+                        str(user_row["email"]),
+                        str(challenge["email_code"]),
+                        str(challenge["expires_at"]),
+                    )
+                except Exception as exception:
+                    logger.exception(
+                        "Admin MFA bridge email delivery failed for user_id=%s via smtp_host=%s smtp_port=%s.",
+                        actor_user_id,
+                        settings.smtp_host,
+                        settings.smtp_port,
+                    )
+                    await run_in_threadpool(
+                        _create_audit_log,
+                        settings.database_path,
+                        actor_user_id=actor_user_id,
+                        action="auth.mfa.challenge.email.failed",
+                        target_type="user",
+                        target_id=actor_user_id,
+                        details=f"Admin MFA bridge delivery failed: {exception}",
+                        source_ip=source_ip,
+                        user_agent=user_agent,
+                    )
+                    return _render_auth(
+                        request=request,
+                        templates=app.state.templates,
+                        mode="login",
+                        error="Verification code could not be delivered.",
+                        registration_mode=settings.registration_mode,
+                        status_code=503,
+                    )
 
             await run_in_threadpool(
                 _create_audit_log,
@@ -188,14 +222,13 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 action="auth.mfa.challenge.issued",
                 target_type="user",
                 target_id=actor_user_id,
-                details="Admin MFA challenge issued.",
+                details="MFA challenge issued after password login.",
                 source_ip=source_ip,
                 user_agent=user_agent,
             )
-
-            response = RedirectResponse(url="/admin/mfa", status_code=303)
+            response = RedirectResponse(url="/mfa", status_code=303)
             response.set_cookie(
-                ADMIN_MFA_COOKIE_NAME,
+                LOGIN_CHALLENGE_COOKIE_NAME,
                 str(challenge["token"]),
                 httponly=True,
                 samesite="strict",
@@ -207,12 +240,117 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
 
         response = RedirectResponse(url="/dashboard", status_code=303)
         _set_session_cookie(response, settings, actor_user_id, request)
-        response.delete_cookie(
-            ADMIN_MFA_COOKIE_NAME,
-            httponly=True,
-            samesite="strict",
-            secure=settings.enforce_https,
-            path="/",
+        _clear_login_challenge_cookie(response, settings)
+        await run_in_threadpool(
+            _create_audit_log,
+            settings.database_path,
+            actor_user_id=actor_user_id,
+            action="auth.login.success",
+            target_type="user",
+            target_id=actor_user_id,
+            details="Login successful.",
+            source_ip=source_ip,
+            user_agent=user_agent,
+        )
+        return response
+
+    @app.post("/login/passkey/options")
+    async def login_passkey_options(request: Request):
+        if request.state.user:
+            return JSONResponse({"ok": True, "redirectUrl": "/dashboard"}, status_code=200)
+        payload = await _json_body(request)
+        identifier = str(payload.get("identifier", "")).strip()
+        source_ip, user_agent = _request_meta(request, settings)
+        rp_id, origin = _webauthn_request_context(request)
+        if identifier and len(identifier) > 320:
+            return JSONResponse({"detail": "identifier must be <= 320 characters."}, status_code=400)
+
+        if identifier:
+            user_row = await run_in_threadpool(_resolve_user_by_identifier, settings.database_path, identifier)
+            if user_row is None:
+                return JSONResponse({"detail": "No passkeys are registered for this account."}, status_code=404)
+            options_result = await run_in_threadpool(
+                _generate_passkey_auth_options,
+                settings,
+                user_id=int(user_row["id"]),
+                purpose="passwordless-login",
+                rp_id=rp_id,
+                expected_origin=origin,
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+        else:
+            options_result = await run_in_threadpool(
+                _generate_passkey_auth_options,
+                settings,
+                user_id=1,
+                purpose="passwordless-login",
+                discoverable=True,
+                rp_id=rp_id,
+                expected_origin=origin,
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+        if not bool(options_result.get("ok")):
+            return JSONResponse({"detail": str(options_result.get("error", "Passkey login is unavailable."))}, status_code=int(options_result.get("status_code", 400)))
+
+        return JSONResponse(
+            {
+                "flowToken": str(options_result["flow_token"]),
+                "publicKey": json.loads(str(options_result["options_json"])),
+            },
+            status_code=200,
+        )
+
+    @app.post("/login/passkey/verify")
+    async def login_passkey_verify(request: Request):
+        if request.state.user:
+            return JSONResponse({"ok": True, "redirectUrl": "/dashboard"}, status_code=200)
+        payload = await _json_body(request)
+        flow_token = str(payload.get("flowToken", "")).strip()
+        credential = payload.get("credential")
+        if not flow_token or not isinstance(credential, dict):
+            return JSONResponse({"detail": "flowToken and credential are required."}, status_code=400)
+
+        source_ip, user_agent = _request_meta(request, settings)
+        verify_result = await run_in_threadpool(
+            _verify_passkey_authentication,
+            settings,
+            flow_token=flow_token,
+            credential=credential,
+            source_ip=source_ip,
+            user_agent=user_agent,
+        )
+        if not bool(verify_result.get("ok")):
+            actor_user_id = int(verify_result["user_id"]) if "user_id" in verify_result else 0
+            if actor_user_id:
+                await run_in_threadpool(
+                    _create_audit_log,
+                    settings.database_path,
+                    actor_user_id=actor_user_id,
+                    action="auth.passkey.login.failed",
+                    target_type="user",
+                    target_id=actor_user_id,
+                    details=str(verify_result.get("error", "Passkey login failed.")),
+                    source_ip=source_ip,
+                    user_agent=user_agent,
+                )
+            return JSONResponse({"detail": str(verify_result.get("error", "Passkey login failed."))}, status_code=int(verify_result.get("status_code", 400)))
+
+        actor_user_id = int(verify_result["user_id"])
+        response = JSONResponse({"ok": True, "redirectUrl": "/dashboard"}, status_code=200)
+        _set_session_cookie(response, settings, actor_user_id, request)
+        _clear_login_challenge_cookie(response, settings)
+        await run_in_threadpool(
+            _create_audit_log,
+            settings.database_path,
+            actor_user_id=actor_user_id,
+            action="auth.passkey.login.success",
+            target_type="user",
+            target_id=actor_user_id,
+            details="Passkey login successful.",
+            source_ip=source_ip,
+            user_agent=user_agent,
         )
         await run_in_threadpool(
             _create_audit_log,
@@ -234,7 +372,13 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         source_ip, user_agent = _request_meta(request, settings)
         current_user = request.state.user
         if session_token:
-            await run_in_threadpool(_revoke_session_by_token, settings.database_path, session_token, "logout", settings.secret_key)
+            await run_in_threadpool(
+                _revoke_session_by_token,
+                settings.database_path,
+                session_token,
+                "logout",
+                settings.secret_key,
+            )
         if current_user is not None:
             await run_in_threadpool(
                 _create_audit_log,
@@ -248,20 +392,6 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 user_agent=user_agent,
             )
         response = RedirectResponse(url="/login?notice=Signed+out", status_code=303)
-        response.delete_cookie(
-            SESSION_COOKIE_NAME,
-            httponly=True,
-            samesite="strict",
-            secure=settings.enforce_https,
-            path="/",
-        )
-        response.delete_cookie(
-            ADMIN_MFA_COOKIE_NAME,
-            httponly=True,
-            samesite="strict",
-            secure=settings.enforce_https,
-            path="/",
-        )
+        _clear_session_cookie(response, settings)
+        _clear_login_challenge_cookie(response, settings)
         return response
-
-

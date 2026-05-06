@@ -18,7 +18,10 @@ from .admin_ops import (
 from .account_ops import (
     _delete_user_account,
     _delete_user_upload,
+    _link_client_identity_to_user,
     _purge_user_uploads,
+    _unlink_client_identity_from_user,
+    _user_linked_client_identities,
     _verify_user_action_password,
 )
 from .common import (
@@ -50,11 +53,12 @@ from .recovery import (
     _validate_admin_mfa_challenge,
     _validate_password_reset_token,
 )
-from .rendering import _render_admin, _render_auth, _render_dashboard
+from .rendering import _render_account, _render_admin, _render_auth, _render_dashboard
 from .session_auth import (
     LOGIN_LOCKOUT_MINUTES,
     LOGIN_MAX_FAILURES,
     _change_user_password,
+    _change_user_password_after_reauth,
     _consume_login_attempt,
     _create_session,
     _current_user_from_request,

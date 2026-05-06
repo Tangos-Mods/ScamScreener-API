@@ -7,7 +7,9 @@ from fastapi.templating import Jinja2Templates
 
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TrainingHubSettings
 from .admin_ops import _admin_audit_logs, _admin_cases, _admin_runs, _admin_users
+from .account_ops import _user_linked_client_identities
 from .data_exports import _user_data_export_requests
+from .mfa import _mfa_state, _user_passkeys, _user_totp_factors
 from .recovery import _monitoring_snapshot
 from .session_auth import _user_active_sessions
 from .training_data import _user_uploads
@@ -88,12 +90,16 @@ def _dashboard_context(
     user: dict[str, Any],
     notice: str,
     error: str,
+    active_action: str = "",
+    action_values: dict[str, Any] | None = None,
+    action_error: str = "",
 ) -> dict[str, Any]:
     uploads = [dict(row) for row in _user_uploads(settings.database_path, int(user["id"]))]
     total_cases = sum(int(row["case_count"]) for row in uploads)
     current_session_id = getattr(request.state, "session_id", None)
     sessions = _user_active_sessions(settings.database_path, int(user["id"]), current_session_id)
     data_export_requests = _user_data_export_requests(settings.database_path, int(user["id"]))
+    linked_client_identities = _user_linked_client_identities(settings.database_path, int(user["id"]))
     return {
         "request": request,
         "notice": notice,
@@ -104,11 +110,13 @@ def _dashboard_context(
         "recent_uploads": uploads[:5],
         "sessions": sessions,
         "data_export_requests": data_export_requests,
+        "linked_client_identities": linked_client_identities,
         "total_cases": total_cases,
         "max_mb": settings.max_upload_bytes // (1024 * 1024),
         "email_exports_enabled": settings.outbound_email_enabled,
         "data_export_cooldown_minutes": settings.data_export_cooldown_minutes,
         "active_session_count": len(sessions),
+        "linked_client_identity_count": len(linked_client_identities),
         "pending_export_count": len(
             [
                 row
@@ -116,6 +124,9 @@ def _dashboard_context(
                 if str(row.get("status", "")).lower() in {"queued", "pending", "processing"}
             ]
         ),
+        "active_action": str(active_action or ""),
+        "action_values": dict(action_values or {}),
+        "action_error": str(action_error or ""),
     }
 
 
@@ -128,6 +139,9 @@ def _render_dashboard(
     error: str = "",
     status_code: int = 200,
     page: str = "overview",
+    active_action: str = "",
+    action_values: dict[str, Any] | None = None,
+    action_error: str = "",
 ):
     template_map = {
         "overview": "dashboard.html",
@@ -138,8 +152,92 @@ def _render_dashboard(
     if template_name is None:
         raise ValueError(f"Unsupported dashboard page: {page}")
 
-    context = _dashboard_context(request, settings, user, notice, error)
+    context = _dashboard_context(
+        request,
+        settings,
+        user,
+        notice,
+        error,
+        active_action=active_action,
+        action_values=action_values,
+        action_error=action_error,
+    )
     context["dashboard_page"] = page
+    return templates.TemplateResponse(request, template_name, context, status_code=status_code)
+
+
+def _account_context(
+    request: Request,
+    settings: TrainingHubSettings,
+    user: dict[str, Any],
+    notice: str,
+    error: str,
+    backup_codes: list[str] | None = None,
+    pending_totp: dict[str, Any] | None = None,
+    active_action: str = "",
+    action_values: dict[str, Any] | None = None,
+    action_error: str = "",
+) -> dict[str, Any]:
+    context = _dashboard_context(
+        request,
+        settings,
+        user,
+        notice,
+        error,
+        active_action=active_action,
+        action_values=action_values,
+        action_error=action_error,
+    )
+    context.update(
+        {
+            "mfa_state": _mfa_state(settings, int(user["id"])),
+            "totp_factors": _user_totp_factors(settings, int(user["id"])),
+            "passkeys": _user_passkeys(settings, int(user["id"])),
+            "generated_backup_codes": list(backup_codes or []),
+            "pending_totp_enrollment": dict(pending_totp or {}),
+        }
+    )
+    return context
+
+
+def _render_account(
+    request: Request,
+    templates: Jinja2Templates,
+    settings: TrainingHubSettings,
+    user: dict[str, Any],
+    notice: str = "",
+    error: str = "",
+    status_code: int = 200,
+    page: str = "security",
+    backup_codes: list[str] | None = None,
+    pending_totp: dict[str, Any] | None = None,
+    active_action: str = "",
+    action_values: dict[str, Any] | None = None,
+    action_error: str = "",
+):
+    template_map = {
+        "security": "account_security.html",
+        "sessions": "account_sessions.html",
+        "clients": "account_clients.html",
+        "privacy": "account_privacy.html",
+    }
+    template_name = template_map.get(page)
+    if template_name is None:
+        raise ValueError(f"Unsupported account page: {page}")
+
+    context = _account_context(
+        request,
+        settings,
+        user,
+        notice,
+        error,
+        backup_codes=backup_codes,
+        pending_totp=pending_totp,
+        active_action=active_action,
+        action_values=action_values,
+        action_error=action_error,
+    )
+    context["account_page"] = page
     return templates.TemplateResponse(request, template_name, context, status_code=status_code)
 
 

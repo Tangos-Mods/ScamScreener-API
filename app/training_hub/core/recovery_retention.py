@@ -33,6 +33,7 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
     removed_sessions = 0
     removed_password_reset_tokens = 0
     removed_admin_mfa_challenges = 0
+    removed_auth_flow_tokens = 0
     removed_audit_logs = 0
     removed_uploads = 0
     removed_bundles = 0
@@ -73,6 +74,17 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
             (mfa_cutoff, mfa_cutoff, mfa_cutoff),
         )
         removed_admin_mfa_challenges = int(mfa_cursor.rowcount or 0)
+
+        auth_flow_cursor = connection.execute(
+            """
+            DELETE FROM auth_flow_tokens
+            WHERE expires_at < ?
+               OR (consumed_at IS NOT NULL AND consumed_at < ?)
+               OR created_at < ?
+            """,
+            (mfa_cutoff, mfa_cutoff, mfa_cutoff),
+        )
+        removed_auth_flow_tokens = int(auth_flow_cursor.rowcount or 0)
 
         audit_cursor = connection.execute(
             "DELETE FROM audit_logs WHERE created_at < ?",
@@ -145,6 +157,7 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
         "sessions": removed_sessions,
         "password_reset_tokens": removed_password_reset_tokens,
         "admin_mfa_challenges": removed_admin_mfa_challenges,
+        "auth_flow_tokens": removed_auth_flow_tokens,
         "audit_logs": removed_audit_logs,
         "uploads": removed_uploads,
         "bundles": removed_bundles,

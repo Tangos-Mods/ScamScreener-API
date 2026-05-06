@@ -302,7 +302,7 @@ def _build_user_data_export_archive(
         connection.row_factory = sqlite3.Row
         user_row = connection.execute(
             """
-            SELECT id, created_at, username, email, is_admin, last_login_at
+            SELECT id, created_at, username, email, is_admin, mfa_enabled, last_login_at
             FROM users
             WHERE id = ?
             """,
@@ -371,6 +371,42 @@ def _build_user_data_export_archive(
             FROM admin_mfa_challenges
             WHERE user_id = ?
             ORDER BY created_at DESC
+            """,
+            (int(user_id),),
+        ).fetchall()
+        auth_flow_rows = connection.execute(
+            """
+            SELECT created_at, flow_type, expires_at, consumed_at, failed_attempts, source_ip, user_agent
+            FROM auth_flow_tokens
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            """,
+            (int(user_id),),
+        ).fetchall()
+        totp_factor_rows = connection.execute(
+            """
+            SELECT created_at, label, verified_at, last_used_at
+            FROM user_totp_factors
+            WHERE user_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (int(user_id),),
+        ).fetchall()
+        passkey_rows = connection.execute(
+            """
+            SELECT created_at, label, last_used_at, aaguid, credential_device_type, backed_up
+            FROM user_passkeys
+            WHERE user_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (int(user_id),),
+        ).fetchall()
+        backup_code_rows = connection.execute(
+            """
+            SELECT created_at, consumed_at
+            FROM user_backup_codes
+            WHERE user_id = ?
+            ORDER BY created_at ASC, id ASC
             """,
             (int(user_id),),
         ).fetchall()
@@ -450,7 +486,67 @@ def _build_user_data_export_archive(
             "username": str(user_row["username"]),
             "email": str(user_row["email"]),
             "isAdmin": int(user_row["is_admin"]) == 1,
+            "mfaEnabled": int(user_row["mfa_enabled"]) == 1,
             "lastLoginAt": str(user_row["last_login_at"] or ""),
+        },
+        "mfa": {
+            "legacyEmailBridgeChallenges": [
+                {
+                    "createdAt": str(row["created_at"]),
+                    "expiresAt": str(row["expires_at"]),
+                    "consumedAt": str(row["consumed_at"] or ""),
+                    "failedAttempts": int(row["failed_attempts"] or 0),
+                    "sourceIp": str(row["source_ip"] or ""),
+                    "userAgent": str(row["user_agent"] or ""),
+                }
+                for row in mfa_rows
+            ],
+            "authFlows": [
+                {
+                    "createdAt": str(row["created_at"]),
+                    "flowType": str(row["flow_type"] or ""),
+                    "expiresAt": str(row["expires_at"]),
+                    "consumedAt": str(row["consumed_at"] or ""),
+                    "failedAttempts": int(row["failed_attempts"] or 0),
+                    "sourceIp": str(row["source_ip"] or ""),
+                    "userAgent": str(row["user_agent"] or ""),
+                }
+                for row in auth_flow_rows
+            ],
+            "totpFactors": [
+                {
+                    "createdAt": str(row["created_at"]),
+                    "label": str(row["label"] or ""),
+                    "verifiedAt": str(row["verified_at"] or ""),
+                    "lastUsedAt": str(row["last_used_at"] or ""),
+                    "secretRedacted": True,
+                }
+                for row in totp_factor_rows
+            ],
+            "passkeys": [
+                {
+                    "createdAt": str(row["created_at"]),
+                    "label": str(row["label"] or ""),
+                    "lastUsedAt": str(row["last_used_at"] or ""),
+                    "aaguid": str(row["aaguid"] or ""),
+                    "credentialDeviceType": str(row["credential_device_type"] or ""),
+                    "backedUp": int(row["backed_up"] or 0) == 1,
+                    "credentialRedacted": True,
+                }
+                for row in passkey_rows
+            ],
+            "backupCodes": {
+                "total": len(backup_code_rows),
+                "unused": len([row for row in backup_code_rows if not row["consumed_at"]]),
+                "entries": [
+                    {
+                        "createdAt": str(row["created_at"]),
+                        "consumedAt": str(row["consumed_at"] or ""),
+                        "codeRedacted": True,
+                    }
+                    for row in backup_code_rows
+                ],
+            },
         },
         "sessions": [
             {
@@ -561,7 +657,7 @@ def _build_user_data_export_archive(
             for row in export_rows
         ],
         "redactions": [
-            "Password hashes, session token hashes, reset token hashes, and MFA code hashes are omitted for security.",
+            "Password hashes, session token hashes, reset token hashes, passkey public keys, TOTP secrets, and MFA code hashes are omitted for security.",
             "Internal absolute storage paths, audit-log detail text, training bundle contents, and bundle execution logs are not included.",
         ],
         "warnings": warnings,
@@ -569,6 +665,10 @@ def _build_user_data_export_archive(
             "uploads": len(upload_rows),
             "linkedClientIdentities": len(client_identity_rows),
             "sessions": len(sessions),
+            "authFlows": len(auth_flow_rows),
+            "totpFactors": len(totp_factor_rows),
+            "passkeys": len(passkey_rows),
+            "backupCodes": len(backup_code_rows),
             "createdCases": len(created_case_rows),
             "sourcedCases": len(sourced_case_rows),
             "auditLogsAsActor": len(audit_actor_rows),

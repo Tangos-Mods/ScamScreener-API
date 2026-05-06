@@ -8,6 +8,7 @@ from .storage_migrations import (
     _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,

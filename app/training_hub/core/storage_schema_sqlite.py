@@ -7,6 +7,7 @@ from .storage_migrations import (
     _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,
@@ -27,6 +28,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                mfa_enabled INTEGER NOT NULL DEFAULT 0,
                 last_login_at TEXT,
                 failed_login_attempts INTEGER NOT NULL DEFAULT 0,
                 lockout_until TEXT
@@ -184,6 +186,68 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS auth_flow_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                flow_type TEXT NOT NULL,
+                token_sha256 TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                source_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_totp_factors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                encrypted_secret TEXT NOT NULL,
+                verified_at TEXT,
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_passkeys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                credential_id TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                sign_count INTEGER NOT NULL DEFAULT 0,
+                aaguid TEXT NOT NULL DEFAULT '',
+                credential_device_type TEXT NOT NULL DEFAULT '',
+                backed_up INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_backup_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                code_sha256 TEXT NOT NULL,
+                consumed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS rate_limit_hits (
                 bucket_key TEXT NOT NULL,
                 bucket_start INTEGER NOT NULL,
@@ -218,6 +282,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         _migrate_audit_log_columns(connection)
         _migrate_password_reset_token_columns(connection)
         _migrate_admin_mfa_challenge_columns(connection)
+        _migrate_mfa_tables(connection)
         _migrate_training_cases_payload_json(connection)
         _migrate_training_case_identity_columns(connection)
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_user_sha ON uploads(user_id, payload_sha256)")
@@ -235,6 +300,12 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_upload_cases_case_id ON upload_cases(case_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_user ON auth_flow_tokens(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_expires ON auth_flow_tokens(expires_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_flow_type ON auth_flow_tokens(flow_type)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_totp_factors_user ON user_totp_factors(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_passkeys_user ON user_passkeys(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_backup_codes_user ON user_backup_codes(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_uploads_source_ip ON uploads(source_ip)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_user_id)")

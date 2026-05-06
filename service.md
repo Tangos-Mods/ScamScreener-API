@@ -40,7 +40,7 @@ Der Mod authentifiziert sich nur ueber seine lokale `clientId`.
 ## Web-Flow
 - Web-Account-Login bleibt fuer Dashboard und Admin erhalten.
 - Der Mod nutzt diesen Login nicht mehr.
-- Nutzer koennen im Training Hub spaeter eine oder mehrere `clientId`s mit ihrem Account verknuepfen.
+- Nutzer koennen im Training Hub unter `Account -> Clients` spaeter eine oder mehrere bereits bekannte `clientId`s mit ihrem Account verknuepfen.
 - Nach der Verknuepfung zeigt das Dashboard auch historische Uploads dieser `clientId`s an.
 
 ## Umsetzungshinweise

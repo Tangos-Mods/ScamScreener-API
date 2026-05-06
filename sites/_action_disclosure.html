@@ -1,0 +1,18 @@
+{% macro sensitive_action(action_id, active_action, action_error, summary_label, variant="secondary", size="md", extra_class="") -%}
+    {% set is_open = active_action == action_id %}
+    {% set trigger_classes = "action-disclosure-trigger action-disclosure-trigger-" ~ variant %}
+    {% if size == "sm" %}
+        {% set trigger_classes = trigger_classes ~ " action-disclosure-trigger-sm" %}
+    {% endif %}
+    <details class="action-disclosure {{ extra_class }}" data-sensitive-action="{{ action_id }}"{% if is_open %} open{% endif %}>
+        <summary class="action-disclosure-toggle">
+            <span class="{{ trigger_classes }}">{{ summary_label }}</span>
+        </summary>
+        <div class="action-disclosure-body">
+            {% if is_open and action_error %}
+                <div class="message error action-local-error" role="alert">{{ action_error }}</div>
+            {% endif %}
+            {{ caller() }}
+        </div>
+    </details>
+{%- endmacro %}

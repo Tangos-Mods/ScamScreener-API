@@ -109,6 +109,13 @@ def _migrate_users_security_columns(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(
         connection,
         "users",
+        "mfa_enabled",
+        "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN mfa_enabled TINYINT NOT NULL DEFAULT 0",
+    )
+    _add_column_if_missing(
+        connection,
+        "users",
         "failed_login_attempts",
         "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN failed_login_attempts INT NOT NULL DEFAULT 0",
@@ -291,6 +298,150 @@ def _migrate_admin_mfa_challenge_columns(connection: sqlite3.Connection) -> None
         "user_agent",
         "ALTER TABLE admin_mfa_challenges ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE admin_mfa_challenges ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''",
+    )
+
+
+def _migrate_mfa_tables(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_flow_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                flow_type TEXT NOT NULL,
+                token_sha256 TEXT NOT NULL UNIQUE,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                source_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_totp_factors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                encrypted_secret TEXT NOT NULL,
+                verified_at TEXT,
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_passkeys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                credential_id TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                sign_count INTEGER NOT NULL DEFAULT 0,
+                aaguid TEXT NOT NULL DEFAULT '',
+                credential_device_type TEXT NOT NULL DEFAULT '',
+                backed_up INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_backup_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                code_sha256 TEXT NOT NULL,
+                consumed_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_user ON auth_flow_tokens(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_expires ON auth_flow_tokens(expires_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_flow_type ON auth_flow_tokens(flow_type)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_totp_factors_user ON user_totp_factors(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_passkeys_user ON user_passkeys(user_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_user_backup_codes_user ON user_backup_codes(user_id)")
+        return
+    except Exception:
+        pass
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_flow_tokens (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            user_id BIGINT NOT NULL,
+            flow_type VARCHAR(64) NOT NULL,
+            token_sha256 CHAR(64) NOT NULL UNIQUE,
+            payload_json LONGTEXT NOT NULL,
+            expires_at VARCHAR(40) NOT NULL,
+            consumed_at VARCHAR(40),
+            failed_attempts INT NOT NULL DEFAULT 0,
+            source_ip VARCHAR(80) NOT NULL DEFAULT '',
+            user_agent VARCHAR(300) NOT NULL DEFAULT '',
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            KEY idx_auth_flow_tokens_user (user_id),
+            KEY idx_auth_flow_tokens_expires (expires_at),
+            KEY idx_auth_flow_tokens_flow_type (flow_type)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_totp_factors (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            user_id BIGINT NOT NULL,
+            label VARCHAR(80) NOT NULL,
+            encrypted_secret LONGTEXT NOT NULL,
+            verified_at VARCHAR(40),
+            last_used_at VARCHAR(40),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            KEY idx_user_totp_factors_user (user_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_passkeys (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            user_id BIGINT NOT NULL,
+            label VARCHAR(80) NOT NULL,
+            credential_id VARCHAR(255) NOT NULL UNIQUE,
+            public_key LONGTEXT NOT NULL,
+            sign_count BIGINT NOT NULL DEFAULT 0,
+            aaguid VARCHAR(64) NOT NULL DEFAULT '',
+            credential_device_type VARCHAR(64) NOT NULL DEFAULT '',
+            backed_up TINYINT NOT NULL DEFAULT 0,
+            last_used_at VARCHAR(40),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            KEY idx_user_passkeys_user (user_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_backup_codes (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            user_id BIGINT NOT NULL,
+            code_sha256 CHAR(64) NOT NULL,
+            consumed_at VARCHAR(40),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            KEY idx_user_backup_codes_user (user_id)
+        )
+        """
     )
 
 

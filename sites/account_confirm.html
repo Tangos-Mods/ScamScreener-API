@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Confirm Account Action{% endblock %}
+{% block page_eyebrow %}Account{% endblock %}
+{% block page_title %}Confirm Action{% endblock %}
+{% block page_intro %}Verify this change with a fresh authentication step before it is applied.{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Step-Up Authentication</p>
+            <h2>{{ confirm_title }}</h2>
+            <p class="section-copy">{{ confirm_description }}</p>
+            {% if confirm_summary %}
+                <p class="muted">{{ confirm_summary }}</p>
+            {% endif %}
+            {% if confirm_flow_expires_at %}
+                <p class="muted">Expires at {{ confirm_flow_expires_at|datetime_utc }}.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if confirm_ready_for_passkey_registration %}
+        <div class="surface-form">
+            <p class="section-copy">Authentication is complete. Finish the passkey registration on this device now.</p>
+            <div class="surface-actions surface-actions-between">
+                <button id="account_confirm_register_passkey_button" type="button" class="btn btn-primary">Register Passkey</button>
+                <span id="account_confirm_register_passkey_status" class="muted" aria-live="polite"></span>
+            </div>
+        </div>
+    {% else %}
+        <div class="summary-grid">
+            <article class="summary-panel">
+                <p class="summary-panel-label">Password</p>
+                <strong class="summary-metric">Available</strong>
+                <p>Use your current account password for this confirmation.</p>
+            </article>
+            {% if mfa_state.totp_factor_count > 0 or mfa_state.backup_code_count > 0 %}
+                <article class="summary-panel">
+                    <p class="summary-panel-label">Code</p>
+                    <strong class="summary-metric">{{ mfa_state.totp_factor_count + mfa_state.backup_code_count }}</strong>
+                    <p>Authenticator app codes and backup codes are accepted here.</p>
+                </article>
+            {% endif %}
+            {% if mfa_state.passkey_count > 0 %}
+                <article class="summary-panel">
+                    <p class="summary-panel-label">Passkey</p>
+                    <strong class="summary-metric">{{ mfa_state.passkey_count }}</strong>
+                    <p>Registered passkeys can confirm this action without typing your password again.</p>
+                </article>
+            {% endif %}
+        </div>
+
+        <div class="danger-grid" style="margin-top: 1rem;">
+            <section class="danger-card">
+                <div class="danger-card-header">
+                    <h3>Password</h3>
+                </div>
+                <form method="post" action="/account/confirm/password" class="surface-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <div class="form-row">
+                        <label for="confirm_current_password">Current password</label>
+                        <input id="confirm_current_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Confirm with Password</button>
+                </form>
+            </section>
+
+            {% if mfa_state.totp_factor_count > 0 or mfa_state.backup_code_count > 0 %}
+                <section class="danger-card">
+                    <div class="danger-card-header">
+                        <h3>Authenticator or backup code</h3>
+                    </div>
+                    <form method="post" action="/account/confirm/code" class="surface-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="form-row">
+                            <label for="confirm_code">Authenticator or backup code</label>
+                            <input id="confirm_code" class="form-control" type="text" name="code" inputmode="text" autocomplete="one-time-code" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary">Confirm with Code</button>
+                    </form>
+                </section>
+            {% endif %}
+
+            {% if mfa_state.passkey_count > 0 %}
+                <section class="danger-card">
+                    <div class="danger-card-header">
+                        <h3>Passkey</h3>
+                    </div>
+                    <div class="surface-form">
+                        <div class="surface-actions surface-actions-between">
+                            <button id="account_confirm_passkey_button" type="button" class="btn btn-primary">Confirm with Passkey</button>
+                            <span id="account_confirm_passkey_status" class="muted" aria-live="polite"></span>
+                        </div>
+                    </div>
+                </section>
+            {% endif %}
+        </div>
+    {% endif %}
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+{% if mfa_state.passkey_count > 0 %}
+<script src="/js/passkeys.js"></script>
+{% endif %}
+{% endblock %}

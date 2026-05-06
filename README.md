@@ -9,8 +9,9 @@ This repository contains two separate applications in one repo:
 
 - Clear package split between `app/training_hub` and `app/marketguard_api`
 - Player registration + login
-- Optional admin MFA step-up with one-time email code
-- Branded HTML emails with plain-text fallback for password reset and admin MFA
+- Authenticator App (TOTP), Passkey, and backup-code MFA for web accounts
+- Admin MFA migration bridge with one-time email code until a standard MFA method is enrolled
+- Branded HTML emails with plain-text fallback for password reset and MFA bridge mail
 - Admin backup create/restore for DB + uploads + bundles
 - Forgot-password + token-based password reset flow
 - Player dashboard with own contribution stats
@@ -111,7 +112,8 @@ What this path expects:
 
 - a real public domain in `CADDY_SITE_ADDRESS` such as `scamscreener.creepans.net`
 - `TRAINING_HUB_PUBLIC_BASE_URL` is set to the real public `https://...` URL
-- SMTP is configured for password reset and admin MFA mail
+- SMTP is configured for password reset and MFA bridge mail
+- WebAuthn RP ID/origins are configured or derivable from the public site address
 - `TRAINING_HUB_SITE_*` values are reviewed for `/impressum` and `/datenschutz`
 - persistent storage is kept on the Docker volumes
 
@@ -196,6 +198,9 @@ docker run -d --name scamscreener `
 - `TRAINING_HUB_ADMIN_MFA_REQUIRED` default `false`
 - `TRAINING_HUB_ADMIN_MFA_TTL_MINUTES` default `30`
 - `TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS` default `5`
+- `TRAINING_HUB_WEBAUTHN_RP_ID` optional WebAuthn relying-party ID (defaults from `TRAINING_HUB_PUBLIC_BASE_URL` or allowed hosts)
+- `TRAINING_HUB_WEBAUTHN_RP_NAME` default `ScamScreener`
+- `TRAINING_HUB_WEBAUTHN_ORIGINS` optional comma-separated WebAuthn origins (defaults from `TRAINING_HUB_PUBLIC_BASE_URL`, or from allowed hosts in production)
 - `TRAINING_HUB_ENFORCE_HTTPS` default `false` (`true` in production)
 - `TRAINING_HUB_ENABLE_RATE_LIMIT` default `true`
 - `TRAINING_HUB_ENFORCE_ORIGIN_CHECK` default `true`
@@ -256,7 +261,7 @@ Admin trigger creates a merged bundle and records the run as `prepared`.
 Security headers include CSP, COOP/CORP, `X-Frame-Options`, and `Permissions-Policy`.
 Failed/locked login attempts for known accounts are written to the audit log.
 Users can change their password from the dashboard; this revokes other active sessions.
-Admin can run retention cleanup from `/admin` to prune stale sessions, reset tokens, MFA challenges, logs, uploads, bundles, backups, and rate-limit rows.
+Admin can run retention cleanup from `/admin` to prune stale sessions, reset tokens, legacy MFA challenges, generic auth flows, logs, uploads, bundles, backups, and rate-limit rows.
 Automatic retention cleanup runs in the background when `TRAINING_HUB_RETENTION_AUTO_ENABLED=true`.
 Admin can create and restore backups from `/admin` (archive includes DB export + uploads + bundles; restore requires valid signed manifest).
 Prometheus-compatible monitoring is available at `/api/v1/metrics`.
@@ -358,6 +363,7 @@ curl -sS https://scamscreener.creepans.net/api/v1/client/auth/login \
 Notes:
 
 - The anonymous mod endpoint is `POST /api/v1/client/uploads/anonymous`.
+- Users can manually link already-known mod `clientId` values from `Account -> Clients`; once linked, historical uploads for that client ID appear in the dashboard.
 - The server recalculates `X-ScamScreener-Payload-Sha256` and `X-ScamScreener-Handshake-Sha256`; mismatches are rejected with `400`.
 - Admin accounts are intentionally blocked from the legacy API login flow when `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`; use the anonymous mod contract or a non-admin uploader account for the session-based client API.
 - `/api/v1/client/auth/login` requires `application/json`.

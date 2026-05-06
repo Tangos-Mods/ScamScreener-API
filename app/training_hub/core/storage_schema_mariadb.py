@@ -7,6 +7,7 @@ from .storage_migrations import (
     _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
     _migrate_training_cases_payload_json,
@@ -26,6 +27,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 email VARCHAR(254) NOT NULL UNIQUE,
                 password_hash VARCHAR(255) NOT NULL,
                 is_admin TINYINT NOT NULL DEFAULT 0,
+                mfa_enabled TINYINT NOT NULL DEFAULT 0,
                 last_login_at VARCHAR(40),
                 failed_login_attempts INT NOT NULL DEFAULT 0,
                 lockout_until VARCHAR(40)
@@ -199,6 +201,74 @@ def _init_database_mariadb(database_path: Path | str) -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS auth_flow_tokens (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                flow_type VARCHAR(64) NOT NULL,
+                token_sha256 CHAR(64) NOT NULL UNIQUE,
+                payload_json LONGTEXT NOT NULL,
+                expires_at VARCHAR(40) NOT NULL,
+                consumed_at VARCHAR(40),
+                failed_attempts INT NOT NULL DEFAULT 0,
+                source_ip VARCHAR(80) NOT NULL DEFAULT '',
+                user_agent VARCHAR(300) NOT NULL DEFAULT '',
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                KEY idx_auth_flow_tokens_user (user_id),
+                KEY idx_auth_flow_tokens_expires (expires_at),
+                KEY idx_auth_flow_tokens_flow_type (flow_type)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_totp_factors (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                label VARCHAR(80) NOT NULL,
+                encrypted_secret LONGTEXT NOT NULL,
+                verified_at VARCHAR(40),
+                last_used_at VARCHAR(40),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                KEY idx_user_totp_factors_user (user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_passkeys (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                label VARCHAR(80) NOT NULL,
+                credential_id VARCHAR(255) NOT NULL UNIQUE,
+                public_key LONGTEXT NOT NULL,
+                sign_count BIGINT NOT NULL DEFAULT 0,
+                aaguid VARCHAR(64) NOT NULL DEFAULT '',
+                credential_device_type VARCHAR(64) NOT NULL DEFAULT '',
+                backed_up TINYINT NOT NULL DEFAULT 0,
+                last_used_at VARCHAR(40),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                KEY idx_user_passkeys_user (user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_backup_codes (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                code_sha256 CHAR(64) NOT NULL,
+                consumed_at VARCHAR(40),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                KEY idx_user_backup_codes_user (user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS rate_limit_hits (
                 bucket_key VARCHAR(190) NOT NULL,
                 bucket_start BIGINT NOT NULL,
@@ -237,6 +307,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
         _migrate_audit_log_columns(connection)
         _migrate_password_reset_token_columns(connection)
         _migrate_admin_mfa_challenge_columns(connection)
+        _migrate_mfa_tables(connection)
         _migrate_training_cases_payload_json(connection)
         _migrate_training_case_identity_columns(connection)
         connection.commit()

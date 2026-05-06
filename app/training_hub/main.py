@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import replace
 from pathlib import Path
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 from fastapi.concurrency import run_in_threadpool
 from fastapi import FastAPI, Request
@@ -26,6 +28,7 @@ from .core.hub_core import (
     _run_retention_cleanup,
 )
 from .core.common import _format_utc_timestamp
+from .core.mfa import _user_requires_admin_mfa_setup
 from .routes import register_admin_routes, register_public_routes
 from .config.settings import CSRF_COOKIE_NAME, TrainingHubSettings
 
@@ -64,6 +67,30 @@ def _install_api_only_openapi(app: FastAPI) -> None:
 def create_training_hub_app(settings: TrainingHubSettings | None = None) -> FastAPI:
     base_dir = Path(__file__).resolve().parents[2]
     settings = settings or TrainingHubSettings.from_env()
+    derived_updates: dict[str, object] = {}
+    if not settings.webauthn_rp_id:
+        derived_rp_id = ""
+        if settings.public_base_url:
+            derived_rp_id = (urlsplit(settings.public_base_url).hostname or "").strip().lower()
+        elif settings.allowed_hosts:
+            derived_rp_id = sorted(settings.allowed_hosts)[0]
+        if not derived_rp_id:
+            derived_rp_id = "testserver"
+        derived_updates["webauthn_rp_id"] = derived_rp_id
+    if not settings.webauthn_origins:
+        if settings.public_base_url:
+            derived_updates["webauthn_origins"] = (settings.public_base_url,)
+        elif settings.allowed_hosts:
+            origin_scheme = "https" if settings.enforce_https else "http"
+            derived_updates["webauthn_origins"] = tuple(
+                f"{origin_scheme}://{host}"
+                for host in sorted(settings.allowed_hosts)
+                if host and "*" not in host
+            )
+        else:
+            derived_updates["webauthn_origins"] = ("http://testserver", "http://localhost", "http://127.0.0.1")
+    if derived_updates:
+        settings = replace(settings, **derived_updates)
     if settings.enforce_https and (settings.secret_key == "change-me-in-env" or len(settings.secret_key) < 32):
         raise ValueError(
             "TRAINING_HUB_SECRET_KEY must be set to a strong value (>=32 chars) when TRAINING_HUB_ENFORCE_HTTPS=true."
@@ -137,12 +164,16 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
     app.state.templates.env.filters["datetime_utc"] = _format_utc_timestamp
     app.state.rate_limiter = _SqliteRateLimiter(settings.database_path)
     app.mount("/css", StaticFiles(directory=str(base_dir / "css")), name="css")
+    app.mount("/js", StaticFiles(directory=str(base_dir / "js")), name="js")
 
     def _apply_no_store_headers(response, request: Request) -> None:
         path = request.url.path
         if (
             path.startswith("/admin")
             or path.startswith("/dashboard")
+            or path.startswith("/account")
+            or path.startswith("/mfa")
+            or path.startswith("/login/passkey")
             or path.startswith("/api/v1/client/")
             or path in {"/login", "/register", "/forgot-password", "/reset-password", "/admin/mfa"}
             or "set-cookie" in response.headers
@@ -164,6 +195,21 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
             return _apply_security_headers(rejected, settings.enforce_https, request.url.path)
 
         request.state.user = await run_in_threadpool(_current_user_from_request, request, settings)
+        if request.state.user is not None and int(request.state.user.get("is_admin", 0)) == 1:
+            requires_setup = await run_in_threadpool(
+                _user_requires_admin_mfa_setup,
+                settings,
+                int(request.state.user["id"]),
+            )
+            path = request.url.path
+            if (
+                requires_setup
+                and path.startswith("/admin")
+                and path not in {"/admin/mfa", "/mfa"}
+            ):
+                redirect = RedirectResponse(url="/account/security?notice=Complete+MFA+setup", status_code=303)
+                _apply_no_store_headers(redirect, request)
+                return _apply_security_headers(redirect, settings.enforce_https, request.url.path)
 
         should_manage_csrf_cookie = not request.url.path.startswith("/api/")
         csrf_token = str(request.cookies.get(CSRF_COOKIE_NAME, "")).strip() if should_manage_csrf_cookie else ""

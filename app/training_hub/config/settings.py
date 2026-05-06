@@ -46,6 +46,16 @@ def _env_csv_set(name: str) -> set[str]:
     return values
 
 
+def _env_csv_list(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    values: list[str] = []
+    for part in raw.split(","):
+        normalized = part.strip()
+        if normalized:
+            values.append(normalized)
+    return values
+
+
 def _first(values: list[str] | None) -> str:
     if not values:
         return ""
@@ -106,6 +116,9 @@ class TrainingHubSettings:
     admin_mfa_required: bool = False
     admin_mfa_ttl_minutes: int = 30
     admin_mfa_max_attempts: int = 5
+    webauthn_rp_id: str = ""
+    webauthn_rp_name: str = "ScamScreener"
+    webauthn_origins: tuple[str, ...] = ()
     enforce_https: bool = False
     enable_rate_limit: bool = True
     enforce_origin_check: bool = True
@@ -223,6 +236,9 @@ class TrainingHubSettings:
         admin_mfa_required = _env_bool("TRAINING_HUB_ADMIN_MFA_REQUIRED", False)
         admin_mfa_ttl_minutes = _env_int("TRAINING_HUB_ADMIN_MFA_TTL_MINUTES", 30, 5, 1440)
         admin_mfa_max_attempts = _env_int("TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS", 5, 1, 20)
+        webauthn_rp_id = (os.getenv("TRAINING_HUB_WEBAUTHN_RP_ID", "") or "").strip().lower()
+        webauthn_rp_name = (os.getenv("TRAINING_HUB_WEBAUTHN_RP_NAME", "ScamScreener") or "ScamScreener").strip()
+        webauthn_origins = tuple(_env_csv_list("TRAINING_HUB_WEBAUTHN_ORIGINS"))
         max_upload_downloads_per_minute_per_user = _env_int(
             "TRAINING_HUB_MAX_UPLOAD_DOWNLOADS_PER_MINUTE_PER_USER",
             60,
@@ -309,6 +325,7 @@ class TrainingHubSettings:
         pipeline_command = os.getenv("TRAINING_HUB_PIPELINE_COMMAND", "").strip()
         project_root_raw = os.getenv("TRAINING_HUB_PROJECT_ROOT", "").strip()
         public_base_url = _env_absolute_url("TRAINING_HUB_PUBLIC_BASE_URL")
+        public_origin = public_base_url
         allowed_hosts = _env_csv_set("TRAINING_HUB_ALLOWED_HOSTS")
         if not allowed_hosts and public_base_url:
             public_host = (urlsplit(public_base_url).hostname or "").strip().lower()
@@ -316,6 +333,25 @@ class TrainingHubSettings:
                 allowed_hosts = {public_host}
         if not allowed_hosts and not is_production:
             allowed_hosts = {"localhost", "127.0.0.1", "testserver"}
+        if not webauthn_rp_id:
+            if public_base_url:
+                webauthn_rp_id = (urlsplit(public_base_url).hostname or "").strip().lower()
+            elif allowed_hosts:
+                webauthn_rp_id = sorted(allowed_hosts)[0]
+        if not webauthn_origins:
+            if public_origin:
+                webauthn_origins = (public_origin,)
+            elif allowed_hosts:
+                origin_scheme = "https" if (is_production or enforce_https) else "http"
+                derived_origins = tuple(
+                    f"{origin_scheme}://{host}"
+                    for host in sorted(allowed_hosts)
+                    if host and "*" not in host
+                )
+                if derived_origins:
+                    webauthn_origins = derived_origins
+            elif not is_production:
+                webauthn_origins = ("http://testserver", "http://localhost", "http://127.0.0.1")
         default_project_root = base_dir.parent if (base_dir.parent / "scripts").exists() else base_dir
         project_root = Path(project_root_raw).expanduser().resolve() if project_root_raw else default_project_root
         if database_url_raw:
@@ -358,11 +394,17 @@ class TrainingHubSettings:
             )
         if smtp_use_tls and smtp_use_starttls:
             raise ValueError("Set only one of TRAINING_HUB_SMTP_USE_TLS or TRAINING_HUB_SMTP_USE_STARTTLS.")
+        if not webauthn_rp_id:
+            raise ValueError("TRAINING_HUB_WEBAUTHN_RP_ID must be set or derivable from TRAINING_HUB_PUBLIC_BASE_URL.")
+        if not webauthn_origins:
+            raise ValueError("TRAINING_HUB_WEBAUTHN_ORIGINS must be set or derivable from TRAINING_HUB_PUBLIC_BASE_URL.")
         if is_production:
             if not enforce_https:
                 raise ValueError("TRAINING_HUB_ENFORCE_HTTPS must be true when TRAINING_HUB_ENV=production.")
             if public_base_url and urlsplit(public_base_url).scheme.lower() != "https":
                 raise ValueError("TRAINING_HUB_PUBLIC_BASE_URL must use https in production.")
+            if any(urlsplit(origin).scheme.lower() != "https" for origin in webauthn_origins):
+                raise ValueError("TRAINING_HUB_WEBAUTHN_ORIGINS must use https in production.")
             if secret_key == "change-me-in-env" or len(secret_key) < 32:
                 raise ValueError("TRAINING_HUB_SECRET_KEY must be at least 32 chars in production.")
             if not admin_mfa_required:
@@ -416,6 +458,9 @@ class TrainingHubSettings:
             admin_mfa_required=admin_mfa_required,
             admin_mfa_ttl_minutes=admin_mfa_ttl_minutes,
             admin_mfa_max_attempts=admin_mfa_max_attempts,
+            webauthn_rp_id=webauthn_rp_id,
+            webauthn_rp_name=webauthn_rp_name,
+            webauthn_origins=webauthn_origins,
             enforce_https=enforce_https,
             enable_rate_limit=enable_rate_limit,
             enforce_origin_check=enforce_origin_check,

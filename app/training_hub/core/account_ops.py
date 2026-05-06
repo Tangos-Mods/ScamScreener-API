@@ -4,11 +4,13 @@ import logging
 from pathlib import Path
 from typing import Any, Iterable
 
+from fastapi import HTTPException
+
 from ..config.settings import TrainingHubSettings
 from ..infra import db as sqlite3
 from .common import _now_utc_iso
 from .session_auth_password import _verify_password
-from .training_data import _parse_training_cases, _upsert_upload_case_entries
+from .training_data import _normalize_client_id, _parse_training_cases, _upsert_upload_case_entries
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,151 @@ def _verify_user_action_password(database_path: Path | str, user_id: int, curren
             "email": str(row["email"]),
             "is_admin": int(row["is_admin"]),
         },
+    }
+
+
+def _user_linked_client_identities(database_path: Path | str, user_id: int) -> list[dict[str, Any]]:
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT
+                ci.id,
+                ci.normalized_client_id,
+                ci.linked_at,
+                ci.last_seen_at,
+                COUNT(up.id) AS upload_count,
+                COALESCE(SUM(up.case_count), 0) AS case_count
+            FROM client_identities ci
+            LEFT JOIN uploads up ON up.client_identity_id = ci.id
+            WHERE ci.linked_user_id = ?
+            GROUP BY ci.id, ci.normalized_client_id, ci.linked_at, ci.last_seen_at
+            ORDER BY ci.linked_at DESC, ci.id DESC
+            """,
+            (int(user_id),),
+        ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "normalized_client_id": str(row["normalized_client_id"]),
+            "linked_at": str(row["linked_at"] or ""),
+            "last_seen_at": str(row["last_seen_at"] or ""),
+            "upload_count": int(row["upload_count"] or 0),
+            "case_count": int(row["case_count"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def _link_client_identity_to_user(database_path: Path | str, user_id: int, client_id: str) -> dict[str, Any]:
+    try:
+        normalized_client_id = _normalize_client_id(client_id)
+    except HTTPException as exception:
+        return {"ok": False, "error": str(exception.detail), "status_code": int(exception.status_code)}
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT
+                ci.id,
+                ci.normalized_client_id,
+                ci.linked_user_id,
+                ci.linked_at,
+                COUNT(up.id) AS upload_count,
+                COALESCE(SUM(up.case_count), 0) AS case_count
+            FROM client_identities ci
+            LEFT JOIN uploads up ON up.client_identity_id = ci.id
+            WHERE ci.normalized_client_id = ?
+            GROUP BY ci.id, ci.normalized_client_id, ci.linked_user_id, ci.linked_at
+            """,
+            (normalized_client_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "ok": False,
+                "error": "Client ID is unknown. Upload once from the mod before linking it here.",
+                "status_code": 404,
+            }
+
+        linked_user_id = row["linked_user_id"]
+        if linked_user_id is not None and int(linked_user_id) != int(user_id):
+            return {
+                "ok": False,
+                "error": "Client ID is already linked to another account.",
+                "status_code": 409,
+            }
+
+        if linked_user_id is None:
+            linked_at = _now_utc_iso()
+            cursor = connection.execute(
+                """
+                UPDATE client_identities
+                SET linked_user_id = ?, linked_at = ?
+                WHERE id = ? AND linked_user_id IS NULL
+                """,
+                (int(user_id), linked_at, int(row["id"])),
+            )
+            if int(cursor.rowcount or 0) != 1:
+                connection.rollback()
+                return {
+                    "ok": False,
+                    "error": "Client ID link could not be completed. Please retry.",
+                    "status_code": 409,
+                }
+            connection.commit()
+            status = "linked"
+        else:
+            linked_at = str(row["linked_at"] or "")
+            status = "already-linked"
+
+    return {
+        "ok": True,
+        "status": status,
+        "client_identity_id": int(row["id"]),
+        "normalized_client_id": normalized_client_id,
+        "linked_at": linked_at,
+        "upload_count": int(row["upload_count"] or 0),
+        "case_count": int(row["case_count"] or 0),
+    }
+
+
+def _unlink_client_identity_from_user(database_path: Path | str, user_id: int, client_identity_id: int) -> dict[str, Any]:
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT
+                ci.id,
+                ci.normalized_client_id,
+                COUNT(up.id) AS upload_count,
+                COALESCE(SUM(up.case_count), 0) AS case_count
+            FROM client_identities ci
+            LEFT JOIN uploads up ON up.client_identity_id = ci.id
+            WHERE ci.id = ? AND ci.linked_user_id = ?
+            GROUP BY ci.id, ci.normalized_client_id
+            """,
+            (int(client_identity_id), int(user_id)),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": "Linked client ID not found.", "status_code": 404}
+
+        connection.execute(
+            """
+            UPDATE client_identities
+            SET linked_user_id = NULL, linked_at = NULL
+            WHERE id = ? AND linked_user_id = ?
+            """,
+            (int(client_identity_id), int(user_id)),
+        )
+        connection.commit()
+
+    return {
+        "ok": True,
+        "client_identity_id": int(row["id"]),
+        "normalized_client_id": str(row["normalized_client_id"]),
+        "upload_count": int(row["upload_count"] or 0),
+        "case_count": int(row["case_count"] or 0),
     }
 
 
@@ -176,6 +323,10 @@ def _delete_user_account(settings: TrainingHubSettings, user_id: int) -> dict[st
             _delete_rows_for_ids(connection, "sessions", "id", session_ids)
         connection.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (int(user_id),))
         connection.execute("DELETE FROM admin_mfa_challenges WHERE user_id = ?", (int(user_id),))
+        connection.execute("DELETE FROM auth_flow_tokens WHERE user_id = ?", (int(user_id),))
+        connection.execute("DELETE FROM user_totp_factors WHERE user_id = ?", (int(user_id),))
+        connection.execute("DELETE FROM user_passkeys WHERE user_id = ?", (int(user_id),))
+        connection.execute("DELETE FROM user_backup_codes WHERE user_id = ?", (int(user_id),))
         if export_request_ids:
             _delete_rows_for_ids(connection, "data_export_requests", "id", export_request_ids)
         connection.execute(

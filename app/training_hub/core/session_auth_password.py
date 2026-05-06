@@ -101,3 +101,37 @@ def _change_user_password(
         connection.commit()
     return {"ok": True}
 
+
+def _change_user_password_after_reauth(database_path: Path, user_id: int, new_password: str) -> dict[str, Any]:
+    new_password_error = _validate_password(new_password)
+    if new_password_error:
+        return {"ok": False, "error": new_password_error, "status_code": 400}
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT id, password_hash FROM users WHERE id = ?",
+            (int(user_id),),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": "User not found.", "status_code": 404}
+
+        current_hash = str(row["password_hash"] or "")
+        if _verify_password(new_password, current_hash):
+            return {
+                "ok": False,
+                "error": "New password must be different from current password.",
+                "status_code": 400,
+            }
+
+        connection.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, failed_login_attempts = 0, lockout_until = NULL
+            WHERE id = ?
+            """,
+            (_hash_password(new_password), int(user_id)),
+        )
+        connection.commit()
+    return {"ok": True}
+

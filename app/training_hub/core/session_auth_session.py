@@ -110,7 +110,8 @@ def _resolve_user_from_session(
                     u.id AS user_id,
                     u.username,
                     u.email,
-                    u.is_admin
+                    u.is_admin,
+                    u.mfa_enabled
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_sha256 = ?
@@ -129,7 +130,8 @@ def _resolve_user_from_session(
                     u.id AS user_id,
                     u.username,
                     u.email,
-                    u.is_admin
+                    u.is_admin,
+                    u.mfa_enabled
                 FROM sessions s
                 JOIN users u ON u.id = s.user_id
                 WHERE s.token_sha256 IN (?, ?)
@@ -162,6 +164,7 @@ def _resolve_user_from_session(
             "username": str(row["username"]),
             "email": str(row["email"]),
             "is_admin": int(row["is_admin"]),
+            "mfa_enabled": int(row["mfa_enabled"] or 0),
         },
     }
 
@@ -170,7 +173,7 @@ def _refresh_user(database_path: Path, user_id: int) -> dict[str, Any] | None:
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
         row = connection.execute(
-            "SELECT id, username, email, is_admin FROM users WHERE id = ?",
+            "SELECT id, username, email, is_admin, mfa_enabled FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
     return dict(row) if row is not None else None

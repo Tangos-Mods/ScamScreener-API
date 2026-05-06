@@ -13,7 +13,8 @@
 {% set page_intro %}{% block page_intro %}{% endblock %}{% endset %}
 {% set main_content %}{% block content %}{% endblock %}{% endset %}
 {% set path = request.url.path %}
-{% set workspace_open = path in ['/dashboard/uploads', '/dashboard/account'] %}
+{% set workspace_open = path in ['/dashboard', '/dashboard/uploads'] %}
+{% set account_open = path.startswith('/account') or path == '/dashboard/account' %}
 {% set admin_open = path.startswith('/admin') %}
 {% set reference_open = path in ['/legal-notice', '/privacy'] %}
 <body class="hub-body hub-shell-{{ shell_mode|trim }}">
@@ -28,13 +29,6 @@
 
             <nav class="workspace-nav" aria-label="Primary">
                 <ul class="workspace-nav-list">
-                    <li class="workspace-nav-item">
-                        <a
-                            class="workspace-nav-link{% if path == '/dashboard' %} is-active{% endif %}"
-                            href="/dashboard"
-                            {% if path == '/dashboard' %}aria-current="page"{% endif %}
-                        >Overview</a>
-                    </li>
                     <li class="workspace-nav-item workspace-nav-group">
                         <details class="workspace-disclosure" {% if workspace_open %}open{% endif %}>
                             <summary class="workspace-disclosure-toggle{% if workspace_open %} is-open{% endif %}">
@@ -43,17 +37,54 @@
                             <ul class="workspace-subnav-list" aria-label="Workspace sections">
                                 <li>
                                     <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/dashboard' %} is-active{% endif %}"
+                                        href="/dashboard"
+                                        {% if path == '/dashboard' %}aria-current="page"{% endif %}
+                                    >Overview</a>
+                                </li>
+                                <li>
+                                    <a
                                         class="workspace-nav-link workspace-subnav-link{% if path == '/dashboard/uploads' %} is-active{% endif %}"
                                         href="/dashboard/uploads"
                                         {% if path == '/dashboard/uploads' %}aria-current="page"{% endif %}
                                     >Uploads</a>
                                 </li>
+                            </ul>
+                        </details>
+                    </li>
+                    <li class="workspace-nav-item workspace-nav-group">
+                        <details class="workspace-disclosure" {% if account_open %}open{% endif %}>
+                            <summary class="workspace-disclosure-toggle{% if account_open %} is-open{% endif %}">
+                                <span>Account</span>
+                            </summary>
+                            <ul class="workspace-subnav-list" aria-label="Account sections">
                                 <li>
                                     <a
-                                        class="workspace-nav-link workspace-subnav-link{% if path == '/dashboard/account' %} is-active{% endif %}"
-                                        href="/dashboard/account"
-                                        {% if path == '/dashboard/account' %}aria-current="page"{% endif %}
-                                    >Account</a>
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/account/security' or path == '/dashboard/account' %} is-active{% endif %}"
+                                        href="/account/security"
+                                        {% if path == '/account/security' or path == '/dashboard/account' %}aria-current="page"{% endif %}
+                                    >Security</a>
+                                </li>
+                                <li>
+                                    <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/account/sessions' %} is-active{% endif %}"
+                                        href="/account/sessions"
+                                        {% if path == '/account/sessions' %}aria-current="page"{% endif %}
+                                    >Sessions</a>
+                                </li>
+                                <li>
+                                    <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/account/clients' %} is-active{% endif %}"
+                                        href="/account/clients"
+                                        {% if path == '/account/clients' %}aria-current="page"{% endif %}
+                                    >Clients</a>
+                                </li>
+                                <li>
+                                    <a
+                                        class="workspace-nav-link workspace-subnav-link{% if path == '/account/privacy' %} is-active{% endif %}"
+                                        href="/account/privacy"
+                                        {% if path == '/account/privacy' %}aria-current="page"{% endif %}
+                                    >Privacy</a>
                                 </li>
                             </ul>
                         </details>
@@ -202,5 +233,6 @@
         </footer>
     </div>
 {% endif %}
+{% block page_scripts %}{% endblock %}
 </body>
 </html>

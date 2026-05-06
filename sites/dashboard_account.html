@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_action_disclosure.html" import sensitive_action %}
 
 {% block shell_mode %}app{% endblock %}
 {% block title %}Training Hub Account{% endblock %}
@@ -28,25 +29,27 @@
             <h2>Update password</h2>
             <p class="section-copy">Changing your password revokes all other active sessions.</p>
         </div>
+        {% call sensitive_action("password-change", active_action, action_error, "Update Password", "primary") %}
+            <form method="post" action="/dashboard/password" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="current_password">Current password</label>
+                    <input id="current_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                </div>
+                <div class="form-row">
+                    <label for="new_password">New password</label>
+                    <input id="new_password" class="form-control" type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password" required>
+                </div>
+                <div class="form-row">
+                    <label for="new_password_confirm">Confirm new password</label>
+                    <input id="new_password_confirm" class="form-control" type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
+                </div>
+                <div class="surface-actions">
+                    <button type="submit" class="btn btn-primary">Update Password</button>
+                </div>
+            </form>
+        {% endcall %}
     </div>
-    <form method="post" action="/dashboard/password" class="surface-form">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="form-row">
-            <label for="current_password">Current password</label>
-            <input id="current_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
-        </div>
-        <div class="form-row">
-            <label for="new_password">New password</label>
-            <input id="new_password" class="form-control" type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password" required>
-        </div>
-        <div class="form-row">
-            <label for="new_password_confirm">Confirm new password</label>
-            <input id="new_password_confirm" class="form-control" type="password" name="new_password_confirm" minlength="8" maxlength="128" autocomplete="new-password" required>
-        </div>
-        <div class="surface-actions">
-            <button type="submit" class="btn btn-primary">Update Password</button>
-        </div>
-    </form>
 </section>
 
 <section class="section-shell workspace-section">
@@ -104,10 +107,105 @@
 <section class="section-shell workspace-section">
     <div class="section-header">
         <div>
+            <p class="section-kicker">Mod Linking</p>
+            <h2>Linked client IDs</h2>
+            <p class="section-copy">Link an already seen ScamScreener mod client ID to this account so its historical uploads appear in your workspace.</p>
+        </div>
+        {% call sensitive_action("client-link", active_action, action_error, "Link Client ID", "primary") %}
+            <form method="post" action="/dashboard/account/client-ids/link" class="surface-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-row">
+                    <label for="client_id">Client ID</label>
+                    <input id="client_id" class="form-control" type="text" name="client_id" maxlength="128" autocomplete="off" placeholder="scamscreener-client-id" value="{{ action_values.get('client_id', '') }}" required>
+                </div>
+                <div class="form-row">
+                    <label for="client_id_password">Current password</label>
+                    <input id="client_id_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                </div>
+                <div class="surface-actions surface-actions-between">
+                    <button type="submit" class="btn btn-primary">Link Client ID</button>
+                    <span class="muted">Only client IDs that already uploaded to this server can be linked here.</span>
+                </div>
+            </form>
+        {% endcall %}
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Client ID</th>
+                <th>Linked</th>
+                <th>Last Seen</th>
+                <th>Uploads</th>
+                <th>Cases</th>
+                <th>Action</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if linked_client_identities %}
+                {% for row in linked_client_identities %}
+                    <tr>
+                        <td><code>{{ row.normalized_client_id }}</code></td>
+                        <td>
+                            {% if row.linked_at %}
+                                {{ row.linked_at|datetime_utc }}
+                            {% else %}
+                                <span class="muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if row.last_seen_at %}
+                                {{ row.last_seen_at|datetime_utc }}
+                            {% else %}
+                                <span class="muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ row.upload_count }}</td>
+                        <td>{{ row.case_count }}</td>
+                        <td>
+                            {% call sensitive_action("client-unlink-" ~ row.id, active_action, action_error, "Unlink", "secondary", "sm") %}
+                                <form method="post" action="/dashboard/account/client-ids/{{ row.id }}/unlink" class="surface-form surface-form-compact">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <div class="form-row">
+                                        <label for="unlink_password_{{ row.id }}">Current password</label>
+                                        <input id="unlink_password_{{ row.id }}" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                                    </div>
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Unlink</button>
+                                </form>
+                            {% endcall %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="6" class="table-empty">No linked client IDs.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
             <p class="section-kicker">Privacy</p>
             <h2>Data export</h2>
             <p class="section-copy">Request a ZIP export of the account data currently stored for <code>{{ current_user.email }}</code>.</p>
         </div>
+        {% if email_exports_enabled %}
+            {% call sensitive_action("data-export-request", active_action, action_error, "Email My Data Export", "primary") %}
+                <form method="post" action="/dashboard/data-export/request" class="surface-form surface-form-compact">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <div class="form-row">
+                        <label for="data_export_password">Current password</label>
+                        <input id="data_export_password" class="form-control" type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
+                    </div>
+                    <div class="surface-actions surface-actions-between">
+                        <button type="submit" class="btn btn-primary">Email My Data Export</button>
+                        <span class="muted">Another export can be requested after {{ data_export_cooldown_minutes }} minutes.</span>
+                    </div>
+                </form>
+            {% endcall %}
+        {% endif %}
     </div>
     {% if data_export_requests %}
         <div class="table-shell">
@@ -151,19 +249,7 @@
             </table>
         </div>
     {% endif %}
-    {% if email_exports_enabled %}
-        <form method="post" action="/dashboard/data-export/request" class="surface-form surface-form-compact">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="form-row">
-                <label for="data_export_password">Current password</label>
-                <input id="data_export_password" class="form-control" type="password" name="current_password" minlength="10" maxlength="128" autocomplete="current-password" required>
-            </div>
-            <div class="surface-actions surface-actions-between">
-                <button type="submit" class="btn btn-primary">Email My Data Export</button>
-                <span class="muted">Another export can be requested after {{ data_export_cooldown_minutes }} minutes.</span>
-            </div>
-        </form>
-    {% else %}
+    {% if not email_exports_enabled %}
         <div class="message error" role="alert">Account data export email is currently unavailable because SMTP is not configured.</div>
     {% endif %}
 </section>
@@ -178,37 +264,45 @@
     </div>
     <div class="danger-grid">
         <section class="danger-card">
-            <h3>Delete uploads and case contributions</h3>
+            <div class="danger-card-header">
+                <h3>Delete uploads and case contributions</h3>
+                {% call sensitive_action("data-purge", active_action, action_error, "Delete My Upload Data", "danger") %}
+                    <form method="post" action="/dashboard/data/purge" class="surface-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="form-row">
+                            <label for="purge_password">Current password</label>
+                            <input id="purge_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                        </div>
+                        <div class="form-row">
+                            <label for="purge_confirmation">Confirmation</label>
+                            <input id="purge_confirmation" class="form-control" type="text" name="confirmation" placeholder="ERASE MY DATA" autocomplete="off" value="{{ action_values.get('confirmation', '') }}" required>
+                        </div>
+                        <button type="submit" class="btn btn-outline-danger">Delete My Upload Data</button>
+                    </form>
+                {% endcall %}
+            </div>
             <p>Removes your uploads and deletes or rebuilds related cases from remaining uploads.</p>
-            <form method="post" action="/dashboard/data/purge" class="surface-form">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <div class="form-row">
-                    <label for="purge_password">Current password</label>
-                    <input id="purge_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
-                </div>
-                <div class="form-row">
-                    <label for="purge_confirmation">Confirmation</label>
-                    <input id="purge_confirmation" class="form-control" type="text" name="confirmation" placeholder="ERASE MY DATA" autocomplete="off" required>
-                </div>
-                <button type="submit" class="btn btn-outline-danger">Delete My Upload Data</button>
-            </form>
         </section>
 
         <section class="danger-card">
-            <h3>Delete entire account</h3>
+            <div class="danger-card-header">
+                <h3>Delete entire account</h3>
+                {% call sensitive_action("account-delete", active_action, action_error, "Delete My Account", "danger") %}
+                    <form method="post" action="/dashboard/account/delete" class="surface-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="form-row">
+                            <label for="delete_account_password">Current password</label>
+                            <input id="delete_account_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
+                        </div>
+                        <div class="form-row">
+                            <label for="delete_account_confirmation">Confirmation</label>
+                            <input id="delete_account_confirmation" class="form-control" type="text" name="confirmation" placeholder="DELETE MY ACCOUNT" autocomplete="off" value="{{ action_values.get('confirmation', '') }}" required>
+                        </div>
+                        <button type="submit" class="btn btn-danger">Delete My Account</button>
+                    </form>
+                {% endcall %}
+            </div>
             <p>Permanently removes your account, sessions, uploads, and related records where policy permits it.</p>
-            <form method="post" action="/dashboard/account/delete" class="surface-form">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <div class="form-row">
-                    <label for="delete_account_password">Current password</label>
-                    <input id="delete_account_password" class="form-control" type="password" name="current_password" minlength="8" maxlength="128" autocomplete="current-password" required>
-                </div>
-                <div class="form-row">
-                    <label for="delete_account_confirmation">Confirmation</label>
-                    <input id="delete_account_confirmation" class="form-control" type="text" name="confirmation" placeholder="DELETE MY ACCOUNT" autocomplete="off" required>
-                </div>
-                <button type="submit" class="btn btn-danger">Delete My Account</button>
-            </form>
         </section>
     </div>
 </section>

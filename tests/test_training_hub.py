@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from app.training_hub.core.mfa import _generate_passkey_registration_options, _totp_at
 from app.training_hub.main import TrainingHubSettings, create_app
 
 CSRF_COOKIE_NAME = "training_hub_csrf"
@@ -177,6 +178,27 @@ def test_last_admin_cannot_delete_own_account(tmp_path: Path) -> None:
     assert "last remaining admin account" in response.text
 
 
+def test_account_delete_confirmation_failure_preserves_non_sensitive_confirmation(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    failed = _post_form(
+        client,
+        "/dashboard/account/delete",
+        data={"current_password": "supersecret", "confirmation": "DELETE"},
+    )
+
+    assert failed.status_code == 400
+    assert _action_disclosure_open(failed.text, "account-delete")
+    assert 'value="DELETE"' in failed.text
+    assert "Type DELETE MY ACCOUNT exactly to confirm permanent account deletion." in failed.text
+
+
 def test_user_can_delete_own_account_and_related_records(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
@@ -289,6 +311,9 @@ def test_user_can_request_account_data_export_email(tmp_path: Path, monkeypatch)
             assert len(upload_entries) == 1
             manifest = json.loads(archive.read("account-data-export.json").decode("utf-8"))
             assert manifest["account"]["username"] == "alice"
+            assert manifest["account"]["mfaEnabled"] is False
+            assert manifest["mfa"]["totpFactors"] == []
+            assert manifest["mfa"]["passkeys"] == []
             assert manifest["counts"]["uploads"] == 1
             assert manifest["trainingCasesCreatedByAccount"][0]["caseId"] == "case_export_0001"
 
@@ -481,6 +506,242 @@ def test_linked_client_uploads_appear_in_dashboard_history(tmp_path: Path) -> No
     assert download.headers["content-type"].startswith("application/x-ndjson")
 
 
+def test_user_can_link_client_id_from_account_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="  Linked-Client-01  ", filename="linked-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "  Linked-Client-01  ", "current_password": "supersecret"},
+    )
+
+    assert response.status_code == 200
+    assert "Client ID linked-client-01 linked." in response.text
+    assert "linked-client-01" in response.text
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "linked-history.jsonl" in dashboard.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        link_row = connection.execute(
+            "SELECT linked_user_id FROM client_identities WHERE normalized_client_id = ?",
+            ("linked-client-01",),
+        ).fetchone()
+        assert link_row == (1,)
+
+
+def test_link_client_id_rejects_unknown_id(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "unknown-client-id", "current_password": "supersecret"},
+    )
+
+    assert response.status_code == 404
+    assert "Upload once from the mod before linking it here." in response.text
+
+
+def test_user_can_unlink_client_id_and_detach_historical_uploads(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="detach-client", filename="linked-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "detach-client", "current_password": "supersecret"},
+    )
+
+    with sqlite3.connect(settings.database_path) as connection:
+        client_identity_row = connection.execute(
+            "SELECT id FROM client_identities WHERE normalized_client_id = ?",
+            ("detach-client",),
+        ).fetchone()
+    assert client_identity_row is not None
+
+    response = _post_form(
+        client,
+        f"/dashboard/account/client-ids/{int(client_identity_row[0])}/unlink",
+        data={"current_password": "supersecret"},
+    )
+
+    assert response.status_code == 200
+    assert "Client ID detach-client unlinked." in response.text
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "linked-history.jsonl" not in dashboard.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        link_row = connection.execute(
+            "SELECT linked_user_id, linked_at FROM client_identities WHERE normalized_client_id = ?",
+            ("detach-client",),
+        ).fetchone()
+        assert link_row == (None, None)
+
+
+def test_client_link_failure_reopens_disclosure_and_preserves_client_id(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="  Linked-Client-01  ", filename="linked-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "  Linked-Client-01  ", "current_password": "wrongsecret"},
+    )
+
+    assert response.status_code == 401
+    assert _action_disclosure_open(response.text, "client-link")
+    assert 'value="  Linked-Client-01  "' in response.text
+    assert "Current password is incorrect." in response.text
+
+
+def test_client_unlink_failure_reopens_only_the_target_row_action(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="detach-client", filename="linked-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "detach-client", "current_password": "supersecret"},
+    )
+
+    with sqlite3.connect(settings.database_path) as connection:
+        client_identity_row = connection.execute(
+            "SELECT id FROM client_identities WHERE normalized_client_id = ?",
+            ("detach-client",),
+        ).fetchone()
+    assert client_identity_row is not None
+
+    failed = _post_form(
+        client,
+        f"/dashboard/account/client-ids/{int(client_identity_row[0])}/unlink",
+        data={"current_password": "wrongsecret"},
+    )
+
+    action_id = f"client-unlink-{int(client_identity_row[0])}"
+    assert failed.status_code == 401
+    assert _action_disclosure_open(failed.text, action_id)
+    assert "Current password is incorrect." in failed.text
+
+
+def test_link_client_id_rejects_other_users_existing_link(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    payload = _valid_payload()
+
+    anonymous_upload = client.post(
+        "/api/v1/client/uploads/anonymous",
+        content=payload,
+        headers=_anonymous_upload_headers(payload, client_id="owned-client", filename="owned-history.jsonl"),
+    )
+    assert anonymous_upload.status_code == 201
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "owned-client", "current_password": "supersecret"},
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = _post_form(
+        client,
+        "/dashboard/account/client-ids/link",
+        data={"client_id": "owned-client", "current_password": "supersecret"},
+    )
+
+    assert response.status_code == 409
+    assert "already linked to another account" in response.text
+
+    with sqlite3.connect(settings.database_path) as connection:
+        link_row = connection.execute(
+            "SELECT linked_user_id FROM client_identities WHERE normalized_client_id = ?",
+            ("owned-client",),
+        ).fetchone()
+        assert link_row == (1,)
+
+
 def test_api_client_login_blocks_admin_accounts_when_mfa_is_required(tmp_path: Path) -> None:
     settings = _settings(
         tmp_path,
@@ -542,7 +803,7 @@ def test_admin_page_formats_last_login_timestamp_in_utc(tmp_path: Path) -> None:
         )
         connection.commit()
 
-    admin_page = client.get("/admin")
+    admin_page = client.get("/admin/users")
 
     assert admin_page.status_code == 200
     assert "2026-03-28 18:00 UTC" in admin_page.text
@@ -574,7 +835,7 @@ def test_admin_page_shows_colored_admin_status_indicators(tmp_path: Path) -> Non
         follow_redirects=True,
     )
 
-    admin_page = client.get("/admin")
+    admin_page = client.get("/admin/users")
 
     assert admin_page.status_code == 200
     assert 'class="status-indicator status-indicator-yes"' in admin_page.text
@@ -663,6 +924,9 @@ def test_forgot_password_and_reset_flow(tmp_path: Path) -> None:
     reset_form = client.get(f"/reset-password?token={token}")
     assert reset_form.status_code == 200
     assert "Reset Password" in reset_form.text
+    assert 'name="new_password"' in reset_form.text
+    assert 'name="new_password_confirm"' in reset_form.text
+    assert "data-sensitive-action" not in reset_form.text
 
     reset_done = _post_form(
         client,
@@ -889,6 +1153,17 @@ def test_theme_css_uses_the_new_brand_palette_without_legacy_primary_blue() -> N
     assert "31, 95, 139" not in css
 
 
+def test_theme_css_defines_layout_stable_control_feedback_with_reduced_motion_fallback() -> None:
+    css = THEME_CSS_PATH.read_text(encoding="utf-8").lower()
+
+    assert "--hub-control-height:" in css
+    assert "--hub-control-radius: 8px;" in css
+    assert "--hub-focus-ring:" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert ".workspace-disclosure-toggle" in css
+    assert "filter: none;" in css
+
+
 def test_dashboard_renders_workspace_sidebar_and_account_navigation(tmp_path: Path) -> None:
     client = TestClient(create_app(_settings(tmp_path)))
 
@@ -905,9 +1180,13 @@ def test_dashboard_renders_workspace_sidebar_and_account_navigation(tmp_path: Pa
     assert "app-sidebar" in response.text
     assert "workspace-nav" in response.text
     assert "Workspace" in response.text
+    assert "Account" in response.text
     assert "Reference" in response.text
     assert 'href="/dashboard/uploads"' in response.text
-    assert 'href="/dashboard/account"' in response.text
+    assert 'href="/account/security"' in response.text
+    assert 'href="/account/sessions"' in response.text
+    assert 'href="/account/clients"' in response.text
+    assert 'href="/account/privacy"' in response.text
     assert 'href="/legal-notice"' in response.text
     assert 'href="/privacy"' in response.text
     assert re.search(r'href="/dashboard"[^>]*aria-current="page"', response.text) is not None
@@ -927,6 +1206,8 @@ def test_sidebar_disclosure_opens_the_relevant_group_for_each_context(tmp_path: 
 
     uploads_page = client.get("/dashboard/uploads")
     account_page = client.get("/dashboard/account")
+    sessions_page = client.get("/account/sessions")
+    account_privacy_page = client.get("/account/privacy")
     privacy_page = client.get("/privacy")
 
     assert uploads_page.status_code == 200
@@ -937,14 +1218,67 @@ def test_sidebar_disclosure_opens_the_relevant_group_for_each_context(tmp_path: 
 
     assert account_page.status_code == 200
     assert account_page.text.count('<details class="workspace-disclosure" open>') == 1
-    assert re.search(r'href="/dashboard/account"[^>]*aria-current="page"', account_page.text) is not None
-    assert "Email My Data Export" in account_page.text
-    assert "Revoke Other Sessions" in account_page.text
-    assert "Delete My Account" in account_page.text
+    assert re.search(r'href="/account/security"[^>]*aria-current="page"', account_page.text) is not None
+    assert "MFA overview" in account_page.text
+    assert "Registered passkeys" in account_page.text
+
+    assert sessions_page.status_code == 200
+    assert sessions_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/account/sessions"[^>]*aria-current="page"', sessions_page.text) is not None
+    assert "Revoke Other Sessions" in sessions_page.text
+
+    assert account_privacy_page.status_code == 200
+    assert account_privacy_page.text.count('<details class="workspace-disclosure" open>') == 1
+    assert re.search(r'href="/account/privacy"[^>]*aria-current="page"', account_privacy_page.text) is not None
+    assert "Delete My Account" in account_privacy_page.text
 
     assert privacy_page.status_code == 200
     assert privacy_page.text.count('<details class="workspace-disclosure" open>') == 1
     assert re.search(r'href="/privacy"[^>]*aria-current="page"', privacy_page.text) is not None
+
+
+def test_account_pages_render_sensitive_actions_as_closed_disclosures_by_default(tmp_path: Path) -> None:
+    client = TestClient(
+        create_app(
+            _settings(
+                tmp_path,
+                smtp_host="mail.local",
+                smtp_port=1025,
+                smtp_from_email="no-reply@scamscreener.local",
+                smtp_use_starttls=False,
+            )
+        )
+    )
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    security_page = client.get("/account/security")
+    clients_page = client.get("/account/clients")
+    privacy_page = client.get("/account/privacy")
+
+    assert security_page.status_code == 200
+    assert _action_disclosure_present(security_page.text, "password-change")
+    assert _action_disclosure_present(security_page.text, "totp-enroll")
+    assert _action_disclosure_present(security_page.text, "passkey-register")
+    assert _action_disclosure_present(security_page.text, "backup-codes-regenerate")
+    assert not _action_disclosure_open(security_page.text, "password-change")
+    assert not _action_disclosure_open(security_page.text, "totp-enroll")
+
+    assert clients_page.status_code == 200
+    assert _action_disclosure_present(clients_page.text, "client-link")
+    assert not _action_disclosure_open(clients_page.text, "client-link")
+
+    assert privacy_page.status_code == 200
+    assert _action_disclosure_present(privacy_page.text, "data-export-request")
+    assert _action_disclosure_present(privacy_page.text, "data-purge")
+    assert _action_disclosure_present(privacy_page.text, "account-delete")
+    assert not _action_disclosure_open(privacy_page.text, "data-export-request")
+    assert not _action_disclosure_open(privacy_page.text, "account-delete")
 
 
 def test_admin_renders_workspace_sidebar_and_primary_controls(tmp_path: Path) -> None:
@@ -1085,7 +1419,7 @@ def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> N
         follow_redirects=False,
     )
     assert login.status_code == 303
-    assert login.headers.get("location") == "/admin/mfa"
+    assert login.headers.get("location") == "/mfa"
     assert len(delivered_codes) == 1
     assert delivered_codes[0][0] == "alice@example.com"
 
@@ -1093,22 +1427,23 @@ def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> N
     assert blocked_admin.status_code == 303
     assert blocked_admin.headers.get("location") == "/login"
 
-    mfa_page = client.get("/admin/mfa")
+    mfa_page = client.get("/mfa")
     assert mfa_page.status_code == 200
-    assert "Admin Verification" in mfa_page.text
+    assert "Verify your login" in mfa_page.text
 
     verified = _post_form(
         client,
-        "/admin/mfa",
+        "/mfa",
         data={"code": delivered_codes[0][1]},
         follow_redirects=False,
     )
     assert verified.status_code == 303
-    assert verified.headers.get("location") == "/admin"
+    assert verified.headers.get("location") == "/account/security?notice=Complete+MFA+setup"
 
     admin_page = client.get("/admin")
     assert admin_page.status_code == 200
-    assert "Operations Overview" in admin_page.text
+    assert "Complete MFA setup" in admin_page.text
+    assert "Security" in admin_page.text
 
     with sqlite3.connect(settings.database_path) as connection:
         issued_audit = connection.execute(
@@ -1153,13 +1488,13 @@ def test_admin_mfa_rejects_invalid_code(tmp_path: Path, monkeypatch) -> None:
         follow_redirects=False,
     )
     assert login.status_code == 303
-    assert login.headers.get("location") == "/admin/mfa"
+    assert login.headers.get("location") == "/mfa"
     assert len(delivered_codes) == 1
 
     wrong_code = "000000" if delivered_codes[0] != "000000" else "999999"
     invalid = _post_form(
         client,
-        "/admin/mfa",
+        "/mfa",
         data={"code": wrong_code},
     )
     assert invalid.status_code == 401
@@ -1167,12 +1502,12 @@ def test_admin_mfa_rejects_invalid_code(tmp_path: Path, monkeypatch) -> None:
 
     valid = _post_form(
         client,
-        "/admin/mfa",
+        "/mfa",
         data={"code": delivered_codes[0]},
         follow_redirects=False,
     )
     assert valid.status_code == 303
-    assert valid.headers.get("location") == "/admin"
+    assert valid.headers.get("location") == "/account/security?notice=Complete+MFA+setup"
 
 
 def test_admin_mfa_delivery_failure_records_exception_detail(tmp_path: Path, monkeypatch) -> None:
@@ -1206,7 +1541,7 @@ def test_admin_mfa_delivery_failure_records_exception_detail(tmp_path: Path, mon
     )
 
     assert login.status_code == 503
-    assert "Admin verification code could not be delivered." in login.text
+    assert "Verification code could not be delivered." in login.text
 
     with sqlite3.connect(settings.database_path) as connection:
         row = connection.execute(
@@ -1256,12 +1591,12 @@ def test_admin_mfa_challenge_is_bound_to_client(tmp_path: Path, monkeypatch) -> 
         follow_redirects=False,
     )
     assert login.status_code == 303
-    assert login.headers.get("location") == "/admin/mfa"
+    assert login.headers.get("location") == "/mfa"
     assert len(delivered_codes) == 1
 
     mismatch = _post_form(
         client,
-        "/admin/mfa",
+        "/mfa",
         data={"code": delivered_codes[0]},
         headers={"X-Forwarded-For": "2.2.2.2", "User-Agent": "ScamScreenerAgent-A"},
         follow_redirects=False,
@@ -1307,25 +1642,528 @@ def test_admin_mfa_max_attempts_expires_challenge(tmp_path: Path, monkeypatch) -
         follow_redirects=False,
     )
     assert login.status_code == 303
-    assert login.headers.get("location") == "/admin/mfa"
+    assert login.headers.get("location") == "/mfa"
     assert len(delivered_codes) == 1
 
-    first_wrong = _post_form(client, "/admin/mfa", data={"code": "000000"})
+    first_wrong = _post_form(client, "/mfa", data={"code": "000000"})
     assert first_wrong.status_code == 401
     assert "Invalid verification code." in first_wrong.text
 
-    second_wrong = _post_form(client, "/admin/mfa", data={"code": "999999"}, follow_redirects=False)
+    second_wrong = _post_form(client, "/mfa", data={"code": "999999"}, follow_redirects=False)
     assert second_wrong.status_code == 303
     assert second_wrong.headers.get("location", "").startswith("/login?")
 
     blocked = _post_form(
         client,
-        "/admin/mfa",
+        "/mfa",
         data={"code": delivered_codes[0]},
         follow_redirects=False,
     )
     assert blocked.status_code == 303
     assert blocked.headers.get("location", "").startswith("/login?")
+
+
+def test_user_can_enable_totp_and_use_it_for_login(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    enrollment = _post_form(
+        client,
+        "/account/security/totp/enroll",
+        data={"current_password": "supersecret", "label": "Primary Authenticator"},
+    )
+    assert enrollment.status_code == 200
+    assert "Verify one code to activate it." in enrollment.text
+    assert "data:image/svg+xml;base64," in enrollment.text
+
+    secret = _extract_pending_totp_secret(enrollment.text)
+    enrollment_token = _extract_hidden_input_value(enrollment.text, "enrollment_token")
+    verified = _post_form(
+        client,
+        "/account/security/totp/verify",
+        data={"enrollment_token": enrollment_token, "code": _current_totp_code(secret)},
+    )
+    assert verified.status_code == 200
+    assert "Authenticator app verified and activated." in verified.text
+
+    _post_form(client, "/logout", follow_redirects=True)
+
+    login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "bob", "password": "supersecret"},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    assert login.headers.get("location") == "/mfa"
+
+    mfa = _post_form(
+        client,
+        "/mfa",
+        data={"code": _current_totp_code(secret)},
+        follow_redirects=False,
+    )
+    assert mfa.status_code == 303
+    assert mfa.headers.get("location") == "/dashboard"
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "Your Case Contributions" in dashboard.text
+
+
+def test_backup_code_can_be_used_only_once_for_login(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    enrollment = _post_form(
+        client,
+        "/account/security/totp/enroll",
+        data={"current_password": "supersecret", "label": "Recovery Anchor"},
+    )
+    secret = _extract_pending_totp_secret(enrollment.text)
+    enrollment_token = _extract_hidden_input_value(enrollment.text, "enrollment_token")
+    _post_form(
+        client,
+        "/account/security/totp/verify",
+        data={"enrollment_token": enrollment_token, "code": _current_totp_code(secret)},
+    )
+
+    backup_codes_page = _post_form(
+        client,
+        "/account/security/backup-codes/regenerate",
+        data={"current_password": "supersecret"},
+    )
+    assert backup_codes_page.status_code == 200
+    first_backup_code = _extract_first_backup_code(backup_codes_page.text)
+
+    _post_form(client, "/logout", follow_redirects=True)
+    login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "bob", "password": "supersecret"},
+        follow_redirects=False,
+    )
+    assert login.headers.get("location") == "/mfa"
+
+    first_use = _post_form(
+        client,
+        "/mfa",
+        data={"code": first_backup_code},
+        follow_redirects=False,
+    )
+    assert first_use.status_code == 303
+    assert first_use.headers.get("location") == "/dashboard"
+
+    _post_form(client, "/logout", follow_redirects=True)
+    second_login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "bob", "password": "supersecret"},
+        follow_redirects=False,
+    )
+    assert second_login.headers.get("location") == "/mfa"
+
+    reused = _post_form(client, "/mfa", data={"code": first_backup_code})
+    assert reused.status_code == 401
+    assert "Invalid verification code." in reused.text
+
+
+def test_passkey_registration_and_identifier_first_login(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    passkey_script = client.get("/js/passkeys.js")
+    assert passkey_script.status_code == 200
+    assert "navigator.credentials" in passkey_script.text
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    login_page = client.get("/login")
+    assert '<script src="/js/passkeys.js"></script>' in login_page.text
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "bob", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    def _fake_registration_options(
+        _settings,
+        *,
+        user_id: int,
+        label: str,
+        rp_id: str = "",
+        expected_origin: str = "",
+        source_ip: str = "",
+        user_agent: str = "",
+    ):
+        assert user_id == 2
+        assert label == "Laptop"
+        assert rp_id == "testserver"
+        assert expected_origin == "http://testserver"
+        return {"token": "register-flow", "options_json": json.dumps({"challenge": "Y2hhbGxlbmdl"})}
+
+    def _fake_registration_verify(
+        _settings,
+        *,
+        user_id: int,
+        flow_token: str,
+        credential: dict,
+        source_ip: str = "",
+        user_agent: str = "",
+    ):
+        assert user_id == 2
+        assert flow_token == "register-flow"
+        assert credential["id"] == "credential-1"
+        return {"ok": True, "label": "Laptop"}
+
+    monkeypatch.setattr(
+        "app.training_hub.routes.public_dashboard_account._generate_passkey_registration_options",
+        _fake_registration_options,
+    )
+    monkeypatch.setattr(
+        "app.training_hub.routes.public_dashboard_account._verify_passkey_registration",
+        _fake_registration_verify,
+    )
+
+    options = client.post(
+        "/account/security/passkeys/register/options",
+        json={"label": "Laptop", "currentPassword": "supersecret"},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/account/security"},
+    )
+    assert options.status_code == 200
+    assert options.json()["flowToken"] == "register-flow"
+
+    verify = client.post(
+        "/account/security/passkeys/register/verify",
+        json={"flowToken": "register-flow", "credential": {"id": "credential-1"}},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/account/security"},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["notice"] == "Passkey registered."
+
+    _post_form(client, "/logout", follow_redirects=True)
+
+    def _fake_auth_options(
+        _settings,
+        *,
+        user_id: int,
+        purpose: str,
+        rp_id: str = "",
+        expected_origin: str = "",
+        source_ip: str = "",
+        user_agent: str = "",
+        login_flow_id: int | None = None,
+    ):
+        assert user_id == 2
+        assert purpose == "passwordless-login"
+        assert rp_id == "testserver"
+        assert expected_origin == "http://testserver"
+        assert login_flow_id is None
+        return {
+            "ok": True,
+            "flow_token": "login-passkey-flow",
+            "options_json": json.dumps({"challenge": "Y2hhbGxlbmdl", "allowCredentials": []}),
+        }
+
+    def _fake_auth_verify(_settings, *, flow_token: str, credential: dict, source_ip: str = "", user_agent: str = ""):
+        assert flow_token == "login-passkey-flow"
+        assert credential["id"] == "credential-1"
+        return {"ok": True, "user_id": 2, "purpose": "passwordless-login", "login_flow_id": None}
+
+    monkeypatch.setattr("app.training_hub.routes.public_auth_login._generate_passkey_auth_options", _fake_auth_options)
+    monkeypatch.setattr("app.training_hub.routes.public_auth_login._verify_passkey_authentication", _fake_auth_verify)
+
+    login_options = client.post(
+        "/login/passkey/options",
+        json={"identifier": "bob"},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/login"},
+    )
+    assert login_options.status_code == 200
+    assert login_options.json()["flowToken"] == "login-passkey-flow"
+
+    login_verify = client.post(
+        "/login/passkey/verify",
+        json={"flowToken": "login-passkey-flow", "credential": {"id": "credential-1"}},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/login"},
+    )
+    assert login_verify.status_code == 200
+    assert login_verify.json()["redirectUrl"] == "/dashboard"
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+
+
+def test_discoverable_passkey_login_options_work_without_identifier(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    def _fake_auth_options(
+        _settings,
+        *,
+        user_id: int,
+        purpose: str,
+        discoverable: bool = False,
+        rp_id: str = "",
+        expected_origin: str = "",
+        source_ip: str = "",
+        user_agent: str = "",
+        login_flow_id: int | None = None,
+    ):
+        assert user_id == 1
+        assert purpose == "passwordless-login"
+        assert discoverable is True
+        assert rp_id == "testserver"
+        assert expected_origin == "http://testserver"
+        assert login_flow_id is None
+        return {
+            "ok": True,
+            "flow_token": "discoverable-login-flow",
+            "options_json": json.dumps({"challenge": "Y2hhbGxlbmdl", "allowCredentials": []}),
+        }
+
+    monkeypatch.setattr("app.training_hub.routes.public_auth_login._generate_passkey_auth_options", _fake_auth_options)
+
+    login_options = client.post(
+        "/login/passkey/options",
+        json={"identifier": ""},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/login"},
+    )
+    assert login_options.status_code == 200
+    assert login_options.json()["flowToken"] == "discoverable-login-flow"
+
+
+def test_passkey_script_handles_redirect_and_incomplete_option_payloads(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    passkey_script = client.get("/js/passkeys.js")
+    assert passkey_script.status_code == 200
+    assert "redirectUrl" in passkey_script.text
+    assert "did not return valid credential options." in passkey_script.text
+    assert "The server returned an unexpected response." in passkey_script.text
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    logged_in_options = client.post(
+        "/login/passkey/options",
+        json={"identifier": "alice"},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/login"},
+    )
+    assert logged_in_options.status_code == 200
+    assert logged_in_options.json() == {"ok": True, "redirectUrl": "/dashboard"}
+
+
+def test_account_confirm_password_flow_can_complete_totp_enrollment_start(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    start = _post_form(
+        client,
+        "/account/security/totp/enroll",
+        data={"label": "Primary Authenticator"},
+        follow_redirects=False,
+    )
+    assert start.status_code == 303
+    assert start.headers.get("location") == "/account/confirm"
+
+    confirm_page = client.get("/account/confirm")
+    assert confirm_page.status_code == 200
+    assert "Confirm authenticator setup" in confirm_page.text
+    assert "Confirm with Password" in confirm_page.text
+
+    completed = _post_form(
+        client,
+        "/account/confirm/password",
+        data={"current_password": "supersecret"},
+    )
+    assert completed.status_code == 200
+    assert "Authenticator setup created. Verify one code to activate it." in completed.text
+    assert "Verify Authenticator App" in completed.text
+
+
+def test_passkey_registration_options_require_discoverable_credentials(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    options = _generate_passkey_registration_options(
+        settings,
+        user_id=1,
+        label="Chrome",
+        rp_id="testserver",
+        expected_origin="http://testserver",
+    )
+    public_key = json.loads(str(options["options_json"]))
+    assert public_key["authenticatorSelection"]["residentKey"] == "required"
+    assert public_key["authenticatorSelection"]["requireResidentKey"] is True
+    assert public_key["hints"] == ["client-device", "hybrid", "security-key"]
+
+
+def test_admin_user_with_registered_passkey_can_complete_generic_mfa_flow(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path, admin_mfa_required=True)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    with sqlite3.connect(settings.database_path) as connection:
+        connection.execute("UPDATE users SET mfa_enabled = 1 WHERE id = 1")
+        connection.execute(
+            """
+            INSERT INTO user_passkeys (
+                created_at, user_id, label, credential_id, public_key, sign_count,
+                aaguid, credential_device_type, backed_up, last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                1,
+                "Laptop",
+                "credential-1",
+                "cHVibGljLWtleQ",
+                0,
+                "",
+                "single_device",
+                0,
+                None,
+            ),
+        )
+        connection.commit()
+
+    def _fake_auth_options(
+        _settings,
+        *,
+        user_id: int,
+        purpose: str,
+        rp_id: str = "",
+        expected_origin: str = "",
+        source_ip: str = "",
+        user_agent: str = "",
+        login_flow_id: int | None = None,
+    ):
+        assert user_id == 1
+        assert purpose == "mfa"
+        assert rp_id == "testserver"
+        assert expected_origin == "http://testserver"
+        assert login_flow_id is not None
+        return {
+            "ok": True,
+            "flow_token": "mfa-passkey-flow",
+            "options_json": json.dumps({"challenge": "Y2hhbGxlbmdl", "allowCredentials": []}),
+        }
+
+    def _fake_auth_verify(_settings, *, flow_token: str, credential: dict, source_ip: str = "", user_agent: str = ""):
+        assert flow_token == "mfa-passkey-flow"
+        assert credential["id"] == "credential-1"
+        return {"ok": True, "user_id": 1, "purpose": "mfa", "login_flow_id": 1}
+
+    monkeypatch.setattr("app.training_hub.routes.public_auth_mfa._generate_passkey_auth_options", _fake_auth_options)
+    monkeypatch.setattr("app.training_hub.routes.public_auth_mfa._verify_passkey_authentication", _fake_auth_verify)
+
+    login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "alice", "password": "supersecret"},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    assert login.headers.get("location") == "/mfa"
+
+    mfa_page = client.get("/mfa")
+    assert mfa_page.status_code == 200
+    assert "Use Passkey" in mfa_page.text
+    assert "sent to" not in mfa_page.text
+    assert '<script src="/js/passkeys.js"></script>' in mfa_page.text
+
+    options = client.post(
+        "/mfa/passkey/options",
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/mfa"},
+    )
+    assert options.status_code == 200
+    assert options.json()["flowToken"] == "mfa-passkey-flow"
+
+    verify = client.post(
+        "/mfa/passkey/verify",
+        json={"flowToken": "mfa-passkey-flow", "credential": {"id": "credential-1"}},
+        headers={"Origin": "http://testserver", "Referer": "http://testserver/mfa"},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["redirectUrl"] == "/admin"
+
+    admin = client.get("/admin")
+    assert admin.status_code == 200
+    assert "Operations Overview" in admin.text
 
 
 def test_upload_rejects_invalid_payload(tmp_path: Path) -> None:
@@ -1386,7 +2224,10 @@ def test_admin_bundle_creation_creates_audit_log(tmp_path: Path) -> None:
     run = _post_form(client, "/admin/train")
     assert run.status_code == 200
     assert "Training bundle built successfully." in run.text
-    assert "/admin/runs/1/bundle" in run.text
+
+    runs_page = client.get("/admin/runs")
+    assert runs_page.status_code == 200
+    assert "/admin/runs/1/bundle" in runs_page.text
 
     with sqlite3.connect(settings.database_path) as connection:
         row = connection.execute("SELECT status, upload_count, case_count FROM training_runs LIMIT 1").fetchone()
@@ -1533,6 +2374,8 @@ def test_dashboard_and_admin_core_controls_remain_visible_after_reskin(tmp_path:
     admin = client.get("/admin")
     uploads_page = client.get("/dashboard/uploads")
     account_page = client.get("/dashboard/account")
+    sessions_page = client.get("/account/sessions")
+    privacy_page = client.get("/account/privacy")
     system_page = client.get("/admin/system")
     cases_page = client.get("/admin/cases")
 
@@ -1544,9 +2387,15 @@ def test_dashboard_and_admin_core_controls_remain_visible_after_reskin(tmp_path:
     assert "Upload File" in uploads_page.text
 
     assert account_page.status_code == 200
-    assert "Email My Data Export" in account_page.text
-    assert "Revoke Other Sessions" in account_page.text
-    assert "Delete My Account" in account_page.text
+    assert "MFA overview" in account_page.text
+    assert "Registered passkeys" in account_page.text
+
+    assert sessions_page.status_code == 200
+    assert "Revoke Other Sessions" in sessions_page.text
+
+    assert privacy_page.status_code == 200
+    assert "Account data export email is currently unavailable" in privacy_page.text
+    assert "Delete My Account" in privacy_page.text
 
     assert admin.status_code == 200
     assert "Build Training Bundle" in admin.text
@@ -1945,6 +2794,31 @@ def test_user_can_change_password(tmp_path: Path) -> None:
             "SELECT id FROM audit_logs WHERE action = 'auth.password.changed' LIMIT 1"
         ).fetchone()
         assert audit is not None
+
+
+def test_password_change_failure_reopens_sensitive_action_without_rehydrating_passwords(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    failed = _post_form(
+        client,
+        "/dashboard/password",
+        data={
+            "current_password": "wrongsecret",
+            "new_password": "newsecret123",
+            "new_password_confirm": "newsecret123",
+        },
+    )
+
+    assert failed.status_code == 401
+    assert _action_disclosure_open(failed.text, "password-change")
+    assert "Current password is incorrect." in failed.text
+    assert 'value="newsecret123"' not in failed.text
 
 
 def test_password_change_revokes_other_sessions(tmp_path: Path) -> None:
@@ -2386,6 +3260,26 @@ def test_admin_retention_cleanup_prunes_old_rows_and_files(tmp_path: Path) -> No
         )
         connection.execute(
             """
+            INSERT INTO auth_flow_tokens (
+                created_at, user_id, flow_type, token_sha256, payload_json, expires_at, consumed_at,
+                failed_attempts, source_ip, user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old_iso,
+                1,
+                "login-mfa",
+                hashlib.sha256(b"retention_old_auth_flow").hexdigest(),
+                "{}",
+                old_iso,
+                old_iso,
+                0,
+                "127.0.0.1",
+                "pytest",
+            ),
+        )
+        connection.execute(
+            """
             INSERT INTO audit_logs (created_at, actor_user_id, action, target_type, target_id, details, source_ip, user_agent)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -2416,6 +3310,10 @@ def test_admin_retention_cleanup_prunes_old_rows_and_files(tmp_path: Path) -> No
             "SELECT id FROM admin_mfa_challenges WHERE token_sha256 = ?",
             (hashlib.sha256(b"retention_old_mfa_token").hexdigest(),),
         ).fetchone()
+        auth_flow_row = connection.execute(
+            "SELECT id FROM auth_flow_tokens WHERE token_sha256 = ?",
+            (hashlib.sha256(b"retention_old_auth_flow").hexdigest(),),
+        ).fetchone()
         audit_row = connection.execute("SELECT id FROM audit_logs WHERE action = 'retention.test.old'").fetchone()
         rate_row = connection.execute(
             "SELECT 1 FROM rate_limit_hits WHERE bucket_key = 'retention.test.rate'"
@@ -2427,6 +3325,7 @@ def test_admin_retention_cleanup_prunes_old_rows_and_files(tmp_path: Path) -> No
         assert session_row is None
         assert token_row is None
         assert mfa_row is None
+        assert auth_flow_row is None
         assert audit_row is None
         assert rate_row is None
 
@@ -2449,6 +3348,7 @@ def test_auto_retention_worker_runs_when_enabled(tmp_path: Path, monkeypatch) ->
             "sessions": 0,
             "password_reset_tokens": 0,
             "admin_mfa_challenges": 0,
+            "auth_flow_tokens": 0,
             "audit_logs": 0,
             "uploads": 0,
             "bundles": 0,
@@ -2548,6 +3448,9 @@ def _settings(
         admin_mfa_required=admin_mfa_required,
         admin_mfa_ttl_minutes=admin_mfa_ttl_minutes,
         admin_mfa_max_attempts=admin_mfa_max_attempts,
+        webauthn_rp_id="testserver",
+        webauthn_rp_name="ScamScreener",
+        webauthn_origins=("http://testserver",),
         enforce_https=enforce_https,
         enable_rate_limit=True,
         enforce_origin_check=enforce_origin_check,
@@ -2589,6 +3492,42 @@ def _csrf_token(client: TestClient) -> str:
     token = client.cookies.get(CSRF_COOKIE_NAME)
     assert token is not None
     return str(token)
+
+
+def _extract_hidden_input_value(html: str, name: str) -> str:
+    match = re.search(rf'<input[^>]+name="{re.escape(name)}"[^>]+value="([^"]+)"', html)
+    assert match is not None
+    return match.group(1)
+
+
+def _extract_pending_totp_secret(html: str) -> str:
+    match = re.search(r'<strong class="summary-metric" style="font-size:1rem;">([A-Z2-7]+)</strong>', html)
+    assert match is not None
+    return match.group(1)
+
+
+def _extract_first_backup_code(html: str) -> str:
+    match = re.search(r"<code>([A-Z0-9]{4}-[A-Z0-9]{4})</code>", html)
+    assert match is not None
+    return match.group(1)
+
+
+def _action_disclosure_present(html: str, action_id: str) -> bool:
+    return f'data-sensitive-action="{action_id}"' in html
+
+
+def _action_disclosure_open(html: str, action_id: str) -> bool:
+    return (
+        re.search(
+            rf'<details[^>]+data-sensitive-action="{re.escape(action_id)}"[^>]*\bopen\b',
+            html,
+        )
+        is not None
+    )
+
+
+def _current_totp_code(secret: str) -> str:
+    return _totp_at(secret, int(datetime.now(timezone.utc).timestamp()))
 
 
 def _post_form(

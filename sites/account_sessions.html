@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Account Sessions{% endblock %}
+{% block page_eyebrow %}Account{% endblock %}
+{% block page_title %}Sessions{% endblock %}
+{% block page_intro %}Review active logins and revoke sessions you no longer trust.{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Sessions</p>
+            <h2>Active logins</h2>
+        </div>
+        <form method="post" action="/account/sessions/revoke-others" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-outline-secondary btn-sm">Revoke Other Sessions</button>
+        </form>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>IP</th>
+                <th>User Agent</th>
+                <th>Action</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if sessions %}
+                {% for row in sessions %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>{{ row.expires_at|datetime_utc }}</td>
+                        <td>{{ row.remote_addr }}</td>
+                        <td class="table-wrap">{{ row.user_agent }}</td>
+                        <td>
+                            {% if row.is_current %}
+                                <span class="muted">current session</span>
+                            {% else %}
+                                <form method="post" action="/account/sessions/{{ row.id }}/revoke" class="inline-form">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Revoke</button>
+                                </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="6" class="table-empty">No active sessions.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

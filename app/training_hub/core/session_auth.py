@@ -3,6 +3,7 @@ from __future__ import annotations
 from .session_auth_login import LOGIN_LOCKOUT_MINUTES, LOGIN_MAX_FAILURES, _consume_login_attempt
 from .session_auth_password import (
     _change_user_password,
+    _change_user_password_after_reauth,
     _hash_password,
     _normalize_email,
     _normalize_username,
