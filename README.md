@@ -31,7 +31,7 @@ This repository contains two separate applications in one repo:
 Data/state:
 
 - the default deployment stores app state under `/app/data`
-- SQLite stores users, sessions, uploads, cases, and audit metadata by default
+- Training Hub stores users, sessions, uploads, cases, and audit metadata in MariaDB for staging/production deployments
 - uploaded raw payloads and generated bundles are kept in the persistent app data volume
 
 Frontend files:
@@ -43,7 +43,7 @@ Application packages:
 
 - `app/training_hub/` contains the Training Hub app, routes, storage, auth, and admin flows
 - `app/marketguard_api/` contains the Hypixel auction client, Lowest BIN cache, and API routes
-- `app/main.py` is the primary production entrypoint for the combined single-container deployment
+- `app/main.py` remains available as the combined in-process entrypoint used by tests and local integration scenarios
 
 ## 1) Local setup
 
@@ -64,7 +64,7 @@ Set at least:
 Optional:
 
 - `TRAINING_HUB_ADMIN_USERNAMES` (comma-separated bootstrap allowlist for first admin account)
-- MariaDB settings (`TRAINING_HUB_DB_*`) if you intentionally want to use an external MariaDB instance
+- `TRAINING_HUB_DB_DRIVER=sqlite` if you intentionally want a local development fallback instead of MariaDB
 
 Bootstrap note: first registration is locked until `TRAINING_HUB_ADMIN_USERNAMES` contains the first admin username.
 
@@ -93,7 +93,14 @@ Open:
 
 ## 3) Docker Deploy
 
-The repository now ships a single Compose stack: the combined app behind bundled Caddy. It keeps persistent state under `/app/data`, auto-generates a strong app secret on first boot when you do not provide one, and serves both the Training Hub and `lowestbin` from one internal app process.
+The repository now ships a single Compose stack behind bundled Caddy. It runs four base services plus an optional Redis cache service when `MARKETGUARD_REDIS_ENABLED=true` with `SCAMSCREENER_REDIS_MANAGED=true`:
+
+- `scamscreener-hub` for the Training Hub
+- `scamscreener-api` for the public Lowest BIN and Bazaar API
+- `scamscreener-db` for the internal MariaDB database
+- `caddy` for public HTTPS termination and reverse proxy
+
+The stack keeps persistent state under `/app/data`, auto-generates a strong app secret on first boot when you do not provide one, auto-generates persistent MariaDB credentials for the managed internal database, and preserves the same public URLs as before.
 
 One-time setup:
 
@@ -119,12 +126,13 @@ What this path expects:
 
 What this path provides automatically:
 
-- one internal app container plus one public Caddy container
+- one internal hub container, one internal API container, one internal MariaDB container, one public Caddy container, and an optional internal Redis container
 - automatic HTTPS via Caddy
-- `/api/v1/health` container healthcheck that works with host validation and HTTPS enforcement
-- public blocking of `/api/v1/health` and `/api/v1/metrics`
+- `/api/v1/health` healthchecks for the hub and a dedicated internal health route for the API
+- public blocking of `/api/v1/health`, `/api/v1/metrics`, and internal-only health paths
 - default bootstrap admin username `admin` when `TRAINING_HUB_ADMIN_USERNAMES` is omitted
 - generated persistent secret key when `TRAINING_HUB_SECRET_KEY` is omitted
+- generated persistent MariaDB app/root passwords when `SCAMSCREENER_DB_MANAGED=true`
 
 Operational helpers for this path:
 
@@ -133,43 +141,32 @@ Operational helpers for this path:
 - `python scripts/reset.py` asks for confirmation and then deletes the full compose deployment state for a clean restart
 - `python scripts/reset.py --yes --prune-images` also removes the locally built app image
 
-Direct `docker run` is also supported if you prefer not to use Compose, but then you still need external HTTPS termination in front of the container:
-
-```powershell
-docker build -t scamscreener .
-docker run -d --name scamscreener `
-  --env-file .env.production `
-  -p 8080:8080 `
-  -v scamscreener_data:/app/data `
-  --init `
-  --read-only `
-  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m `
-  --cap-drop ALL `
-  --security-opt no-new-privileges:true `
-  scamscreener
-```
+The production topology is Compose-first. Running a single `docker run` container no longer reproduces the full production stack because the hub, public API, and MariaDB are isolated into separate services.
 
 ## 4) Environment variables
 
 - `CADDY_SITE_ADDRESS` default `http://localhost` (set a real domain for public Caddy TLS)
 - `CADDY_HTTP_PORT` default `80`
 - `CADDY_HTTPS_PORT` default `443`
-- `PORT` optional runtime port override used by the single-container image
-- `WEB_CONCURRENCY` optional worker count for the single-container image (default `1`)
+- `PORT` optional runtime port override used by the app image
+- `WEB_CONCURRENCY` optional worker count for the app image (default `1`)
 - `TRAINING_HUB_HOST` default `0.0.0.0`
 - `TRAINING_HUB_PORT` default `8080`
 - `TRAINING_HUB_ENV` default `development` (`production` enforces strict startup checks)
 - `TRAINING_HUB_PUBLIC_BASE_URL` optional absolute public base URL; recommended for production and used for reset links plus allowed-host fallback
 - `TRAINING_HUB_ALLOWED_HOSTS` optional allowlist for `Host` header validation
-- `TRAINING_HUB_DB_DRIVER` default `sqlite` (`mariadb` if you intentionally use an external MariaDB instance)
+- `SCAMSCREENER_DB_MANAGED` default `false`; set `true` for the bundled internal MariaDB service
+- `SCAMSCREENER_DB_NAME` default `scamscreener_hub`
+- `SCAMSCREENER_DB_USER` default `scamscreener`
+- `TRAINING_HUB_DB_DRIVER` default `sqlite` in development and `mariadb` in staging/production
 - `TRAINING_HUB_DATABASE_URL` optional full DSN override (`mariadb://user:pass@host:3306/db`)
 - `TRAINING_HUB_DB_HOST` default `127.0.0.1`
 - `TRAINING_HUB_DB_PORT` default `3306`
 - `TRAINING_HUB_DB_NAME` default `scamscreener_hub`
 - `TRAINING_HUB_DB_USER` default `scamscreener`
-- `TRAINING_HUB_DB_PASSWORD` required when driver is `mariadb`
-- `TRAINING_HUB_DB_REQUIRE_TLS` default `false` (`true` required for MariaDB in production)
-- `TRAINING_HUB_DB_SSL_CA` optional CA path for MariaDB TLS verification (required for verified MariaDB TLS in production)
+- `TRAINING_HUB_DB_PASSWORD` required when driver is `mariadb` unless the managed compose stack injects it from its generated runtime secret
+- `TRAINING_HUB_DB_REQUIRE_TLS` default `false` in development and `true` for external MariaDB in production
+- `TRAINING_HUB_DB_SSL_CA` optional CA path for external MariaDB TLS verification
 - `TRAINING_HUB_DB_SSL_CERT` optional client certificate for MariaDB TLS
 - `TRAINING_HUB_DB_SSL_KEY` optional client key for MariaDB TLS
 - `TRAINING_HUB_DB_SSL_VERIFY_HOSTNAME` default `true`
@@ -236,11 +233,22 @@ docker run -d --name scamscreener `
 - `MARKETGUARD_REQUEST_TIMEOUT_SECONDS` default `10`
 - `MARKETGUARD_MAX_PARALLEL_PAGES` default `8`
 - `MARKETGUARD_SNAPSHOT_RETRIES` default `3`
+- `MARKETGUARD_DB_DRIVER` must be `mariadb`
+- `MARKETGUARD_DATABASE_URL` optional direct MariaDB DSN override
+- `MARKETGUARD_DB_HOST` / `MARKETGUARD_DB_PORT` / `MARKETGUARD_DB_NAME` / `MARKETGUARD_DB_USER` / `MARKETGUARD_DB_PASSWORD` configure the API database when `MARKETGUARD_DATABASE_URL` is unset
+- `MARKETGUARD_DB_REQUIRE_TLS` and `MARKETGUARD_DB_SSL_CA` enable verified external MariaDB TLS; the managed internal compose database defaults to plain internal transport
 - `MARKETGUARD_CACHE_TTL_SECONDS` default `60`
 - `MARKETGUARD_STALE_IF_ERROR_SECONDS` default `300`
-- `MARKETGUARD_STORAGE_DIR` default `/app/data` (falls back to `TRAINING_HUB_STORAGE_DIR` when set and `MARKETGUARD_STORAGE_DIR` is unset)
 - `MARKETGUARD_HISTORY_RETENTION_DAYS` default `45`
 - `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
+- `MARKETGUARD_LOCAL_CACHE_ENABLED` toggles the small per-process response cache
+- `MARKETGUARD_LOCAL_CACHE_TTL_SECONDS` and `MARKETGUARD_LOCAL_CACHE_MAX_ENTRIES` bound local API RAM usage
+- `MARKETGUARD_REDIS_ENABLED` toggles the shared Redis response cache
+- `MARKETGUARD_REDIS_URL` optional direct Redis URL override
+- `MARKETGUARD_REDIS_HOST` / `MARKETGUARD_REDIS_PORT` / `MARKETGUARD_REDIS_DB` / `MARKETGUARD_REDIS_PASSWORD` configure Redis when `MARKETGUARD_REDIS_URL` is unset
+- `MARKETGUARD_REDIS_REQUIRE_TLS` enables `rediss://` for external Redis
+- `MARKETGUARD_REDIS_CACHE_TTL_SECONDS` and `MARKETGUARD_REDIS_KEY_PREFIX` control Redis response caching
+- `MARKETGUARD_REDIS_MAXMEMORY` and `MARKETGUARD_REDIS_MAXMEMORY_POLICY` tune the internal Redis container when `SCAMSCREENER_REDIS_MANAGED=true`
 - `MARKETGUARD_HTTP_USER_AGENT` default `ScamScreener-MarketGuard/1.0`
 - `MARKETGUARD_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (falls back to `TRAINING_HUB_TRUSTED_PROXIES` when unset)
 - `TRAINING_HUB_API_DOCS_ENABLED` default `true` outside production, `false` in production
@@ -253,7 +261,8 @@ Production-mode startup checks (`TRAINING_HUB_ENV=production`) enforce:
 - `TRAINING_HUB_ENABLE_RATE_LIMIT=true`
 - `TRAINING_HUB_ENFORCE_ORIGIN_CHECK=true`
 - explicit `TRAINING_HUB_ALLOWED_HOSTS` (no wildcard)
-- MariaDB TLS enabled when MariaDB is configured
+- MariaDB selected by default unless `TRAINING_HUB_DB_DRIVER` is explicitly overridden
+- MariaDB TLS enabled for external MariaDB connections unless the managed internal compose database is used
 - no token disclosure in forgot-password UI (`TRAINING_HUB_PASSWORD_RESET_SHOW_TOKEN=false`)
 
 Admin trigger creates a merged bundle and records the run as `prepared`.
@@ -271,6 +280,7 @@ Container hardening defaults:
 - read-only root filesystem in `docker-compose.yml`
 - dropped Linux capabilities (`cap_drop: ALL`)
 - `no-new-privileges` enabled
+- internal MariaDB transport stays on the private Compose network; use external MariaDB plus TLS settings if you need DB-layer encryption
 
 Supply-chain checks:
 - GitHub Actions workflow `.github/workflows/server-security.yml` runs `pip-audit` and `trivy`

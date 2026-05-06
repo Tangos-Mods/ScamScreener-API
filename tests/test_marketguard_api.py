@@ -5,8 +5,9 @@ import base64
 import gzip
 import json
 import struct
-import tempfile
-from datetime import datetime, timezone
+from collections.abc import Mapping
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,14 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.marketguard_api.cache import CachedResponse, LocalResponseCache, ResponseCacheChain
 from app.marketguard_api.client import HypixelAuctionClient, HypixelBazaarClient
 from app.marketguard_api.config import MarketGuardSettings
-from app.marketguard_api.history import LowestBinHistoryStore
 from app.marketguard_api.item_keys import resolve_auction_item
 from app.marketguard_api.main import create_marketguard_app
+from app.marketguard_api.models import BazaarSnapshot, LowestBinSnapshot
 from app.marketguard_api.service import BazaarService, LowestBinService
+from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinSnapshot, snapshot_day_from_last_updated
 from app.training_hub.config.settings import TrainingHubSettings
 
 
@@ -219,9 +222,12 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
 
 def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
     settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -235,9 +241,12 @@ def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
 
 def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Path) -> None:
     settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -273,9 +282,13 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
 
 def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, api_docs_enabled=False)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
     app = create_app(
         training_hub_settings=settings,
-        marketguard_settings=_marketguard_settings(),
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -288,9 +301,13 @@ def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> No
 
 def test_combined_app_exposes_docs_when_api_docs_enabled(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
     app = create_app(
         training_hub_settings=settings,
-        marketguard_settings=_marketguard_settings(),
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -303,9 +320,13 @@ def test_combined_app_exposes_docs_when_api_docs_enabled(tmp_path: Path) -> None
 
 def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
     app = create_app(
         training_hub_settings=settings,
-        marketguard_settings=_marketguard_settings(),
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -330,9 +351,13 @@ def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path)
 
 def test_combined_app_docs_csp_allows_swagger_assets(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
     app = create_app(
         training_hub_settings=settings,
-        marketguard_settings=_marketguard_settings(),
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -346,9 +371,13 @@ def test_combined_app_docs_csp_allows_swagger_assets(tmp_path: Path) -> None:
 
 def test_combined_app_non_docs_csp_remains_strict(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, api_docs_enabled=True)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
     app = create_app(
         training_hub_settings=settings,
-        marketguard_settings=_marketguard_settings(),
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -537,6 +566,27 @@ def test_bazaar_uses_cached_snapshot_between_requests(tmp_path: Path) -> None:
     assert second.status_code == 200
     assert first.json() == second.json()
     assert request_count == 1
+
+
+def test_response_cache_chain_supports_local_redis_toggle_matrix() -> None:
+    entry = CachedResponse(payload={"lastUpdated": 1_700_000_000_000, "products": {}}, is_stale=False)
+
+    local_only = ResponseCacheChain(LocalResponseCache(ttl_seconds=30, max_entries=4))
+    asyncio.run(local_only.set("local-only", entry))
+    assert asyncio.run(local_only.get("local-only")) == entry
+
+    shared_entries: dict[str, CachedResponse] = {}
+    redis_only = ResponseCacheChain(_SharedMemoryCacheBackend(shared_entries))
+    asyncio.run(redis_only.set("redis-only", entry))
+    assert asyncio.run(redis_only.get("redis-only")) == entry
+
+    warmed_entries: dict[str, CachedResponse] = {"shared-hit": entry}
+    local_backend = LocalResponseCache(ttl_seconds=30, max_entries=4)
+    layered_cache = ResponseCacheChain(local_backend, _SharedMemoryCacheBackend(warmed_entries))
+    assert asyncio.run(local_backend.get("shared-hit")) is None
+    assert asyncio.run(layered_cache.get("shared-hit")) == entry
+    warmed_entries.clear()
+    assert asyncio.run(local_backend.get("shared-hit")) == entry
 
 
 def test_lowestbin_returns_stale_cache_when_refresh_fails() -> None:
@@ -741,7 +791,7 @@ def test_lowestbin_v2_stale_cache_keeps_existing_averages_without_new_history_wr
 
 
 def test_lowestbin_history_store_returns_none_for_missing_item_keys(tmp_path: Path) -> None:
-    store = LowestBinHistoryStore(tmp_path / "marketguard-history", retention_days=45)
+    store = _MemoryMarketGuardStorage(retention_days=45)
     averages = store.get_averages(["HYPERION"], anchor_day=datetime(2025, 2, 1, tzinfo=timezone.utc).date())
 
     assert averages["HYPERION"].avg_7d is None
@@ -749,8 +799,8 @@ def test_lowestbin_history_store_returns_none_for_missing_item_keys(tmp_path: Pa
 
 
 def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_path: Path) -> None:
-    history_dir = tmp_path / "marketguard-history"
-    settings = _marketguard_settings(storage_dir=history_dir)
+    shared_store = _MemoryMarketGuardStorage(retention_days=45)
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=30)
     first_snapshot_last_updated = _epoch_millis(2025, 2, 1, 12, 0)
     second_snapshot_last_updated = _epoch_millis(2025, 2, 2, 12, 0)
 
@@ -783,7 +833,7 @@ def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_
     combined_app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
-        marketguard_service=_marketguard_service(settings, _first_handler),
+        marketguard_service=_marketguard_service(settings, _first_handler, clock=lambda: 0.0, storage=shared_store),
     )
     with TestClient(combined_app) as client:
         first_response = client.get("/api/v2/lowestbin")
@@ -793,7 +843,7 @@ def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_
 
     standalone_app = create_marketguard_app(
         settings=settings,
-        service=_marketguard_service(settings, _second_handler),
+        service=_marketguard_service(settings, _second_handler, clock=lambda: 6.0, storage=shared_store),
     )
     with TestClient(standalone_app) as client:
         second_response = client.get("/api/v2/lowestbin")
@@ -804,13 +854,14 @@ def test_lowestbin_v2_history_persists_between_combined_and_standalone_apps(tmp_
 
 
 def test_lowestbin_v2_rounds_average_values_half_up(tmp_path: Path) -> None:
-    history_dir = tmp_path / "marketguard-data"
-    store = LowestBinHistoryStore(history_dir, retention_days=31)
-    store.record_snapshot(
+    store = _MemoryMarketGuardStorage(retention_days=31)
+    _seed_lowestbin_snapshot(
+        store,
         snapshot_last_updated=_epoch_millis(2025, 1, 10, 12, 0),
         item_prices={"TRUE_ESSENCE": 23_437.0},
     )
-    store.record_snapshot(
+    _seed_lowestbin_snapshot(
+        store,
         snapshot_last_updated=_epoch_millis(2025, 1, 11, 12, 0),
         item_prices={"TRUE_ESSENCE": 23_438.0},
     )
@@ -833,11 +884,11 @@ def test_lowestbin_v2_rounds_average_values_half_up(tmp_path: Path) -> None:
             },
         )
 
-    settings = _marketguard_settings(storage_dir=history_dir)
+    settings = _marketguard_settings()
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
-        marketguard_service=_marketguard_service(settings, _handler),
+        marketguard_service=_marketguard_service(settings, _handler, storage=store),
     )
 
     with TestClient(app) as client:
@@ -1053,9 +1104,31 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
     }
 
 
-def test_standalone_marketguard_app_disables_docs_when_configured() -> None:
+def test_standalone_marketguard_app_exposes_internal_health() -> None:
+    settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_marketguard_app(
-        settings=_marketguard_settings(api_docs_enabled=False),
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/internal/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["service"] == "marketguard-api"
+
+
+def test_standalone_marketguard_app_disables_docs_when_configured() -> None:
+    settings = _marketguard_settings(api_docs_enabled=False)
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
@@ -1111,6 +1184,7 @@ def _marketguard_service(
     handler,
     *,
     clock=None,
+    storage=None,
 ) -> LowestBinService:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(
@@ -1118,7 +1192,12 @@ def _marketguard_service(
         base_url=settings.hypixel_api_base_url,
     )
     auction_client = HypixelAuctionClient(settings, client=client, close_client=True)
-    return LowestBinService(settings, client=auction_client, clock=clock)
+    return LowestBinService(
+        settings,
+        client=auction_client,
+        clock=clock,
+        storage=storage or _MemoryMarketGuardStorage(retention_days=settings.history_retention_days),
+    )
 
 
 def _marketguard_bazaar_service(
@@ -1126,6 +1205,7 @@ def _marketguard_bazaar_service(
     handler,
     *,
     clock=None,
+    storage=None,
 ) -> BazaarService:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(
@@ -1133,26 +1213,81 @@ def _marketguard_bazaar_service(
         base_url=settings.hypixel_api_base_url,
     )
     bazaar_client = HypixelBazaarClient(settings, client=client, close_client=True)
-    return BazaarService(settings, client=bazaar_client, clock=clock)
+    return BazaarService(
+        settings,
+        client=bazaar_client,
+        clock=clock,
+        storage=storage or _MemoryMarketGuardStorage(retention_days=settings.history_retention_days),
+    )
 
 
 def _marketguard_settings(
     *,
-    storage_dir: Path | None = None,
     cache_ttl_seconds: int = 60,
     stale_if_error_seconds: int = 300,
     history_retention_days: int = 45,
     lowestbin_rate_limit_per_minute: int = 30,
     api_docs_enabled: bool = True,
+    local_cache_enabled: bool = True,
+    local_cache_ttl_seconds: int = 15,
+    local_cache_max_entries: int = 32,
+    redis_enabled: bool = False,
+    redis_url: str = "",
 ) -> MarketGuardSettings:
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
-        storage_dir=(storage_dir or Path(tempfile.mkdtemp(prefix="marketguard-test-"))).resolve(),
+        database_url="mariadb://scamscreener:test@127.0.0.1:3306/scamscreener_hub",
         cache_ttl_seconds=cache_ttl_seconds,
         stale_if_error_seconds=stale_if_error_seconds,
         history_retention_days=history_retention_days,
         lowestbin_rate_limit_per_minute=lowestbin_rate_limit_per_minute,
+        local_cache_enabled=local_cache_enabled,
+        local_cache_ttl_seconds=local_cache_ttl_seconds,
+        local_cache_max_entries=local_cache_max_entries,
+        redis_enabled=redis_enabled,
+        redis_url=redis_url,
         api_docs_enabled=api_docs_enabled,
+    )
+
+
+def _noop_marketguard_services(settings: MarketGuardSettings) -> tuple[LowestBinService, BazaarService]:
+    shared_storage = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+
+    async def _auction_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [_auction("HYPERION", 99_000_000)],
+            },
+        )
+
+    async def _bazaar_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "lastUpdated": 1_700_000_000_000,
+                "products": {
+                    "ENCHANTED_GOLD": {
+                        "quick_status": {
+                            "buyPrice": 123.4,
+                            "sellPrice": 120.1,
+                            "buyVolume": 123456,
+                            "sellVolume": 120000,
+                            "buyMovingWeek": 543210,
+                            "sellMovingWeek": 432100,
+                        }
+                    }
+                },
+            },
+        )
+
+    return (
+        _marketguard_service(settings, _auction_handler, storage=shared_storage),
+        _marketguard_bazaar_service(settings, _bazaar_handler, storage=shared_storage),
     )
 
 
@@ -1174,6 +1309,109 @@ def _training_hub_settings(tmp_path: Path, *, api_docs_enabled: bool = True) -> 
         enforce_origin_check=True,
         smtp_use_starttls=False,
         api_docs_enabled=api_docs_enabled,
+    )
+
+
+class _MemoryMarketGuardStorage:
+    def __init__(self, *, retention_days: int) -> None:
+        self._retention_days = max(31, int(retention_days))
+        self._lowestbin_snapshot: StoredLowestBinSnapshot | None = None
+        self._bazaar_snapshot: BazaarSnapshot | None = None
+        self._processed_snapshots: set[int] = set()
+        self._daily_aggregates: dict[tuple[str, str], tuple[float, int]] = {}
+
+    def write_lowestbin_snapshot(
+        self,
+        snapshot: LowestBinSnapshot,
+        *,
+        auctioneer_uuids: Mapping[str, str],
+        item_names: Mapping[str, str],
+    ) -> None:
+        normalized_items = dict(snapshot.items)
+        self._lowestbin_snapshot = StoredLowestBinSnapshot(
+            snapshot=replace(snapshot, items=normalized_items, is_stale=False),
+            auctioneer_uuids={str(key): str(value) for key, value in auctioneer_uuids.items()},
+            item_names={str(key): str(value) for key, value in item_names.items()},
+        )
+        if snapshot.snapshot_last_updated in self._processed_snapshots:
+            return
+        self._processed_snapshots.add(snapshot.snapshot_last_updated)
+        snapshot_day = snapshot_day_from_last_updated(snapshot.snapshot_last_updated).isoformat()
+        prune_before = (
+            snapshot_day_from_last_updated(snapshot.snapshot_last_updated) - timedelta(days=self._retention_days - 1)
+        ).isoformat()
+        for item_key, price in normalized_items.items():
+            current_sum, current_count = self._daily_aggregates.get((item_key, snapshot_day), (0.0, 0))
+            self._daily_aggregates[(item_key, snapshot_day)] = (current_sum + float(price), current_count + 1)
+        self._daily_aggregates = {
+            key: value for key, value in self._daily_aggregates.items() if key[1] >= prune_before
+        }
+
+    def read_lowestbin_snapshot(self) -> StoredLowestBinSnapshot | None:
+        return self._lowestbin_snapshot
+
+    def get_averages(self, item_keys: list[str], *, anchor_day) -> dict[str, LowestBinAverageWindow]:
+        day_7d_iso = (anchor_day - timedelta(days=6)).isoformat()
+        day_30d_iso = (anchor_day - timedelta(days=29)).isoformat()
+        averages: dict[str, LowestBinAverageWindow] = {}
+        for item_key in item_keys:
+            sum_7d = 0.0
+            count_7d = 0
+            sum_30d = 0.0
+            count_30d = 0
+            for (aggregate_item_key, aggregate_day), (price_sum, sample_count) in self._daily_aggregates.items():
+                if aggregate_item_key != item_key or aggregate_day > anchor_day.isoformat() or aggregate_day < day_30d_iso:
+                    continue
+                sum_30d += price_sum
+                count_30d += sample_count
+                if aggregate_day >= day_7d_iso:
+                    sum_7d += price_sum
+                    count_7d += sample_count
+            averages[item_key] = LowestBinAverageWindow(
+                avg_7d=None if count_7d == 0 else sum_7d / count_7d,
+                avg_30d=None if count_30d == 0 else sum_30d / count_30d,
+            )
+        return averages
+
+    def write_bazaar_snapshot(self, snapshot: BazaarSnapshot) -> None:
+        self._bazaar_snapshot = replace(snapshot, products=dict(snapshot.products), is_stale=False)
+
+    def read_bazaar_snapshot(self) -> BazaarSnapshot | None:
+        return self._bazaar_snapshot
+
+
+class _SharedMemoryCacheBackend:
+    def __init__(self, shared_entries: dict[str, CachedResponse]) -> None:
+        self._shared_entries = shared_entries
+
+    async def get(self, key: str) -> CachedResponse | None:
+        return self._shared_entries.get(str(key))
+
+    async def set(self, key: str, entry: CachedResponse) -> None:
+        self._shared_entries[str(key)] = entry
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _seed_lowestbin_snapshot(
+    store: _MemoryMarketGuardStorage,
+    *,
+    snapshot_last_updated: int,
+    item_prices: dict[str, float],
+) -> None:
+    store.write_lowestbin_snapshot(
+        LowestBinSnapshot(
+            generated_at=datetime.fromtimestamp(snapshot_last_updated / 1000, tz=timezone.utc),
+            snapshot_last_updated=snapshot_last_updated,
+            total_pages=1,
+            total_auctions=len(item_prices),
+            total_bin_auctions=len(item_prices),
+            items=dict(item_prices),
+            is_stale=False,
+        ),
+        auctioneer_uuids={item_key: "cccccccccccccccccccccccccccccccc" for item_key in item_prices},
+        item_names={item_key: item_key.replace("_", " ").title() for item_key in item_prices},
     )
 
 

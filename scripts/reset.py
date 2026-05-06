@@ -34,7 +34,8 @@ def _confirm_reset(skip_prompt: bool, *, input_fn=input, stderr=sys.stderr) -> b
 
     print(
         "This will stop the production stack and delete all persistent ScamScreener data, including "
-        "accounts, uploads, bundles, generated app secrets, rate-limit state, and Caddy certificate/config volumes.",
+        "accounts, uploads, bundles, generated app and database secrets, MarketGuard history, MariaDB data, "
+        "rate-limit state, and Caddy certificate/config volumes.",
         file=stderr,
     )
     print(f"Type {RESET_CONFIRMATION!r} to continue:", file=stderr)

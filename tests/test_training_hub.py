@@ -2,7 +2,6 @@ import hashlib
 import io
 import json
 import re
-import sqlite3
 import sys
 import time
 import zipfile
@@ -14,6 +13,7 @@ from fastapi.testclient import TestClient
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from app.training_hub.infra import db as training_db
 from app.training_hub.core.mfa import _generate_passkey_registration_options, _totp_at
 from app.training_hub.main import TrainingHubSettings, create_app
 
@@ -47,7 +47,7 @@ def test_register_upload_and_dashboard(tmp_path: Path) -> None:
     assert "Latest uploads" in dashboard.text
     assert "case_000001" not in dashboard.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         uploads = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
         cases = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         assert uploads == 1
@@ -101,7 +101,7 @@ def test_user_can_delete_own_upload_and_rebuild_case_from_remaining_upload(tmp_p
     assert delete_response.status_code == 200
     assert "Deleted upload #1." in delete_response.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         upload_one = connection.execute("SELECT id FROM uploads WHERE id = 1").fetchone()
         upload_two = connection.execute("SELECT id FROM uploads WHERE id = 2").fetchone()
         case_row = connection.execute(
@@ -146,7 +146,7 @@ def test_user_can_purge_own_uploads_and_cases_without_deleting_account(tmp_path:
     assert response.status_code == 200
     assert "Deleted 2 uploads." in response.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         user_row = connection.execute("SELECT id FROM users WHERE username = 'alice'").fetchone()
         upload_count = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
         case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
@@ -235,7 +235,7 @@ def test_user_can_delete_own_account_and_related_records(tmp_path: Path) -> None
     assert response.status_code == 303
     assert response.headers.get("location") == "/login?notice=Account+deleted"
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         bob_row = connection.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()
         bob_sessions = connection.execute("SELECT COUNT(*) FROM sessions WHERE user_id = 2").fetchone()[0]
         bob_uploads = connection.execute("SELECT COUNT(*) FROM uploads WHERE user_id = 2").fetchone()[0]
@@ -321,7 +321,7 @@ def test_user_can_request_account_data_export_email(tmp_path: Path, monkeypatch)
         export_row = None
         audit_row = None
         while time.time() < timeout_at:
-            with sqlite3.connect(settings.database_path) as connection:
+            with training_db.connect(settings.database_path) as connection:
                 export_row = connection.execute(
                     "SELECT status FROM data_export_requests WHERE user_id = 1 ORDER BY id DESC LIMIT 1"
                 ).fetchone()
@@ -388,7 +388,7 @@ def test_api_client_can_login_upload_and_logout(tmp_path: Path) -> None:
     )
     assert revoked.status_code == 401
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         uploads = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
         cases = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         logout_audit = connection.execute(
@@ -430,7 +430,7 @@ def test_anonymous_api_client_upload_accepts_client_id_handshake(tmp_path: Path)
     assert body["insertedCases"] == 1
     assert body["updatedCases"] == 0
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         upload_row = connection.execute(
             """
             SELECT up.user_id, up.client_identity_id, ci.normalized_client_id
@@ -486,7 +486,7 @@ def test_linked_client_uploads_appear_in_dashboard_history(tmp_path: Path) -> No
         follow_redirects=True,
     )
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         connection.execute(
             """
             UPDATE client_identities
@@ -539,7 +539,7 @@ def test_user_can_link_client_id_from_account_page(tmp_path: Path) -> None:
     assert dashboard.status_code == 200
     assert "linked-history.jsonl" in dashboard.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         link_row = connection.execute(
             "SELECT linked_user_id FROM client_identities WHERE normalized_client_id = ?",
             ("linked-client-01",),
@@ -591,7 +591,7 @@ def test_user_can_unlink_client_id_and_detach_historical_uploads(tmp_path: Path)
         data={"client_id": "detach-client", "current_password": "supersecret"},
     )
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         client_identity_row = connection.execute(
             "SELECT id FROM client_identities WHERE normalized_client_id = ?",
             ("detach-client",),
@@ -611,7 +611,7 @@ def test_user_can_unlink_client_id_and_detach_historical_uploads(tmp_path: Path)
     assert dashboard.status_code == 200
     assert "linked-history.jsonl" not in dashboard.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         link_row = connection.execute(
             "SELECT linked_user_id, linked_at FROM client_identities WHERE normalized_client_id = ?",
             ("detach-client",),
@@ -674,7 +674,7 @@ def test_client_unlink_failure_reopens_only_the_target_row_action(tmp_path: Path
         data={"client_id": "detach-client", "current_password": "supersecret"},
     )
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         client_identity_row = connection.execute(
             "SELECT id FROM client_identities WHERE normalized_client_id = ?",
             ("detach-client",),
@@ -734,7 +734,7 @@ def test_link_client_id_rejects_other_users_existing_link(tmp_path: Path) -> Non
     assert response.status_code == 409
     assert "already linked to another account" in response.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         link_row = connection.execute(
             "SELECT linked_user_id FROM client_identities WHERE normalized_client_id = ?",
             ("owned-client",),
@@ -796,7 +796,7 @@ def test_admin_page_formats_last_login_timestamp_in_utc(tmp_path: Path) -> None:
         follow_redirects=True,
     )
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         connection.execute(
             "UPDATE users SET last_login_at = ? WHERE username = ?",
             ("2026-03-28T18:00:00Z", "dev"),
@@ -953,7 +953,7 @@ def test_forgot_password_and_reset_flow(tmp_path: Path) -> None:
     assert new_login.status_code == 200
     assert "Your Case Contributions" in new_login.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'auth.password.reset' LIMIT 1").fetchone()
         assert audit is not None
 
@@ -1023,7 +1023,7 @@ def test_forgot_password_sends_email_when_enabled(tmp_path: Path, monkeypatch) -
     assert sent[0][0] == "alice@example.com"
     assert "/reset-password?token=" in sent[0][1]
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         sent_audit = connection.execute(
             "SELECT id FROM audit_logs WHERE action = 'auth.password.reset.email.sent' LIMIT 1"
         ).fetchone()
@@ -1445,7 +1445,7 @@ def test_admin_login_requires_mfa_when_enabled(tmp_path: Path, monkeypatch) -> N
     assert "Complete MFA setup" in admin_page.text
     assert "Security" in admin_page.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         issued_audit = connection.execute(
             "SELECT id FROM audit_logs WHERE action = 'auth.mfa.challenge.issued' LIMIT 1"
         ).fetchone()
@@ -1543,7 +1543,7 @@ def test_admin_mfa_delivery_failure_records_exception_detail(tmp_path: Path, mon
     assert login.status_code == 503
     assert "Verification code could not be delivered." in login.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         row = connection.execute(
             "SELECT details FROM audit_logs WHERE action = 'auth.mfa.challenge.email.failed' LIMIT 1"
         ).fetchone()
@@ -2077,7 +2077,7 @@ def test_admin_user_with_registered_passkey_can_complete_generic_mfa_flow(tmp_pa
     )
     _post_form(client, "/logout", follow_redirects=True)
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         connection.execute("UPDATE users SET mfa_enabled = 1 WHERE id = 1")
         connection.execute(
             """
@@ -2229,7 +2229,7 @@ def test_admin_bundle_creation_creates_audit_log(tmp_path: Path) -> None:
     assert runs_page.status_code == 200
     assert "/admin/runs/1/bundle" in runs_page.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         row = connection.execute("SELECT status, upload_count, case_count FROM training_runs LIMIT 1").fetchone()
         assert row is not None
         assert row[0] == "prepared"
@@ -2245,7 +2245,7 @@ def test_admin_bundle_creation_creates_audit_log(tmp_path: Path) -> None:
     assert bundle.status_code == 200
     assert bundle.text.strip() == _valid_payload()
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         bundle_download_audit = connection.execute(
             "SELECT action FROM audit_logs WHERE action = 'training.bundle.download' LIMIT 1"
         ).fetchone()
@@ -2277,7 +2277,7 @@ def test_admin_user_management_grant_and_revoke(tmp_path: Path) -> None:
         follow_redirects=True,
     )
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         bob_id = int(connection.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0])
 
     grant = _post_form(client, f"/admin/users/{bob_id}/admin", data={"action": "grant"}, follow_redirects=True)
@@ -2288,7 +2288,7 @@ def test_admin_user_management_grant_and_revoke(tmp_path: Path) -> None:
     assert revoke.status_code == 200
     assert "Revoked admin from bob." in revoke.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         is_admin = int(connection.execute("SELECT is_admin FROM users WHERE id = ?", (bob_id,)).fetchone()[0])
         assert is_admin == 0
         grant_audit = connection.execute(
@@ -2429,7 +2429,7 @@ def test_admin_can_delete_case_from_table(tmp_path: Path) -> None:
     assert deleted.status_code == 200
     assert "Deleted case case_000001." in deleted.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         assert case_count == 0
         audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'case.delete' LIMIT 1").fetchone()
@@ -2462,7 +2462,7 @@ def test_admin_can_delete_case_from_detail_page(tmp_path: Path) -> None:
     assert "Deleted case case_000001." in deleted.text
     assert "Case Review Queue" in deleted.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         assert case_count == 0
 
@@ -2500,7 +2500,7 @@ def test_admin_can_create_and_restore_backup(tmp_path: Path) -> None:
     assert restore.status_code == 200
     assert "Backup restore completed successfully." in restore.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         uploads = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
         cases = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         restored_audit = connection.execute(
@@ -2557,7 +2557,7 @@ def test_failed_login_spike_raises_security_alert(tmp_path: Path) -> None:
     )
     assert failed.status_code == 401
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         alert = connection.execute(
             "SELECT details FROM audit_logs WHERE action = 'security.alert.raised' LIMIT 1"
         ).fetchone()
@@ -2686,7 +2686,7 @@ def test_failed_login_for_known_user_writes_audit_log(tmp_path: Path) -> None:
     )
     assert failed.status_code == 401
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         audit = connection.execute(
             "SELECT id FROM audit_logs WHERE action = 'auth.login.failed' LIMIT 1"
         ).fetchone()
@@ -2722,7 +2722,7 @@ def test_account_lockout_triggers_after_repeated_wrong_password(tmp_path: Path) 
     )
     assert correct_while_locked.status_code == 429
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         audit = connection.execute(
             "SELECT id FROM audit_logs WHERE action = 'auth.login.locked' LIMIT 1"
         ).fetchone()
@@ -2789,7 +2789,7 @@ def test_user_can_change_password(tmp_path: Path) -> None:
     assert new_login.status_code == 200
     assert "Your Case Contributions" in new_login.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         audit = connection.execute(
             "SELECT id FROM audit_logs WHERE action = 'auth.password.changed' LIMIT 1"
         ).fetchone()
@@ -3010,7 +3010,7 @@ def test_upload_download_rejects_path_outside_upload_dir(tmp_path: Path) -> None
 
     outside_path = tmp_path / "outside-upload.jsonl"
     outside_path.write_text(_valid_payload(), encoding="utf-8")
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         connection.execute("UPDATE uploads SET stored_path = ? WHERE id = 1", (str(outside_path),))
         connection.commit()
 
@@ -3037,7 +3037,7 @@ def test_upload_download_writes_audit_log(tmp_path: Path) -> None:
     response = client.get("/dashboard/uploads/1/download")
     assert response.status_code == 200
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         audit = connection.execute(
             "SELECT action FROM audit_logs WHERE action = 'upload.download' LIMIT 1"
         ).fetchone()
@@ -3086,7 +3086,7 @@ def test_admin_bundle_download_rejects_path_outside_bundle_dir(tmp_path: Path) -
 
     outside_path = tmp_path / "outside-bundle.jsonl"
     outside_path.write_text(_valid_payload(), encoding="utf-8")
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         connection.execute("UPDATE training_runs SET bundle_path = ? WHERE id = 1", (str(outside_path),))
         connection.commit()
 
@@ -3156,7 +3156,7 @@ def test_admin_retention_cleanup_prunes_old_rows_and_files(tmp_path: Path) -> No
     old_bundle_path = settings.bundles_dir / "retention-old-bundle.jsonl"
     old_bundle_path.write_text(_valid_payload(), encoding="utf-8")
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         upload_cursor = connection.execute(
             """
             INSERT INTO uploads (
@@ -3295,7 +3295,7 @@ def test_admin_retention_cleanup_prunes_old_rows_and_files(tmp_path: Path) -> No
     assert run_cleanup.status_code == 200
     assert "Retention cleanup completed." in run_cleanup.text
 
-    with sqlite3.connect(settings.database_path) as connection:
+    with training_db.connect(settings.database_path) as connection:
         upload_row = connection.execute("SELECT id FROM uploads WHERE id = ?", (old_upload_id,)).fetchone()
         run_row = connection.execute("SELECT id FROM training_runs WHERE id = ?", (old_run_id,)).fetchone()
         case_row = connection.execute("SELECT source_upload_id FROM training_cases WHERE id = ?", (old_case_id,)).fetchone()

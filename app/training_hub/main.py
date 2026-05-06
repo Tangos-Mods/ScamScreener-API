@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .http.rate_limit import _SqliteRateLimiter, _rate_limit_identity, _rate_limit_rule
+from .http.rate_limit import _DatabaseRateLimiter, _rate_limit_identity, _rate_limit_rule
 from .http.security import _apply_security_headers, _is_same_origin_post, _request_is_https
 from .core.hub_core import (
     _current_user_from_request,
@@ -162,7 +162,7 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(base_dir / "sites"))
     app.state.templates.env.filters["datetime_utc"] = _format_utc_timestamp
-    app.state.rate_limiter = _SqliteRateLimiter(settings.database_path)
+    app.state.rate_limiter = _DatabaseRateLimiter(settings.database_path)
     app.mount("/css", StaticFiles(directory=str(base_dir / "css")), name="css")
     app.mount("/js", StaticFiles(directory=str(base_dir / "js")), name="js")
 

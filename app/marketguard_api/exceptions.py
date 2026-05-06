@@ -9,7 +9,11 @@ class HypixelUpstreamError(MarketGuardError):
     pass
 
 
-class LowestBinHistoryError(MarketGuardError):
+class MarketGuardStorageError(MarketGuardError):
+    pass
+
+
+class LowestBinHistoryError(MarketGuardStorageError):
     pass
 
 

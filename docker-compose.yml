@@ -1,10 +1,95 @@
 services:
-  scamscreener:
-    build: .
-    container_name: scamscreener
+  scamscreener-db:
+    image: mariadb:11.4
+    container_name: scamscreener-db
     env_file:
       - ${ENV_FILE:-.env.production}
     environment:
+      MARIADB_INITDB_SKIP_TZINFO: "1"
+      SCAMSCREENER_DB_NAME: ${SCAMSCREENER_DB_NAME:-scamscreener_hub}
+      SCAMSCREENER_DB_USER: ${SCAMSCREENER_DB_USER:-scamscreener}
+      SCAMSCREENER_SHARED_DIR: /scamscreener-shared
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/scamscreener-db-entrypoint.sh
+    volumes:
+      - scamscreener_db_data:/var/lib/mysql
+      - scamscreener_data:/scamscreener-shared
+      - ./docker/mariadb-entrypoint.sh:/usr/local/bin/scamscreener-db-entrypoint.sh:ro
+      - ./docker/mariadb-healthcheck.sh:/usr/local/bin/scamscreener-db-healthcheck.sh:ro
+    restart: unless-stopped
+    init: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - /usr/local/bin/scamscreener-db-healthcheck.sh
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    networks:
+      - scamscreener_net
+
+  scamscreener-redis:
+    profiles:
+      - marketguard-redis
+    image: redis:7.4-alpine
+    container_name: scamscreener-redis
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    environment:
+      SCAMSCREENER_SHARED_DIR: /scamscreener-shared
+      SCAMSCREENER_REDIS_MAXMEMORY: ${MARKETGUARD_REDIS_MAXMEMORY:-128mb}
+      SCAMSCREENER_REDIS_MAXMEMORY_POLICY: ${MARKETGUARD_REDIS_MAXMEMORY_POLICY:-allkeys-lru}
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/scamscreener-redis-entrypoint.sh
+    volumes:
+      - scamscreener_data:/scamscreener-shared
+      - ./docker/redis-entrypoint.sh:/usr/local/bin/scamscreener-redis-entrypoint.sh:ro
+      - ./docker/redis-healthcheck.sh:/usr/local/bin/scamscreener-redis-healthcheck.sh:ro
+    restart: unless-stopped
+    init: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - /usr/local/bin/scamscreener-redis-healthcheck.sh
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - scamscreener_net
+
+  scamscreener-hub:
+    build: .
+    image: scamscreener-app:local
+    container_name: scamscreener-hub
+    depends_on:
+      scamscreener-db:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    environment:
+      PORT: "8080"
+      SCAMSCREENER_APP_MODE: hub
+      SCAMSCREENER_DB_MANAGED: "true"
+      SCAMSCREENER_DB_HOST: scamscreener-db
+      SCAMSCREENER_DB_PORT: "3306"
+      SCAMSCREENER_DB_NAME: ${SCAMSCREENER_DB_NAME:-scamscreener_hub}
+      SCAMSCREENER_DB_USER: ${SCAMSCREENER_DB_USER:-scamscreener}
       SCAMSCREENER_EXTRA_TRUSTED_PROXIES: "172.31.255.10"
     volumes:
       - scamscreener_data:/app/data
@@ -23,7 +108,53 @@ services:
         - CMD
         - python
         - -c
-        - "import os, urllib.parse, urllib.request; port = os.getenv('PORT', os.getenv('TRAINING_HUB_PORT', '8080')); host = (os.getenv('TRAINING_HUB_ALLOWED_HOSTS', '').split(',')[0].strip() or urllib.parse.urlsplit(os.getenv('TRAINING_HUB_PUBLIC_BASE_URL', '')).hostname or '127.0.0.1'); request = urllib.request.Request(f'http://127.0.0.1:{port}/api/v1/health', headers={'Host': host, 'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(request, timeout=3)"
+        - "import os, urllib.parse, urllib.request; port = os.getenv('PORT', '8080'); host = (os.getenv('TRAINING_HUB_ALLOWED_HOSTS', '').split(',')[0].strip() or urllib.parse.urlsplit(os.getenv('TRAINING_HUB_PUBLIC_BASE_URL', '')).hostname or '127.0.0.1'); request = urllib.request.Request(f'http://127.0.0.1:{port}/api/v1/health', headers={'Host': host, 'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(request, timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - scamscreener_net
+
+  scamscreener-api:
+    build: .
+    image: scamscreener-app:local
+    container_name: scamscreener-api
+    depends_on:
+      scamscreener-db:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    environment:
+      PORT: "8081"
+      SCAMSCREENER_APP_MODE: api
+      SCAMSCREENER_DB_MANAGED: "true"
+      SCAMSCREENER_DB_HOST: scamscreener-db
+      SCAMSCREENER_DB_PORT: "3306"
+      SCAMSCREENER_DB_NAME: ${SCAMSCREENER_DB_NAME:-scamscreener_hub}
+      SCAMSCREENER_DB_USER: ${SCAMSCREENER_DB_USER:-scamscreener}
+      SCAMSCREENER_REDIS_MANAGED: ${SCAMSCREENER_REDIS_MANAGED:-true}
+      SCAMSCREENER_REDIS_HOST: scamscreener-redis
+      SCAMSCREENER_REDIS_PORT: "6379"
+      SCAMSCREENER_EXTRA_TRUSTED_PROXIES: "172.31.255.10"
+    volumes:
+      - scamscreener_data:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.request; port = os.getenv('PORT', '8081'); urllib.request.urlopen(f'http://127.0.0.1:{port}/api/internal/health', timeout=3)"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -37,7 +168,9 @@ services:
     env_file:
       - ${ENV_FILE:-.env.production}
     depends_on:
-      scamscreener:
+      scamscreener-hub:
+        condition: service_healthy
+      scamscreener-api:
         condition: service_healthy
     ports:
       - "80:80"
@@ -74,6 +207,7 @@ services:
 
 volumes:
   scamscreener_data:
+  scamscreener_db_data:
   caddy_data:
   caddy_config:
 

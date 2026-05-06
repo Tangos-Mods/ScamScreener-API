@@ -9,3 +9,4 @@ webauthn==2.7.1
 qrcode==8.2
 pytest==8.3.5
 httpx==0.28.1
+redis==5.2.1

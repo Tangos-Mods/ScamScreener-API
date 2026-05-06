@@ -3,7 +3,10 @@
 This guide deploys the repository on a fresh Ubuntu server with:
 
 - Docker Engine + Compose plugin
-- one internal application container
+- one internal Training Hub container
+- one internal public API container
+- one internal MariaDB container
+- one optional internal Redis container for MarketGuard response caching
 - one public Caddy container for HTTPS and reverse proxy
 - automatic Let's Encrypt certificates through Caddy
 - persistent application data in Docker volumes
@@ -11,7 +14,9 @@ This guide deploys the repository on a fresh Ubuntu server with:
 The resulting public topology is:
 
 - `caddy` exposed on `80/443`
-- `scamscreener` internal only
+- `scamscreener-hub` internal only
+- `scamscreener-api` internal only
+- `scamscreener-db` internal only
 - `/api/v1/health` and `/api/v1/metrics` blocked publicly by Caddy
 
 ## Architecture
@@ -234,6 +239,10 @@ TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL=true
 TRAINING_HUB_SESSION_BIND_USER_AGENT=true
 TRAINING_HUB_RETENTION_AUTO_ENABLED=true
 
+SCAMSCREENER_DB_MANAGED=true
+SCAMSCREENER_DB_NAME=scamscreener_hub
+SCAMSCREENER_DB_USER=scamscreener
+
 TRAINING_HUB_SMTP_HOST=smtp.example.com
 TRAINING_HUB_SMTP_PORT=587
 TRAINING_HUB_SMTP_USERNAME=YOUR_SMTP_USERNAME
@@ -264,6 +273,7 @@ MARKETGUARD_API_DOCS_ENABLED=false
 Important notes:
 
 - if `TRAINING_HUB_SECRET_KEY` is omitted, the app generates one on first boot and persists it in the app data volume
+- if `SCAMSCREENER_DB_MANAGED=true`, the stack generates and persists the MariaDB app/root passwords on first boot and keeps DB traffic on the private Compose network without DB-layer TLS
 - if `TRAINING_HUB_ADMIN_USERNAMES` is omitted, the default bootstrap admin username is `admin`
 - keep `TRAINING_HUB_TRUSTED_PROXIES=127.0.0.1` unless you intentionally know you need extra proxy ranges; Docker Compose appends the internal Caddy IP automatically
 - `/impressum` and `/datenschutz` render from the `TRAINING_HUB_SITE_*` variables
@@ -302,7 +312,9 @@ python3 scripts/update.py
 
 This starts:
 
-- `scamscreener` as the internal FastAPI app
+- `scamscreener-db` as the internal MariaDB database
+- `scamscreener-hub` as the internal Training Hub app
+- `scamscreener-api` as the internal public Lowest BIN/Bazaar API
 - `caddy` as the public reverse proxy with automatic HTTPS
 
 Internally the update script does:
@@ -310,7 +322,7 @@ Internally the update script does:
 - optional preflight validation
 - `docker compose build --pull`
 - `docker compose up -d --remove-orphans`
-- wait for the app container health check
+- wait for the database, hub, and API container health checks
 - print final service state
 
 Only Caddy is exposed publicly.
@@ -325,13 +337,19 @@ docker compose ps
 
 You want:
 
-- `scamscreener` status `healthy`
+- `scamscreener-db` status `healthy`
+- `scamscreener-hub` status `healthy`
+- `scamscreener-api` status `healthy`
+- `scamscreener-redis` status `healthy` when `MARKETGUARD_REDIS_ENABLED=true` and `SCAMSCREENER_REDIS_MANAGED=true`
 - `caddy` status `running`
 
 Check logs:
 
 ```bash
-docker compose logs --tail=100 scamscreener
+docker compose logs --tail=100 scamscreener-db
+docker compose logs --tail=100 scamscreener-hub
+docker compose logs --tail=100 scamscreener-api
+docker compose logs --tail=100 scamscreener-redis
 docker compose logs --tail=100 caddy
 ```
 
@@ -453,14 +471,18 @@ python3 scripts/update.py
 ## 17) Watching Logs
 
 ```bash
-docker compose logs -f scamscreener
+docker compose logs -f scamscreener-db
+docker compose logs -f scamscreener-hub
+docker compose logs -f scamscreener-api
 docker compose logs -f caddy
 ```
 
 ## 18) Restarting Services
 
 ```bash
-docker compose restart scamscreener
+docker compose restart scamscreener-db
+docker compose restart scamscreener-hub
+docker compose restart scamscreener-api
 docker compose restart caddy
 ```
 
@@ -482,12 +504,14 @@ You should keep two layers of backups:
 Relevant volumes:
 
 - `scamscreener_data`
+- `scamscreener_db_data`
 - `caddy_data`
 - `caddy_config`
 
-Relevant app data inside the app container:
+Relevant persistent paths inside the containers:
 
 - `/app/data`
+- `/var/lib/mysql`
 
 ## 21) Rollback
 
@@ -582,7 +606,7 @@ For a healthy production server, the final state should be:
 
 - the Ubuntu host exposes only `80/443`
 - Caddy terminates TLS publicly
-- the application container is not exposed directly
+- the hub, API, and MariaDB containers are not exposed directly
 - `TRAINING_HUB_ENV=production`
 - admin MFA is enabled
 - password-reset mail is enabled

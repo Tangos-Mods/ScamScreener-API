@@ -91,6 +91,11 @@ normalize_domain() {
     printf '%s' "${raw_domain}"
 }
 
+is_true() {
+    local value="${1:-}"
+    [[ "${value,,}" == "1" || "${value,,}" == "true" || "${value,,}" == "yes" || "${value,,}" == "on" ]]
+}
+
 main() {
     require_command docker
     require_command awk
@@ -120,6 +125,17 @@ main() {
     local site_operator_name
     local site_postal_address
     local site_contact_channel
+    local database_driver
+    local database_url
+    local db_password
+    local db_require_tls
+    local db_ssl_ca
+    local db_managed
+    local redis_enabled
+    local redis_managed
+    local redis_url
+    local redis_host
+    local redis_password
 
     caddy_site_address="$(read_env_value "CADDY_SITE_ADDRESS")"
     public_base_url="$(read_env_value "TRAINING_HUB_PUBLIC_BASE_URL")"
@@ -132,6 +148,32 @@ main() {
     site_operator_name="$(read_env_value "TRAINING_HUB_SITE_OPERATOR_NAME" 2>/dev/null || true)"
     site_postal_address="$(read_env_value "TRAINING_HUB_SITE_POSTAL_ADDRESS" 2>/dev/null || true)"
     site_contact_channel="$(read_env_value "TRAINING_HUB_SITE_CONTACT_CHANNEL" 2>/dev/null || true)"
+    database_driver="$(read_env_value "TRAINING_HUB_DB_DRIVER" 2>/dev/null || true)"
+    database_url="$(read_env_value "TRAINING_HUB_DATABASE_URL" 2>/dev/null || true)"
+    db_password="$(read_env_value "TRAINING_HUB_DB_PASSWORD" 2>/dev/null || true)"
+    db_require_tls="$(read_env_value "TRAINING_HUB_DB_REQUIRE_TLS" 2>/dev/null || true)"
+    db_ssl_ca="$(read_env_value "TRAINING_HUB_DB_SSL_CA" 2>/dev/null || true)"
+    db_managed="$(read_env_value "SCAMSCREENER_DB_MANAGED" 2>/dev/null || true)"
+    redis_enabled="$(read_env_value "MARKETGUARD_REDIS_ENABLED" 2>/dev/null || true)"
+    redis_managed="$(read_env_value "SCAMSCREENER_REDIS_MANAGED" 2>/dev/null || true)"
+    redis_url="$(read_env_value "MARKETGUARD_REDIS_URL" 2>/dev/null || true)"
+    redis_host="$(read_env_value "MARKETGUARD_REDIS_HOST" 2>/dev/null || true)"
+    redis_password="$(read_env_value "MARKETGUARD_REDIS_PASSWORD" 2>/dev/null || true)"
+
+    if [[ -z "${db_managed}" && "${env_name}" == "production" ]]; then
+        db_managed="true"
+    fi
+    if [[ -z "${redis_managed}" ]]; then
+        redis_managed="true"
+    fi
+
+    if [[ -z "${database_driver}" ]]; then
+        if [[ "${env_name}" == "production" ]]; then
+            database_driver="mariadb"
+        else
+            database_driver="sqlite"
+        fi
+    fi
 
     caddy_host="$(normalize_domain "${caddy_site_address}")"
     public_host="$(normalize_domain "${public_base_url}")"
@@ -181,6 +223,38 @@ main() {
         exit 1
     fi
 
+    if [[ "${database_driver}" == "mariadb" ]]; then
+        if is_true "${db_managed}"; then
+            :
+        elif [[ -z "${database_url}" && -z "${db_password}" ]]; then
+            echo "MariaDB is enabled but neither TRAINING_HUB_DATABASE_URL nor TRAINING_HUB_DB_PASSWORD is set." >&2
+            exit 1
+        fi
+        if [[ "${env_name}" == "production" ]]; then
+            if ! is_true "${db_managed}" && ! is_true "${db_require_tls}" && [[ "${database_url}" != *"ssl_mode="* ]]; then
+                echo "External production MariaDB connections must enable TLS." >&2
+                exit 1
+            fi
+            if ! is_true "${db_managed}" && [[ -z "${db_ssl_ca}" && "${database_url}" != *"ssl_ca="* ]]; then
+                echo "External production MariaDB connections should provide a CA file for server verification." >&2
+                exit 1
+            fi
+        fi
+    fi
+
+    if is_true "${redis_enabled}"; then
+        if ! is_true "${redis_managed}"; then
+            if [[ -z "${redis_url}" && -z "${redis_host}" ]]; then
+                echo "Redis caching is enabled but neither MARKETGUARD_REDIS_URL nor MARKETGUARD_REDIS_HOST is set." >&2
+                exit 1
+            fi
+            if [[ -z "${redis_url}" && -z "${redis_password}" ]]; then
+                echo "External Redis should be protected with MARKETGUARD_REDIS_PASSWORD or a credentialed MARKETGUARD_REDIS_URL." >&2
+                exit 1
+            fi
+        fi
+    fi
+
     if [[ "$(stat -c '%a' "${ENV_FILE}" 2>/dev/null || true)" != "600" ]]; then
         echo "Warning: ${ENV_FILE} should ideally have mode 600." >&2
     fi
@@ -201,7 +275,11 @@ main() {
 
     (
         cd "${REPO_ROOT}"
-        docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config >/dev/null
+        if is_true "${redis_enabled}" && is_true "${redis_managed}"; then
+            docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" --profile marketguard-redis config >/dev/null
+        else
+            docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" config >/dev/null
+        fi
     )
 
     echo "Preflight checks passed."

@@ -33,7 +33,7 @@ def require_command(command_name: str) -> None:
 
 
 def compose_base_command(context: ComposeContext) -> list[str]:
-    return [
+    command = [
         "docker",
         "compose",
         "-f",
@@ -41,6 +41,48 @@ def compose_base_command(context: ComposeContext) -> list[str]:
         "--env-file",
         str(context.env_file),
     ]
+    for profile in active_compose_profiles(context):
+        command.extend(["--profile", profile])
+    return command
+
+
+def read_env_value(env_file: Path, key: str) -> str:
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return ""
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        name, separator, value = line.partition("=")
+        if separator != "=" or name.strip() != key:
+            continue
+        normalized = value.strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'", "`"}:
+            normalized = normalized[1:-1]
+        return normalized
+    return ""
+
+
+def is_true(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def marketguard_redis_enabled(context: ComposeContext) -> bool:
+    enabled = is_true(read_env_value(context.env_file, "MARKETGUARD_REDIS_ENABLED") or "false")
+    managed = read_env_value(context.env_file, "SCAMSCREENER_REDIS_MANAGED")
+    managed_enabled = True if not managed else is_true(managed)
+    return enabled and managed_enabled
+
+
+def active_compose_profiles(context: ComposeContext) -> list[str]:
+    profiles: list[str] = []
+    if marketguard_redis_enabled(context):
+        profiles.append("marketguard-redis")
+    return profiles
 
 
 def run_command(

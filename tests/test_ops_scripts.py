@@ -50,9 +50,55 @@ def test_update_runs_preflight_build_up_and_health_checks(tmp_path: Path, monkey
     assert ("command", ["bash", str(tmp_path / "scripts" / "preflight.sh")]) in calls
     assert ("compose", ["build", "--pull"]) in calls
     assert ("compose", ["up", "-d", "--remove-orphans"]) in calls
-    assert ("wait", ("scamscreener", 120)) in calls
+    assert ("wait", ("scamscreener-db", 120)) in calls
+    assert ("wait", ("scamscreener-hub", 120)) in calls
+    assert ("wait", ("scamscreener-api", 120)) in calls
     assert ("running", "caddy") in calls
     assert ("compose", ["ps"]) in calls
+
+
+def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    update_module = _load_script_module("scamscreener_update_redis_test", "update.py")
+    compose_ops = update_module.compose_ops
+    context = _compose_context(
+        compose_ops,
+        tmp_path,
+        env_contents=(
+            "TRAINING_HUB_ENV=production\n"
+            "MARKETGUARD_REDIS_ENABLED=true\n"
+            "SCAMSCREENER_REDIS_MANAGED=true\n"
+        ),
+    )
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "preflight.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    waits: list[str] = []
+
+    monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
+    monkeypatch.setattr(
+        compose_ops,
+        "run_command",
+        lambda command, *, cwd, capture_output=False: SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "run_compose",
+        lambda _context, args, *, capture_output=False: SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "wait_for_service_health",
+        lambda _context, service_name, timeout_seconds, **_kwargs: waits.append(service_name),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "ensure_service_running",
+        lambda _context, service_name: None,
+    )
+
+    args = argparse.Namespace(skip_preflight=False, skip_pull=True, health_timeout=90, log_tail_lines=40)
+    assert update_module.run_update(context, args) == 0
+    assert "scamscreener-redis" in waits
 
 
 def test_reset_aborts_without_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,11 +144,11 @@ def test_reset_runs_down_with_volumes_and_optional_image_prune(tmp_path: Path, m
     ]
 
 
-def _compose_context(compose_ops_module, tmp_path: Path):
+def _compose_context(compose_ops_module, tmp_path: Path, *, env_contents: str = "TRAINING_HUB_ENV=production\n"):
     compose_file = tmp_path / "docker-compose.yml"
     env_file = tmp_path / ".env.production"
     compose_file.write_text("services: {}\n", encoding="utf-8")
-    env_file.write_text("TRAINING_HUB_ENV=production\n", encoding="utf-8")
+    env_file.write_text(env_contents, encoding="utf-8")
     return compose_ops_module.ComposeContext(
         repo_root=tmp_path,
         compose_file=compose_file,

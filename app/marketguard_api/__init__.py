@@ -2,6 +2,7 @@ from __future__ import annotations
 
 __all__ = [
     "app",
+    "create_app",
     "create_marketguard_app",
     "register_marketguard_routes",
     "BazaarService",
@@ -27,11 +28,12 @@ def __getattr__(name: str):
         from .routes import register_marketguard_routes
 
         return register_marketguard_routes
-    if name in {"app", "create_marketguard_app"}:
-        from .main import create_marketguard_app
+    if name in {"app", "create_app", "create_marketguard_app"}:
+        from .main import create_app, create_marketguard_app
 
         return {
             "app": create_marketguard_app(),
+            "create_app": create_app,
             "create_marketguard_app": create_marketguard_app,
         }[name]
     raise AttributeError(name)

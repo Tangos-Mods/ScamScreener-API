@@ -2,15 +2,43 @@
     encode zstd gzip
 
     @observability_blocked {
-        path /api/v1/health /api/v1/metrics
+        path /api/v1/health /api/v1/metrics /api/internal/* /internal/*
         not remote_ip 127.0.0.1/32 ::1 private_ranges
     }
     respond @observability_blocked "Forbidden" 403
 
-    reverse_proxy scamscreener:8080 {
-        header_up Host {host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-        header_up X-Real-IP {remote_host}
+    @marketguard_api {
+        path /api/v1/lowestbin /api/v2/lowestbin /api/v1/bazaar
+    }
+
+    @marketguard_docs {
+        path /docs /redoc /openapi.json
+    }
+
+    handle @marketguard_api {
+        reverse_proxy scamscreener-api:8081 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle @marketguard_docs {
+        reverse_proxy scamscreener-api:8081 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    handle {
+        reverse_proxy scamscreener-hub:8080 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
     }
 }

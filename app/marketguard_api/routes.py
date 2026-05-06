@@ -7,14 +7,18 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from .cache import CachedResponse
 from .config import MarketGuardSettings
-from .exceptions import HypixelRateLimitError, HypixelUpstreamError, LowestBinHistoryError
+from .exceptions import HypixelRateLimitError, HypixelUpstreamError, MarketGuardStorageError
 from .models import ApiErrorResponse, BazaarResponse, LowestBinV1Response, LowestBinV2Response
 from .service import BazaarService, LowestBinService
 
 _LOWESTBIN_V1_DEPRECATION_HEADER = "true"
 _LOWESTBIN_V1_SUNSET_HEADER = "Mon, 01 Jun 2026 00:00:00 GMT"
 _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
+_CACHE_KEY_LOWESTBIN_V1 = "lowestbin:v1"
+_CACHE_KEY_LOWESTBIN_V2 = "lowestbin:v2"
+_CACHE_KEY_BAZAAR_V1 = "bazaar:v1"
 
 
 def _round_lowestbin_average(value: float | None) -> int | None:
@@ -54,8 +58,9 @@ def register_marketguard_routes(
         return
 
     marketguard_settings = settings or MarketGuardSettings.from_env()
-    marketguard_service = service or LowestBinService(marketguard_settings)
-    marketguard_bazaar_service = bazaar_service or BazaarService(marketguard_settings)
+    shared_storage = getattr(service, "_storage", None) or getattr(bazaar_service, "_storage", None)
+    marketguard_service = service or LowestBinService(marketguard_settings, storage=shared_storage)
+    marketguard_bazaar_service = bazaar_service or BazaarService(marketguard_settings, storage=shared_storage)
 
     app.state.marketguard_settings = marketguard_settings
     app.state.marketguard_service = marketguard_service
@@ -80,6 +85,9 @@ def register_marketguard_routes(
             max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
             trusted_proxies=marketguard_settings.trusted_proxies,
         )
+        cached_response = await _read_cached_response(request, _CACHE_KEY_LOWESTBIN_V1)
+        if cached_response is not None:
+            return _lowestbin_v1_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
         try:
             snapshot = await marketguard_service.get_lowest_bins()
         except HypixelRateLimitError as exc:
@@ -89,28 +97,15 @@ def register_marketguard_routes(
                 detail="Lowest BIN data is temporarily unavailable.",
                 headers=headers,
             ) from exc
-        except (HypixelUpstreamError, LowestBinHistoryError) as exc:
+        except (HypixelUpstreamError, MarketGuardStorageError) as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Lowest BIN data is temporarily unavailable.",
             ) from exc
 
-        response.headers["Cache-Control"] = (
-            f"public, max-age={marketguard_settings.cache_ttl_seconds}, "
-            f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
-        )
-        response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
-        response.headers["X-API-Provider"] = "Pankraz01"
-        return JSONResponse(
-            snapshot.items,
-            headers={
-                "Cache-Control": response.headers["Cache-Control"],
-                "X-Data-Stale": response.headers["X-Data-Stale"],
-                "X-API-Provider": response.headers["X-API-Provider"],
-                "Deprecation": _LOWESTBIN_V1_DEPRECATION_HEADER,
-                "Sunset": _LOWESTBIN_V1_SUNSET_HEADER,
-            },
-        )
+        payload = dict(snapshot.items)
+        await _write_cached_response(request, _CACHE_KEY_LOWESTBIN_V1, payload, is_stale=snapshot.is_stale)
+        return _lowestbin_v1_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
 
     @app.get(
         "/api/v2/lowestbin",
@@ -127,6 +122,9 @@ def register_marketguard_routes(
             max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
             trusted_proxies=marketguard_settings.trusted_proxies,
         )
+        cached_response = await _read_cached_response(request, _CACHE_KEY_LOWESTBIN_V2)
+        if cached_response is not None:
+            return _json_cache_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
         try:
             snapshot = await marketguard_service.get_lowest_bins_v2()
         except HypixelRateLimitError as exc:
@@ -136,38 +134,27 @@ def register_marketguard_routes(
                 detail="Lowest BIN data is temporarily unavailable.",
                 headers=headers,
             ) from exc
-        except HypixelUpstreamError as exc:
+        except (HypixelUpstreamError, MarketGuardStorageError) as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Lowest BIN data is temporarily unavailable.",
             ) from exc
 
-        response.headers["Cache-Control"] = (
-            f"public, max-age={marketguard_settings.cache_ttl_seconds}, "
-            f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
-        )
-        response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
-        response.headers["X-API-Provider"] = "Pankraz01"
-        return JSONResponse(
-            {
-                "lastUpdated": snapshot.snapshot_last_updated,
-                "products": {
-                    item_key: {
-                        "price": entry.price,
-                        "auctioneerUuid": entry.auctioneer_uuid,
-                        "item_name": entry.item_name,
-                        "avg7d": _round_lowestbin_average(entry.avg_7d),
-                        "avg30d": _round_lowestbin_average(entry.avg_30d),
-                    }
-                    for item_key, entry in snapshot.items.items()
-                },
+        payload = {
+            "lastUpdated": snapshot.snapshot_last_updated,
+            "products": {
+                item_key: {
+                    "price": entry.price,
+                    "auctioneerUuid": entry.auctioneer_uuid,
+                    "item_name": entry.item_name,
+                    "avg7d": _round_lowestbin_average(entry.avg_7d),
+                    "avg30d": _round_lowestbin_average(entry.avg_30d),
+                }
+                for item_key, entry in snapshot.items.items()
             },
-            headers={
-                "Cache-Control": response.headers["Cache-Control"],
-                "X-Data-Stale": response.headers["X-Data-Stale"],
-                "X-API-Provider": response.headers["X-API-Provider"],
-            },
-        )
+        }
+        await _write_cached_response(request, _CACHE_KEY_LOWESTBIN_V2, payload, is_stale=snapshot.is_stale)
+        return _json_cache_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
 
     @app.get(
         "/api/v1/bazaar",
@@ -184,6 +171,9 @@ def register_marketguard_routes(
             max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
             trusted_proxies=marketguard_settings.trusted_proxies,
         )
+        cached_response = await _read_cached_response(request, _CACHE_KEY_BAZAAR_V1)
+        if cached_response is not None:
+            return _json_cache_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
         try:
             snapshot = await marketguard_bazaar_service.get_bazaar()
         except HypixelRateLimitError as exc:
@@ -193,29 +183,18 @@ def register_marketguard_routes(
                 detail="Bazaar data is temporarily unavailable.",
                 headers=headers,
             ) from exc
-        except HypixelUpstreamError as exc:
+        except (HypixelUpstreamError, MarketGuardStorageError) as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Bazaar data is temporarily unavailable.",
             ) from exc
 
-        response.headers["Cache-Control"] = (
-            f"public, max-age={marketguard_settings.cache_ttl_seconds}, "
-            f"stale-if-error={marketguard_settings.stale_if_error_seconds}"
-        )
-        response.headers["X-Data-Stale"] = "true" if snapshot.is_stale else "false"
-        response.headers["X-API-Provider"] = "Pankraz01"
-        return JSONResponse(
-            {
-                "lastUpdated": snapshot.snapshot_last_updated,
-                "products": snapshot.products,
-            },
-            headers={
-                "Cache-Control": response.headers["Cache-Control"],
-                "X-Data-Stale": response.headers["X-Data-Stale"],
-                "X-API-Provider": response.headers["X-API-Provider"],
-            },
-        )
+        payload = {
+            "lastUpdated": snapshot.snapshot_last_updated,
+            "products": snapshot.products,
+        }
+        await _write_cached_response(request, _CACHE_KEY_BAZAAR_V1, payload, is_stale=snapshot.is_stale)
+        return _json_cache_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
 
 
 async def _apply_rate_limit(
@@ -278,3 +257,45 @@ def _resolve_client_ip(request: Request, trusted_proxies: set[str]) -> str:
                 return first_hop
 
     return client_host or "unknown"
+
+
+def _cache_headers(settings: MarketGuardSettings, *, is_stale: bool) -> dict[str, str]:
+    return {
+        "Cache-Control": (
+            f"public, max-age={settings.cache_ttl_seconds}, "
+            f"stale-if-error={settings.stale_if_error_seconds}"
+        ),
+        "X-Data-Stale": "true" if is_stale else "false",
+        "X-API-Provider": "Pankraz01",
+    }
+
+
+def _lowestbin_v1_response(settings: MarketGuardSettings, payload: dict[str, float], *, is_stale: bool) -> JSONResponse:
+    headers = _cache_headers(settings, is_stale=is_stale)
+    headers["Deprecation"] = _LOWESTBIN_V1_DEPRECATION_HEADER
+    headers["Sunset"] = _LOWESTBIN_V1_SUNSET_HEADER
+    return JSONResponse(payload, headers=headers)
+
+
+def _json_cache_response(settings: MarketGuardSettings, payload: dict[str, object], *, is_stale: bool) -> JSONResponse:
+    return JSONResponse(payload, headers=_cache_headers(settings, is_stale=is_stale))
+
+
+async def _read_cached_response(request: Request, cache_key: str) -> CachedResponse | None:
+    cache = getattr(request.app.state, "marketguard_response_cache", None)
+    if cache is None:
+        return None
+    return await cache.get(cache_key)
+
+
+async def _write_cached_response(
+    request: Request,
+    cache_key: str,
+    payload: dict[str, object],
+    *,
+    is_stale: bool,
+) -> None:
+    cache = getattr(request.app.state, "marketguard_response_cache", None)
+    if cache is None:
+        return
+    await cache.set(cache_key, CachedResponse(payload=payload, is_stale=is_stale))

@@ -29,18 +29,8 @@ def test_from_env_builds_verified_tls_mariadb_dsn_for_production(monkeypatch) ->
     _clear_training_hub_env(monkeypatch)
     settings_module = _load_settings_module()
     monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
-    monkeypatch.setenv("TRAINING_HUB_ENV", "production")
-    monkeypatch.setenv("TRAINING_HUB_ALLOWED_HOSTS", "scamscreener.example.com")
-    monkeypatch.setenv("TRAINING_HUB_DB_DRIVER", "mariadb")
+    _set_production_env(monkeypatch)
     monkeypatch.setenv("TRAINING_HUB_DB_HOST", "db.internal")
-    monkeypatch.setenv("TRAINING_HUB_DB_PASSWORD", "prod-pass")
-    monkeypatch.setenv("TRAINING_HUB_DB_REQUIRE_TLS", "true")
-    monkeypatch.setenv("TRAINING_HUB_DB_SSL_CA", "/etc/ssl/certs/db-ca.pem")
-    monkeypatch.setenv("TRAINING_HUB_SECRET_KEY", "x" * 32)
-    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "true")
-    monkeypatch.setenv("TRAINING_HUB_ENFORCE_HTTPS", "true")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_HOST", "smtp.internal")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_FROM_EMAIL", "no-reply@scamscreener.example.com")
 
     settings = settings_module.TrainingHubSettings.from_env()
 
@@ -52,17 +42,44 @@ def test_from_env_builds_verified_tls_mariadb_dsn_for_production(monkeypatch) ->
     assert query["ssl_ca"] == ["/etc/ssl/certs/db-ca.pem"]
 
 
+def test_from_env_defaults_to_mariadb_in_production(monkeypatch) -> None:
+    _clear_training_hub_env(monkeypatch)
+    settings_module = _load_settings_module()
+    monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _set_production_env(monkeypatch)
+
+    settings = settings_module.TrainingHubSettings.from_env()
+
+    parsed = urlsplit(settings.database_url)
+    assert parsed.scheme == "mariadb"
+    assert parsed.hostname == "127.0.0.1"
+
+
+def test_from_env_allows_managed_internal_mariadb_without_tls_in_production(monkeypatch) -> None:
+    _clear_training_hub_env(monkeypatch)
+    settings_module = _load_settings_module()
+    monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _set_production_env(monkeypatch)
+    monkeypatch.setenv("SCAMSCREENER_DB_MANAGED", "true")
+    monkeypatch.setenv("TRAINING_HUB_DB_REQUIRE_TLS", "false")
+    monkeypatch.delenv("TRAINING_HUB_DB_SSL_CA", raising=False)
+    monkeypatch.setenv("TRAINING_HUB_DB_HOST", "scamscreener-db")
+
+    settings = settings_module.TrainingHubSettings.from_env()
+
+    parsed = urlsplit(settings.database_url)
+    assert parsed.scheme == "mariadb"
+    assert parsed.hostname == "scamscreener-db"
+    assert parsed.query == ""
+
+
 def test_from_env_derives_allowed_hosts_from_public_base_url(monkeypatch) -> None:
     _clear_training_hub_env(monkeypatch)
     settings_module = _load_settings_module()
     monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
-    monkeypatch.setenv("TRAINING_HUB_ENV", "production")
+    _set_production_env(monkeypatch)
+    monkeypatch.setenv("TRAINING_HUB_ALLOWED_HOSTS", "")
     monkeypatch.setenv("TRAINING_HUB_PUBLIC_BASE_URL", "https://scamscreener.example.com")
-    monkeypatch.setenv("TRAINING_HUB_SECRET_KEY", "x" * 32)
-    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "true")
-    monkeypatch.setenv("TRAINING_HUB_ENFORCE_HTTPS", "true")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_HOST", "smtp.internal")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_FROM_EMAIL", "no-reply@scamscreener.example.com")
 
     settings = settings_module.TrainingHubSettings.from_env()
 
@@ -74,13 +91,7 @@ def test_from_env_disables_api_docs_by_default_in_production(monkeypatch) -> Non
     _clear_training_hub_env(monkeypatch)
     settings_module = _load_settings_module()
     monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
-    monkeypatch.setenv("TRAINING_HUB_ENV", "production")
-    monkeypatch.setenv("TRAINING_HUB_ALLOWED_HOSTS", "scamscreener.example.com")
-    monkeypatch.setenv("TRAINING_HUB_SECRET_KEY", "x" * 32)
-    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "true")
-    monkeypatch.setenv("TRAINING_HUB_ENFORCE_HTTPS", "true")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_HOST", "smtp.internal")
-    monkeypatch.setenv("TRAINING_HUB_SMTP_FROM_EMAIL", "no-reply@scamscreener.example.com")
+    _set_production_env(monkeypatch)
 
     settings = settings_module.TrainingHubSettings.from_env()
 
@@ -109,15 +120,84 @@ def test_from_env_loads_site_legal_configuration(monkeypatch) -> None:
     assert settings.site_operator_identity_complete is False
 
 
+def test_marketguard_from_env_builds_mariadb_and_redis_urls(monkeypatch) -> None:
+    marketguard_module = _load_marketguard_module()
+    monkeypatch.setattr(marketguard_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _clear_marketguard_env(monkeypatch)
+    monkeypatch.setenv("MARKETGUARD_DB_HOST", "db.internal")
+    monkeypatch.setenv("MARKETGUARD_DB_PASSWORD", "db-pass")
+    monkeypatch.setenv("MARKETGUARD_DB_REQUIRE_TLS", "true")
+    monkeypatch.setenv("MARKETGUARD_DB_SSL_CA", "/etc/ssl/certs/db-ca.pem")
+    monkeypatch.setenv("MARKETGUARD_REDIS_ENABLED", "true")
+    monkeypatch.setenv("MARKETGUARD_REDIS_HOST", "redis.internal")
+    monkeypatch.setenv("MARKETGUARD_REDIS_PASSWORD", "redis-pass")
+
+    settings = marketguard_module.MarketGuardSettings.from_env()
+
+    parsed_db = urlsplit(settings.database_url)
+    parsed_redis = urlsplit(settings.redis_url)
+    db_query = parse_qs(parsed_db.query)
+    assert parsed_db.scheme == "mariadb"
+    assert parsed_db.hostname == "db.internal"
+    assert db_query["ssl_mode"] == ["verify-full"]
+    assert db_query["ssl_ca"] == ["/etc/ssl/certs/db-ca.pem"]
+    assert parsed_redis.scheme == "redis"
+    assert parsed_redis.hostname == "redis.internal"
+
+
+def test_marketguard_from_env_allows_cache_features_to_be_disabled(monkeypatch) -> None:
+    marketguard_module = _load_marketguard_module()
+    monkeypatch.setattr(marketguard_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _clear_marketguard_env(monkeypatch)
+    monkeypatch.setenv("MARKETGUARD_DB_PASSWORD", "db-pass")
+    monkeypatch.setenv("MARKETGUARD_LOCAL_CACHE_ENABLED", "false")
+    monkeypatch.setenv("MARKETGUARD_REDIS_ENABLED", "false")
+
+    settings = marketguard_module.MarketGuardSettings.from_env()
+
+    assert settings.local_cache_enabled is False
+    assert settings.redis_enabled is False
+    assert settings.redis_url == ""
+
+
 def _clear_training_hub_env(monkeypatch) -> None:
     for key in list(os.environ):
-        if key.startswith("TRAINING_HUB_"):
+        if key.startswith("TRAINING_HUB_") or key == "SCAMSCREENER_DB_MANAGED":
             monkeypatch.delenv(key, raising=False)
+
+
+def _clear_marketguard_env(monkeypatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("MARKETGUARD_") or key.startswith("SCAMSCREENER_REDIS_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def _set_production_env(monkeypatch) -> None:
+    monkeypatch.setenv("TRAINING_HUB_ENV", "production")
+    monkeypatch.setenv("TRAINING_HUB_ALLOWED_HOSTS", "scamscreener.example.com")
+    monkeypatch.setenv("TRAINING_HUB_DB_PASSWORD", "prod-pass")
+    monkeypatch.setenv("TRAINING_HUB_DB_REQUIRE_TLS", "true")
+    monkeypatch.setenv("TRAINING_HUB_DB_SSL_CA", "/etc/ssl/certs/db-ca.pem")
+    monkeypatch.setenv("TRAINING_HUB_SECRET_KEY", "x" * 32)
+    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "true")
+    monkeypatch.setenv("TRAINING_HUB_ENFORCE_HTTPS", "true")
+    monkeypatch.setenv("TRAINING_HUB_SMTP_HOST", "smtp.internal")
+    monkeypatch.setenv("TRAINING_HUB_SMTP_FROM_EMAIL", "no-reply@scamscreener.example.com")
 
 
 def _load_settings_module():
     settings_path = Path(__file__).resolve().parents[1] / "app" / "training_hub" / "config" / "settings.py"
     spec = spec_from_file_location("training_hub_test_settings", settings_path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_marketguard_module():
+    settings_path = Path(__file__).resolve().parents[1] / "app" / "marketguard_api" / "config.py"
+    spec = spec_from_file_location("marketguard_test_settings", settings_path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
     sys.modules[spec.name] = module

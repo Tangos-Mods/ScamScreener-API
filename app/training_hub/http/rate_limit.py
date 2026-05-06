@@ -6,12 +6,12 @@ from pathlib import Path
 from fastapi import Request
 
 from ..infra import db as sqlite3
-from .security import _client_ip
 from ..config.settings import TrainingHubSettings
+from .security import _client_ip
 
 
-class _SqliteRateLimiter:
-    def __init__(self, database_path: Path) -> None:
+class _DatabaseRateLimiter:
+    def __init__(self, database_path: Path | str) -> None:
         self.database_path = database_path
 
     def allow(self, key: str, max_requests: int, window_seconds: int) -> tuple[bool, int]:
@@ -21,6 +21,19 @@ class _SqliteRateLimiter:
         retry_after = max(1, (bucket_start + safe_window) - now)
         stale_before = bucket_start - (safe_window * 12)
 
+        if sqlite3.is_mariadb_target(self.database_path):
+            return self._allow_mariadb(key, max_requests, bucket_start, retry_after, stale_before, now)
+        return self._allow_sqlite(key, max_requests, bucket_start, retry_after, stale_before, now)
+
+    def _allow_sqlite(
+        self,
+        key: str,
+        max_requests: int,
+        bucket_start: int,
+        retry_after: int,
+        stale_before: int,
+        now: int,
+    ) -> tuple[bool, int]:
         with sqlite3.connect(self.database_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM rate_limit_hits WHERE bucket_start < ?", (stale_before,))
@@ -59,6 +72,75 @@ class _SqliteRateLimiter:
             )
             connection.commit()
             return True, 0
+
+    def _allow_mariadb(
+        self,
+        key: str,
+        max_requests: int,
+        bucket_start: int,
+        retry_after: int,
+        stale_before: int,
+        now: int,
+    ) -> tuple[bool, int]:
+        for _attempt in range(3):
+            with sqlite3.connect(self.database_path) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("DELETE FROM rate_limit_hits WHERE bucket_start < ?", (stale_before,))
+
+                updated = connection.execute(
+                    """
+                    UPDATE rate_limit_hits
+                    SET count = count + 1, updated_at = ?
+                    WHERE bucket_key = ? AND bucket_start = ? AND count < ?
+                    """,
+                    (str(now), key, bucket_start, max_requests),
+                )
+                if updated.rowcount == 1:
+                    connection.commit()
+                    return True, 0
+
+                row = connection.execute(
+                    """
+                    SELECT count
+                    FROM rate_limit_hits
+                    WHERE bucket_key = ? AND bucket_start = ?
+                    """,
+                    (key, bucket_start),
+                ).fetchone()
+                if row is not None:
+                    current_count = int(row[0])
+                    connection.commit()
+                    if current_count >= max_requests:
+                        return False, retry_after
+                    continue
+
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO rate_limit_hits (bucket_key, bucket_start, count, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (key, bucket_start, 1, str(now)),
+                    )
+                    connection.commit()
+                    return True, 0
+                except Exception as exc:
+                    connection.rollback()
+                    if not self._is_duplicate_key_error(exc):
+                        raise
+
+        return False, retry_after
+
+    @staticmethod
+    def _is_duplicate_key_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        error_name = exc.__class__.__name__.lower()
+        return (
+            "duplicate" in message
+            or "unique" in message
+            or "integrity" in error_name
+            or "1062" in message
+        )
 
 
 def _rate_limit_rule(

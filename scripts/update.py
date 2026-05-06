@@ -8,6 +8,9 @@ from pathlib import Path
 
 import compose_ops
 
+_BASE_HEALTHCHECKED_SERVICES = ("scamscreener-db", "scamscreener-hub", "scamscreener-api")
+_RUNNING_ONLY_SERVICES = ("caddy",)
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -55,6 +58,9 @@ def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) ->
     preflight_script = _preflight_script(context)
     if not args.skip_preflight and not preflight_script.is_file():
         raise FileNotFoundError(f"Preflight script not found: {preflight_script}")
+    healthchecked_services = list(_BASE_HEALTHCHECKED_SERVICES)
+    if compose_ops.marketguard_redis_enabled(context):
+        healthchecked_services.append("scamscreener-redis")
 
     try:
         if not args.skip_preflight:
@@ -65,8 +71,10 @@ def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) ->
             build_args.append("--pull")
         compose_ops.run_compose(context, build_args)
         compose_ops.run_compose(context, ["up", "-d", "--remove-orphans"])
-        compose_ops.wait_for_service_health(context, "scamscreener", args.health_timeout)
-        compose_ops.ensure_service_running(context, "caddy")
+        for service_name in healthchecked_services:
+            compose_ops.wait_for_service_health(context, service_name, args.health_timeout)
+        for service_name in _RUNNING_ONLY_SERVICES:
+            compose_ops.ensure_service_running(context, service_name)
         compose_ops.run_compose(context, ["ps"])
     except (RuntimeError, subprocess.CalledProcessError):
         compose_ops.show_compose_logs(context, tail_lines=args.log_tail_lines)

@@ -200,13 +200,17 @@ class TrainingHubSettings:
         is_production = environment == "production"
         host = os.getenv("TRAINING_HUB_HOST", "0.0.0.0").strip() or "0.0.0.0"
         port = _env_int("TRAINING_HUB_PORT", 8080, 1, 65535)
-        database_driver = (os.getenv("TRAINING_HUB_DB_DRIVER", "sqlite") or "sqlite").strip().lower()
+        database_driver_default = "mariadb" if environment in {"staging", "production"} else "sqlite"
+        database_driver = (
+            os.getenv("TRAINING_HUB_DB_DRIVER", database_driver_default) or database_driver_default
+        ).strip().lower()
         database_url_raw = (os.getenv("TRAINING_HUB_DATABASE_URL", "") or "").strip()
         db_host = (os.getenv("TRAINING_HUB_DB_HOST", "127.0.0.1") or "127.0.0.1").strip()
         db_port = _env_int("TRAINING_HUB_DB_PORT", 3306, 1, 65535)
         db_name = (os.getenv("TRAINING_HUB_DB_NAME", "scamscreener_hub") or "scamscreener_hub").strip()
         db_user = (os.getenv("TRAINING_HUB_DB_USER", "scamscreener") or "scamscreener").strip()
         db_password = (os.getenv("TRAINING_HUB_DB_PASSWORD", "") or "").strip()
+        managed_internal_db = _env_bool("SCAMSCREENER_DB_MANAGED", False)
         db_require_tls = _env_bool("TRAINING_HUB_DB_REQUIRE_TLS", bool(database_driver == "mariadb" and is_production))
         db_ssl_ca = (os.getenv("TRAINING_HUB_DB_SSL_CA", "") or "").strip()
         db_ssl_cert = (os.getenv("TRAINING_HUB_DB_SSL_CERT", "") or "").strip()
@@ -420,9 +424,9 @@ class TrainingHubSettings:
             if not allowed_hosts or "*" in allowed_hosts:
                 raise ValueError("TRAINING_HUB_ALLOWED_HOSTS must be set to explicit hostnames in production.")
             if database_driver == "mariadb":
-                if not _database_url_has_tls(database_url):
+                if not managed_internal_db and not _database_url_has_tls(database_url):
                     raise ValueError("MariaDB connections must enable TLS in production.")
-                if db_require_tls and not db_ssl_ca and not database_url_raw:
+                if not managed_internal_db and db_require_tls and not db_ssl_ca and not database_url_raw:
                     raise ValueError("TRAINING_HUB_DB_SSL_CA should be set for verified MariaDB TLS in production.")
             if (password_reset_send_email or admin_mfa_required or (smtp_host and smtp_from_email)) and not (smtp_use_tls or smtp_use_starttls):
                 raise ValueError("SMTP transport encryption (TLS or STARTTLS) is required in production.")
