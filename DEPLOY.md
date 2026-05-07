@@ -5,6 +5,7 @@ This guide deploys the repository on a fresh Ubuntu server with:
 - Docker Engine + Compose plugin
 - one internal Training Hub container
 - one internal public API container
+- one internal public market website container
 - one internal MariaDB container
 - one optional internal Redis container for MarketGuard response caching
 - one public Caddy container for HTTPS and reverse proxy
@@ -16,6 +17,7 @@ The resulting public topology is:
 - `caddy` exposed on `80/443`
 - `scamscreener-hub` internal only
 - `scamscreener-api` internal only
+- `marketguard-hub` internal only
 - `scamscreener-db` internal only
 - `/api/v1/health` and `/api/v1/metrics` blocked publicly by Caddy
 
@@ -315,6 +317,7 @@ This starts:
 - `scamscreener-db` as the internal MariaDB database
 - `scamscreener-hub` as the internal Training Hub app
 - `scamscreener-api` as the internal public Lowest BIN/Bazaar API
+- `marketguard-hub` as the internal public MarketGuard web frontend
 - `caddy` as the public reverse proxy with automatic HTTPS
 
 Internally the update script does:
@@ -340,6 +343,7 @@ You want:
 - `scamscreener-db` status `healthy`
 - `scamscreener-hub` status `healthy`
 - `scamscreener-api` status `healthy`
+- `marketguard-hub` status `healthy`
 - `scamscreener-redis` status `healthy` when `MARKETGUARD_REDIS_ENABLED=true` and `SCAMSCREENER_REDIS_MANAGED=true`
 - `caddy` status `running`
 

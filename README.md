@@ -93,10 +93,11 @@ Open:
 
 ## 3) Docker Deploy
 
-The repository now ships a single Compose stack behind bundled Caddy. It runs four base services plus an optional Redis cache service when `MARKETGUARD_REDIS_ENABLED=true` with `SCAMSCREENER_REDIS_MANAGED=true`:
+The repository now ships a single Compose stack behind bundled Caddy. It runs five base services plus an optional Redis cache service when `MARKETGUARD_REDIS_ENABLED=true` with `SCAMSCREENER_REDIS_MANAGED=true`:
 
 - `scamscreener-hub` for the Training Hub
 - `scamscreener-api` for the public Lowest BIN and Bazaar API
+- `marketguard-hub` for the public market website under `/market/`
 - `scamscreener-db` for the internal MariaDB database
 - `caddy` for public HTTPS termination and reverse proxy
 
@@ -126,7 +127,7 @@ What this path expects:
 
 What this path provides automatically:
 
-- one internal hub container, one internal API container, one internal MariaDB container, one public Caddy container, and an optional internal Redis container
+- one internal hub container, one internal API container, one internal market website container, one internal MariaDB container, one public Caddy container, and an optional internal Redis container
 - automatic HTTPS via Caddy
 - `/api/v1/health` healthchecks for the hub and a dedicated internal health route for the API
 - public blocking of `/api/v1/health`, `/api/v1/metrics`, and internal-only health paths
@@ -292,6 +293,8 @@ Supply-chain checks:
 - `GET /api/v1/lowestbin`
 - `GET /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
+- `GET /market/`
+- `GET /market/bazaar`
 - `POST /api/v1/client/auth/login`
 - `POST /api/v1/client/uploads`
 - `POST /api/v1/client/uploads/anonymous`

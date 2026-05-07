@@ -65,6 +65,18 @@ def test_api_entrypoint_disables_tls_for_managed_internal_db(tmp_path: Path) -> 
     assert output["MARKETGUARD_DB_SSL_CA"] == ""
 
 
+def test_marketguard_hub_entrypoint_uses_market_app_mode(tmp_path: Path) -> None:
+    output = _run_entrypoint(
+        tmp_path,
+        {
+            "SCAMSCREENER_APP_MODE": "market",
+        },
+        [],
+    )
+
+    assert output["UVICORN_ARGS"].startswith("app.marketguard_hub.main:create_app ")
+
+
 def _run_entrypoint(tmp_path: Path, extra_env: dict[str, str], keys: list[str]) -> dict[str, str]:
     runtime_dir = tmp_path / "runtime" / "mariadb"
     runtime_dir.mkdir(parents=True)
@@ -74,7 +86,7 @@ def _run_entrypoint(tmp_path: Path, extra_env: dict[str, str], keys: list[str]) 
     bin_dir.mkdir()
 
     (bin_dir / "python").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    uvicorn_lines = ["#!/bin/sh"]
+    uvicorn_lines = ["#!/bin/sh", 'printf "UVICORN_ARGS=%s\\n" "$*"']
     uvicorn_lines.extend(f'printf "{key}=%s\\n" "${{{key}:-}}"' for key in keys)
     (bin_dir / "uvicorn").write_text("\n".join(uvicorn_lines) + "\n", encoding="utf-8")
 

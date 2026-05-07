@@ -274,6 +274,7 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
 
     schemas = schema["components"]["schemas"]
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
+    assert schemas["BazaarProductResponse"]["properties"]["item_name"]["examples"][0] == "Corrupted Bait"
     assert schemas["LowestBinV1Response"]["example"]["HYPERION"] == 98000000.0
     assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
     assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
@@ -475,6 +476,7 @@ def test_bazaar_returns_transformed_quick_status_snapshot(tmp_path: Path) -> Non
         "lastUpdated": 1_715_478_978_620,
         "products": {
             "CORRUPTED_BAIT": {
+                "item_name": "Corrupted Bait",
                 "buy": 101.950378482847,
                 "sell": 2.0,
                 "spread": 99.950378482847,
@@ -944,6 +946,7 @@ def test_bazaar_returns_stale_cache_when_refresh_fails() -> None:
     assert second.is_stale is True
     assert second.products == {
         "ENCHANTED_GOLD": {
+            "item_name": "Enchanted Gold",
             "buy": 123.4,
             "sell": 120.1,
             "spread": 3.3,
@@ -1091,6 +1094,7 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
         "lastUpdated": 1_700_000_000_000,
         "products": {
             "ENCHANTED_GOLD": {
+                "item_name": "Enchanted Gold",
                 "buy": 123.4,
                 "sell": 120.1,
                 "spread": 3.3,

@@ -8,8 +8,9 @@ from pathlib import Path
 
 import compose_ops
 
-_BASE_HEALTHCHECKED_SERVICES = ("scamscreener-db", "scamscreener-hub", "scamscreener-api")
+_BASE_HEALTHCHECKED_SERVICES = ("scamscreener-db", "scamscreener-hub", "scamscreener-api", "marketguard-hub")
 _RUNNING_ONLY_SERVICES = ("caddy",)
+_FORCE_RECREATE_SERVICES = ("caddy",)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -73,6 +74,11 @@ def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) ->
         compose_ops.run_compose(context, ["up", "-d", "--remove-orphans"])
         for service_name in healthchecked_services:
             compose_ops.wait_for_service_health(context, service_name, args.health_timeout)
+        if _FORCE_RECREATE_SERVICES:
+            compose_ops.run_compose(
+                context,
+                ["up", "-d", "--force-recreate", *_FORCE_RECREATE_SERVICES],
+            )
         for service_name in _RUNNING_ONLY_SERVICES:
             compose_ops.ensure_service_running(context, service_name)
         compose_ops.run_compose(context, ["ps"])

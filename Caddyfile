@@ -11,6 +11,15 @@
         path /api/v1/lowestbin /api/v2/lowestbin /api/v1/bazaar
     }
 
+    handle_path /market* {
+        reverse_proxy marketguard-hub:8082 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
     @marketguard_docs {
         path /docs /redoc /openapi.json
     }

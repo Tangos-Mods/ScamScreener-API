@@ -285,15 +285,17 @@ class MarketGuardStorage:
     def write_bazaar_snapshot(self, snapshot: BazaarSnapshot) -> None:
         generated_at_epoch_ms = _datetime_to_epoch_millis(snapshot.generated_at)
         updated_at_epoch_ms = _utc_now_epoch_millis()
-        product_rows: list[tuple[str, float, float, float, float, int, int, int, int]] = []
+        product_rows: list[tuple[str, str, float, float, float, float, int, int, int, int]] = []
         for product_id, product_data in snapshot.products.items():
             normalized_product_id = str(product_id or "").strip()
             if not normalized_product_id:
                 continue
             try:
+                item_name = str(product_data["item_name"] or "").strip() or normalized_product_id
                 product_rows.append(
                     (
                         normalized_product_id,
+                        item_name[:255],
                         float(product_data["buy"]),
                         float(product_data["sell"]),
                         float(product_data["spread"]),
@@ -332,6 +334,7 @@ class MarketGuardStorage:
                         """
                         INSERT INTO marketguard_bazaar_current_products (
                             product_id,
+                            item_name,
                             buy_price,
                             sell_price,
                             spread,
@@ -342,7 +345,7 @@ class MarketGuardStorage:
                             sell_moving_week
                         ) VALUES
                         """,
-                        "(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         product_rows,
                     )
                 connection.commit()
@@ -365,6 +368,7 @@ class MarketGuardStorage:
                     """
                     SELECT
                         product_id,
+                        item_name,
                         buy_price,
                         sell_price,
                         spread,
@@ -380,9 +384,12 @@ class MarketGuardStorage:
         except Exception as exc:
             raise MarketGuardStorageError("Failed to load bazaar snapshot data.") from exc
 
-        products: dict[str, dict[str, float | int]] = {}
+        products: dict[str, dict[str, float | int | str]] = {}
         for row in product_rows:
-            products[str(row["product_id"])] = {
+            product_id = str(row["product_id"])
+            item_name = str(row["item_name"] or "").strip() or product_id
+            products[product_id] = {
+                "item_name": item_name,
                 "buy": float(row["buy_price"]),
                 "sell": float(row["sell_price"]),
                 "spread": float(row["spread"]),
@@ -455,6 +462,7 @@ class MarketGuardStorage:
             """
             CREATE TABLE IF NOT EXISTS marketguard_bazaar_current_products (
                 product_id VARCHAR(191) NOT NULL PRIMARY KEY,
+                item_name VARCHAR(255) NOT NULL,
                 buy_price DOUBLE NOT NULL,
                 sell_price DOUBLE NOT NULL,
                 spread DOUBLE NOT NULL,
@@ -470,6 +478,12 @@ class MarketGuardStorage:
             with self._connect() as connection:
                 for statement in statements:
                     connection.execute(statement)
+                connection.execute(
+                    """
+                    ALTER TABLE marketguard_bazaar_current_products
+                    ADD COLUMN IF NOT EXISTS item_name VARCHAR(255) NOT NULL DEFAULT ''
+                    """
+                )
                 connection.commit()
         except Exception as exc:
             raise MarketGuardStorageError("Failed to initialize MarketGuard MariaDB schema.") from exc

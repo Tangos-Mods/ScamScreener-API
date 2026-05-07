@@ -62,7 +62,7 @@ class LowestBinV2Snapshot:
 class BazaarSnapshot:
     generated_at: datetime
     snapshot_last_updated: int
-    products: dict[str, dict[str, float | int]]
+    products: dict[str, dict[str, float | int | str]]
     is_stale: bool = False
 
 
@@ -122,6 +122,7 @@ class LowestBinV2Response(BaseModel):
 
 
 class BazaarProductResponse(BaseModel):
+    item_name: str = Field(..., examples=["Corrupted Bait"])
     buy: float = Field(..., examples=[101.950378482847])
     sell: float = Field(..., examples=[2.0])
     spread: float = Field(..., examples=[99.950378482847])
@@ -139,6 +140,7 @@ class BazaarResponse(BaseModel):
         examples=[
             {
                 "CORRUPTED_BAIT": {
+                    "item_name": "Corrupted Bait",
                     "buy": 101.950378482847,
                     "sell": 2.0,
                     "spread": 99.950378482847,

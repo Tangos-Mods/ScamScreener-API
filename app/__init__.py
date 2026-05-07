@@ -4,7 +4,9 @@ __all__ = [
     "app",
     "create_app",
     "create_marketguard_app",
+    "create_marketguard_hub_app",
     "create_training_hub_app",
+    "MarketGuardHubSettings",
     "MarketGuardSettings",
     "TrainingHubSettings",
 ]
@@ -22,6 +24,14 @@ def __getattr__(name: str):
         return {
             "create_marketguard_app": create_marketguard_app,
             "MarketGuardSettings": MarketGuardSettings,
+        }[name]
+    if name in {"create_marketguard_hub_app", "MarketGuardHubSettings"}:
+        from .marketguard_hub.config import MarketGuardHubSettings
+        from .marketguard_hub.main import create_marketguard_hub_app
+
+        return {
+            "create_marketguard_hub_app": create_marketguard_hub_app,
+            "MarketGuardHubSettings": MarketGuardHubSettings,
         }[name]
     if name in {"create_training_hub_app", "TrainingHubSettings"}:
         from .training_hub.config.settings import TrainingHubSettings

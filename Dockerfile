@@ -20,6 +20,6 @@ RUN addgroup --system app && \
 
 USER app
 
-EXPOSE 8080 8081
+EXPOSE 8080 8081 8082
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

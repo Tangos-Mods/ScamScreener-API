@@ -162,6 +162,41 @@ services:
     networks:
       - scamscreener_net
 
+  marketguard-hub:
+    build: .
+    image: scamscreener-app:local
+    container_name: marketguard-hub
+    depends_on:
+      scamscreener-api:
+        condition: service_healthy
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    environment:
+      PORT: "8082"
+      SCAMSCREENER_APP_MODE: market
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os, urllib.parse, urllib.request; port = os.getenv('PORT', '8082'); host = (os.getenv('TRAINING_HUB_ALLOWED_HOSTS', '').split(',')[0].strip() or urllib.parse.urlsplit(os.getenv('TRAINING_HUB_PUBLIC_BASE_URL', '')).hostname or '127.0.0.1'); request = urllib.request.Request(f'http://127.0.0.1:{port}/internal/health', headers={'Host': host, 'X-Forwarded-Proto': 'https'}); urllib.request.urlopen(request, timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - scamscreener_net
+
   caddy:
     image: caddy:2.8
     container_name: scamscreener-caddy
@@ -171,6 +206,8 @@ services:
       scamscreener-hub:
         condition: service_healthy
       scamscreener-api:
+        condition: service_healthy
+      marketguard-hub:
         condition: service_healthy
     ports:
       - "80:80"

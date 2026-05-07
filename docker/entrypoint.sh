@@ -192,6 +192,9 @@ case "${APP_MODE}" in
         configure_marketguard_runtime
         module_target="app.marketguard_api.main:create_app"
         ;;
+    market)
+        module_target="app.marketguard_hub.main:create_app"
+        ;;
     platform)
         configure_training_hub_runtime
         configure_marketguard_runtime

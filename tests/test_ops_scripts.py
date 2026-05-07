@@ -53,6 +53,8 @@ def test_update_runs_preflight_build_up_and_health_checks(tmp_path: Path, monkey
     assert ("wait", ("scamscreener-db", 120)) in calls
     assert ("wait", ("scamscreener-hub", 120)) in calls
     assert ("wait", ("scamscreener-api", 120)) in calls
+    assert ("wait", ("marketguard-hub", 120)) in calls
+    assert ("compose", ["up", "-d", "--force-recreate", "caddy"]) in calls
     assert ("running", "caddy") in calls
     assert ("compose", ["ps"]) in calls
 
@@ -72,6 +74,7 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
     (tmp_path / "scripts").mkdir(exist_ok=True)
     (tmp_path / "scripts" / "preflight.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
 
+    compose_calls: list[list[str]] = []
     waits: list[str] = []
 
     monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
@@ -83,7 +86,7 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
     monkeypatch.setattr(
         compose_ops,
         "run_compose",
-        lambda _context, args, *, capture_output=False: SimpleNamespace(stdout=""),
+        lambda _context, args, *, capture_output=False: compose_calls.append(args) or SimpleNamespace(stdout=""),
     )
     monkeypatch.setattr(
         compose_ops,
@@ -99,6 +102,27 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
     args = argparse.Namespace(skip_preflight=False, skip_pull=True, health_timeout=90, log_tail_lines=40)
     assert update_module.run_update(context, args) == 0
     assert "scamscreener-redis" in waits
+    assert "marketguard-hub" in waits
+    assert compose_calls == [
+        ["build"],
+        ["up", "-d", "--remove-orphans"],
+        ["up", "-d", "--force-recreate", "caddy"],
+        ["ps"],
+    ]
+
+
+def test_caddyfile_routes_marketguard_hub() -> None:
+    caddyfile = (Path(__file__).resolve().parents[1] / "Caddyfile").read_text(encoding="utf-8")
+
+    assert "handle_path /market*" in caddyfile
+    assert "reverse_proxy marketguard-hub:8082" in caddyfile
+
+
+def test_compose_marketguard_hub_healthcheck_uses_allowed_host_header() -> None:
+    compose_file = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "/internal/health" in compose_file
+    assert "headers={'Host': host, 'X-Forwarded-Proto': 'https'}" in compose_file
 
 
 def test_reset_aborts_without_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

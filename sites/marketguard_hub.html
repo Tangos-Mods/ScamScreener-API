@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MarketGuard Hub | {{ page_title }}</title>
+    <link rel="stylesheet" href="{{ base_path }}/assets/css/bootstrap.min.css">
+    <link rel="stylesheet" href="{{ base_path }}/assets/css/marketguard-hub.css">
+</head>
+<body class="marketguard-body">
+    <a class="visually-hidden-focusable skip-link" href="#market-content">Skip to content</a>
+    <div
+        id="marketguard-app"
+        class="market-shell"
+        data-view="{{ active_view }}"
+        data-api-url="{{ api_url }}"
+        data-base-path="{{ base_path }}"
+        data-refresh-interval-ms="{{ refresh_interval_ms }}"
+    >
+        <nav class="navbar navbar-expand-lg market-navbar">
+            <div class="container-xxl">
+                <a class="navbar-brand market-brand" href="{{ base_path }}/">
+                    <span class="market-brand-mark">ScamScreener</span>
+                    <span class="market-brand-subtitle">MarketGuard Hub</span>
+                </a>
+                <div class="market-nav-shell">
+                    <ul class="navbar-nav ms-auto market-nav">
+                        <li class="nav-item">
+                            <a class="nav-link{% if active_view == 'lowestbin' %} active{% endif %}" href="{{ base_path }}/"{% if active_view == 'lowestbin' %} aria-current="page"{% endif %}>Lowest BIN</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link{% if active_view == 'bazaar' %} active{% endif %}" href="{{ base_path }}/bazaar"{% if active_view == 'bazaar' %} aria-current="page"{% endif %}>Bazaar</a>
+                        </li>
+                    </ul>
+                    <div class="market-header-meta" aria-live="polite">
+                        <div class="market-header-meta-item">
+                            <span class="market-header-meta-label">Last update</span>
+                            <strong id="market-last-updated">Loading...</strong>
+                        </div>
+                        <div class="market-header-meta-item">
+                            <span class="market-header-meta-label">Products</span>
+                            <strong id="market-product-count">0</strong>
+                        </div>
+                        <div class="market-header-meta-item">
+                            <span class="market-header-meta-label">State</span>
+                            <span id="market-data-state" class="badge text-bg-light">Loading</span>
+                        </div>
+                    </div>
+                    <button id="market-refresh-button" type="button" class="btn btn-outline-secondary btn-sm market-refresh-button" aria-label="Refresh market data now">
+                        <svg class="market-refresh-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M20 5v5h-5l1.93-1.93A6.96 6.96 0 0 0 12 6a7 7 0 0 0-6.32 4H3.6A9 9 0 0 1 12 4c2.21 0 4.24.8 5.8 2.12L20 5Zm.4 9A9 9 0 0 1 12 20a8.96 8.96 0 0 1-5.8-2.12L4 19v-5h5l-1.93 1.93A6.96 6.96 0 0 0 12 18a7 7 0 0 0 6.32-4h2.08Z"></path>
+                        </svg>
+                        <span id="market-refresh-countdown">60s</span>
+                    </button>
+                </div>
+            </div>
+        </nav>
+
+        <main id="market-content" class="market-content">
+            <section class="market-hero">
+                <div class="container-xxl">
+                    <div class="market-hero-panel">
+                        <div class="market-hero-layout">
+                            <div class="market-hero-copy">
+                                <p class="market-eyebrow">Public market overview</p>
+                                <h1 class="market-title">{{ page_title }}</h1>
+                                <p class="market-description">{{ page_description }}</p>
+                            </div>
+                            <div class="market-hero-controls">
+                                <div class="market-search-shell">
+                                    <label class="visually-hidden" for="market-search-input">Search market entries</label>
+                                    <div class="market-search-row">
+                                        <select id="market-search-field" class="form-select form-select-sm market-search-field" aria-label="Choose search field">
+                                            <option value="title">Name</option>
+                                            <option value="key">Item key</option>
+                                        </select>
+                                        <input
+                                            id="market-search-input"
+                                            class="form-control form-control-sm market-search-input"
+                                            type="search"
+                                            inputmode="search"
+                                            autocomplete="off"
+                                            spellcheck="false"
+                                            placeholder="Search market entries"
+                                        >
+                                    </div>
+                                </div>
+                                <details class="market-sort-menu">
+                                    <summary class="market-sort-toggle" aria-label="Open sort options">
+                                        <svg class="market-sort-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                            <path d="M7 4h10v2H7V4Zm-3 7h16v2H4v-2Zm4 7h8v2H8v-2Z"></path>
+                                        </svg>
+                                        <span class="visually-hidden">Sort options</span>
+                                    </summary>
+                                    <div class="market-sort-panel">
+                                        <label class="market-sort-label" for="market-sort-field">Sort by</label>
+                                        <select id="market-sort-field" class="form-select form-select-sm market-sort-field" aria-label="Choose sort field"></select>
+                                        <label class="market-sort-label" for="market-sort-direction">Direction</label>
+                                        <select id="market-sort-direction" class="form-select form-select-sm market-sort-direction" aria-label="Choose sort direction">
+                                            <option value="asc">Ascending</option>
+                                            <option value="desc">Descending</option>
+                                        </select>
+                                    </div>
+                                </details>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="market-grid-section">
+                <div class="container-xxl">
+                    <div id="market-alert-slot" class="market-alert-slot" aria-live="polite"></div>
+                    <div id="market-empty-state" class="market-empty-state d-none">
+                        <div class="alert alert-secondary mb-0" role="status" id="market-empty-message">
+                            No market entries are available right now.
+                        </div>
+                    </div>
+                    <div id="market-grid" class="row row-cols-1 row-cols-md-2 row-cols-xl-3 row-cols-xxl-4 g-4"></div>
+                    <div id="market-sentinel" class="market-sentinel" aria-hidden="true"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="{{ base_path }}/assets/js/marketguard-hub.js" defer></script>
+</body>
+</html>

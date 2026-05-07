@@ -210,7 +210,7 @@ class BazaarService:
 
     async def _refresh_snapshot(self) -> BazaarSnapshot:
         bazaar_snapshot = await self._client.fetch_snapshot()
-        products: dict[str, dict[str, float | int]] = {}
+        products: dict[str, dict[str, float | int | str]] = {}
 
         for product_id, quick_status in bazaar_snapshot.products.items():
             buy_price = float(quick_status["buyPrice"])
@@ -223,6 +223,7 @@ class BazaarService:
             spread_percentage = _spread_percentage(spread, sell_price)
 
             products[product_id] = {
+                "item_name": _bazaar_item_name(product_id),
                 "buy": buy_price,
                 "sell": sell_price,
                 "spread": spread,
@@ -270,6 +271,16 @@ def _parse_auctioneer_uuid(value: object) -> str | None:
 def _parse_item_name(value: object, fallback: str) -> str:
     parsed = str(value or "").strip()
     return parsed or fallback
+
+
+def _bazaar_item_name(product_id: object) -> str:
+    normalized_product_id = str(product_id or "").strip()
+    if not normalized_product_id:
+        return ""
+    words = [part for part in normalized_product_id.split("_") if part]
+    if not words:
+        return normalized_product_id
+    return " ".join(words).title()
 
 
 def _utc_epoch_seconds() -> float:
