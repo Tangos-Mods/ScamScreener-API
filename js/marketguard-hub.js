@@ -354,7 +354,6 @@
                             <h3 class="market-card-title">${escapeHtml(item.title)}</h3>
                             <div class="market-card-key">${escapeHtml(item.key)}</div>
                         </div>
-                        <span class="badge text-bg-light">Lowest BIN</span>
                     </div>
                     <div class="market-price">${escapeHtml(formatNumber(item.price))}</div>
                     <div class="market-card-grid">
@@ -395,7 +394,6 @@
                             <h3 class="market-card-title">${escapeHtml(item.title)}</h3>
                             <div class="market-card-key">${escapeHtml(item.key)}</div>
                         </div>
-                        <span class="badge text-bg-light">Bazaar</span>
                     </div>
                     <div class="market-price">${escapeHtml(formatPercent(item.spreadPercentage))}</div>
                     <div class="market-card-grid">
