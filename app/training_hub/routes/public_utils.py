@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request, UploadFile
 
@@ -29,6 +30,23 @@ def request_meta(request: Request, settings: TrainingHubSettings) -> tuple[str, 
     source_ip = _request_client_ip(request, settings)
     user_agent = str(request.headers.get("user-agent", ""))
     return source_ip, user_agent
+
+
+def webauthn_request_context(request: Request, settings: TrainingHubSettings) -> tuple[str, str]:
+    rp_id = str(settings.webauthn_rp_id or "").strip().lower()
+    if not rp_id:
+        rp_id = (request.url.hostname or "").strip().lower()
+
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        origin = str(settings.public_base_url or "").strip().rstrip("/")
+    if not origin:
+        origin = str(request.base_url).rstrip("/")
+    parsed_origin = urlsplit(origin)
+    if parsed_origin.scheme and parsed_origin.netloc:
+        origin = f"{parsed_origin.scheme.lower()}://{parsed_origin.netloc.lower()}"
+
+    return rp_id, origin
 
 
 def mask_email(value: str) -> str:

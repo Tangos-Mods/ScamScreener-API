@@ -116,6 +116,7 @@ class TrainingHubSettings:
     admin_mfa_required: bool = False
     admin_mfa_ttl_minutes: int = 30
     admin_mfa_max_attempts: int = 5
+    totp_skew_steps: int = 2
     webauthn_rp_id: str = ""
     webauthn_rp_name: str = "ScamScreener"
     webauthn_origins: tuple[str, ...] = ()
@@ -240,6 +241,7 @@ class TrainingHubSettings:
         admin_mfa_required = _env_bool("TRAINING_HUB_ADMIN_MFA_REQUIRED", False)
         admin_mfa_ttl_minutes = _env_int("TRAINING_HUB_ADMIN_MFA_TTL_MINUTES", 30, 5, 1440)
         admin_mfa_max_attempts = _env_int("TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS", 5, 1, 20)
+        totp_skew_steps = _env_int("TRAINING_HUB_TOTP_SKEW_STEPS", 2, 0, 10)
         webauthn_rp_id = (os.getenv("TRAINING_HUB_WEBAUTHN_RP_ID", "") or "").strip().lower()
         webauthn_rp_name = (os.getenv("TRAINING_HUB_WEBAUTHN_RP_NAME", "ScamScreener") or "ScamScreener").strip()
         webauthn_origins = tuple(_env_csv_list("TRAINING_HUB_WEBAUTHN_ORIGINS"))
@@ -462,6 +464,7 @@ class TrainingHubSettings:
             admin_mfa_required=admin_mfa_required,
             admin_mfa_ttl_minutes=admin_mfa_ttl_minutes,
             admin_mfa_max_attempts=admin_mfa_max_attempts,
+            totp_skew_steps=totp_skew_steps,
             webauthn_rp_id=webauthn_rp_id,
             webauthn_rp_name=webauthn_rp_name,
             webauthn_origins=webauthn_origins,

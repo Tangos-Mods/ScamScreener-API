@@ -22,23 +22,102 @@
 {% endif %}
 
 <section class="section-shell workspace-section">
-    <div class="section-header">
+    <div class="section-header admin-cases-header">
         <div>
             <p class="section-kicker">Training data</p>
             <h2>Cases</h2>
         </div>
+        <form
+            method="get"
+            action="/admin/cases"
+            class="admin-case-filter-form"
+            data-case-filter
+            data-valid-statuses="submitted approved rejected"
+            data-valid-labels="safe risk"
+        >
+            <label class="visually-hidden" for="admin-case-filter-input">Filter cases</label>
+            <div class="admin-case-filter-row">
+                <div class="admin-case-filter-tokenbox">
+                    <div class="admin-case-filter-badges" data-case-filter-badges></div>
+                    <input
+                        id="admin-case-filter-input"
+                        class="form-control admin-case-filter-input"
+                        type="search"
+                        inputmode="search"
+                        value=""
+                        placeholder="status:submitted, label:safe, or message text"
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-expanded="false"
+                        aria-controls="admin-case-filter-suggestions"
+                        data-case-filter-input
+                        autocomplete="off"
+                        spellcheck="false"
+                    >
+                    <div
+                        id="admin-case-filter-suggestions"
+                        class="admin-case-filter-suggestions"
+                        role="listbox"
+                        hidden
+                        data-case-filter-suggestions
+                    ></div>
+                </div>
+                <input type="hidden" name="filter" value="{{ case_filter_query }}" data-case-filter-hidden>
+                <input type="hidden" name="sort_by" value="{{ case_sort_by }}">
+                <input type="hidden" name="sort_dir" value="{{ case_sort_dir }}">
+                <button type="submit" class="btn btn-outline-primary btn-sm">Filter</button>
+                {% if case_filter_query %}
+                    <a class="btn btn-outline-secondary btn-sm" href="{{ clear_case_filter_href }}">Clear</a>
+                {% endif %}
+            </div>
+        </form>
     </div>
     <div class="table-shell">
         <table class="table align-middle mb-0">
             <thead>
             <tr>
-                <th>ID</th>
-                <th>Case ID</th>
-                <th>Status</th>
-                <th>Label</th>
-                <th>Outcome</th>
-                <th>Updated</th>
-                <th>Created By</th>
+                <th aria-sort="{{ case_sort_links.id.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.id.is_active %} is-active{% endif %}" href="{{ case_sort_links.id.href }}">
+                        <span>ID</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.id.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.case_id.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.case_id.is_active %} is-active{% endif %}" href="{{ case_sort_links.case_id.href }}">
+                        <span>Case ID</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.case_id.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.status.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.status.is_active %} is-active{% endif %}" href="{{ case_sort_links.status.href }}">
+                        <span>Status</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.status.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.label.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.label.is_active %} is-active{% endif %}" href="{{ case_sort_links.label.href }}">
+                        <span>Label</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.label.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.outcome.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.outcome.is_active %} is-active{% endif %}" href="{{ case_sort_links.outcome.href }}">
+                        <span>Outcome</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.outcome.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.updated.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.updated.is_active %} is-active{% endif %}" href="{{ case_sort_links.updated.href }}">
+                        <span>Updated</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.updated.indicator }}</span>
+                    </a>
+                </th>
+                <th aria-sort="{{ case_sort_links.mod_version.aria_sort }}">
+                    <a class="table-sort-link{% if case_sort_links.mod_version.is_active %} is-active{% endif %}" href="{{ case_sort_links.mod_version.href }}">
+                        <span>Mod Version</span>
+                        <span class="table-sort-indicator" aria-hidden="true">{{ case_sort_links.mod_version.indicator }}</span>
+                    </a>
+                </th>
                 <th>Delete</th>
             </tr>
             </thead>
@@ -47,24 +126,29 @@
                 {% for row in cases %}
                     <tr>
                         <td>{{ row.id }}</td>
-                        <td><a href="/admin/cases/{{ row.id }}">{{ row.case_id }}</a></td>
+                        <td><a href="/admin/cases/{{ row.id }}">{{ row.display_case_id }}</a></td>
                         <td>
-                            <span class="chip chip-table {% if row.status|lower == 'submitted' %}chip-status-submitted{% endif %}">
+                            <span class="chip chip-table {% if row.status|lower == 'submitted' %}chip-status-submitted{% elif row.status|lower == 'approved' %}chip-status-approved{% elif row.status|lower == 'rejected' %}chip-status-rejected{% endif %}">
                                 {{ row.status }}
                             </span>
                         </td>
-                        <td>{{ row.label or "-" }}</td>
+                        <td>
+                            {% set normalized_label = row.label|lower %}
+                            <span class="chip chip-table {% if normalized_label == 'safe' %}chip-label-safe{% elif normalized_label == 'risk' %}chip-label-risk{% endif %}">
+                                {{ row.label or "-" }}
+                            </span>
+                        </td>
                         <td>
                             <span class="chip chip-table {% if row.outcome|lower == 'safe' %}chip-outcome-safe{% elif row.outcome|lower == 'review' %}chip-outcome-review{% endif %}">
                                 {{ row.outcome or "-" }}
                             </span>
                         </td>
                         <td>{{ row.updated_at|datetime_utc }}</td>
-                        <td>{{ row.created_by }}</td>
+                        <td>{{ row.mod_version }}</td>
                         <td>
                             <form method="post" action="/admin/cases/{{ row.id }}/delete" class="inline-form">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="btn btn-outline-danger btn-sm" aria-label="Delete case {{ row.case_id }}" title="Delete case">Delete</button>
+                                <button type="submit" class="btn btn-outline-danger btn-sm" aria-label="Delete case {{ row.display_case_id }}" title="Delete case">Delete</button>
                             </form>
                         </td>
                     </tr>
@@ -76,4 +160,8 @@
         </table>
     </div>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="/js/admin-case-filter.js"></script>
 {% endblock %}

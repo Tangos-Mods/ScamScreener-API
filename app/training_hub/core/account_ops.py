@@ -357,6 +357,7 @@ def _delete_user_account(settings: TrainingHubSettings, user_id: int) -> dict[st
     return {
         "ok": True,
         "username": str(user_row["username"]),
+        "email": str(user_row["email"]),
         "deleted_uploads": int(purge_summary["deleted_uploads"]),
         "deleted_cases": int(purge_summary["deleted_cases"]),
         "rebuilt_cases": int(purge_summary["rebuilt_cases"]),

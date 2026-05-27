@@ -59,6 +59,16 @@ def _migrate_training_cases_payload_json(connection: sqlite3.Connection) -> None
     )
 
 
+def _migrate_training_case_tombstone_columns(connection: sqlite3.Connection) -> None:
+    _add_column_if_missing(
+        connection,
+        "training_cases",
+        "content_deleted_at",
+        "ALTER TABLE training_cases ADD COLUMN content_deleted_at TEXT",
+        "ALTER TABLE training_cases ADD COLUMN content_deleted_at VARCHAR(40) NULL",
+    )
+
+
 def _migrate_client_identity_tables(connection: sqlite3.Connection) -> None:
     try:
         connection.execute(
@@ -137,6 +147,13 @@ def _migrate_uploads_security_columns(connection: sqlite3.Connection) -> None:
         "ALTER TABLE uploads ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE uploads ADD COLUMN source_ip VARCHAR(80) NOT NULL DEFAULT ''",
     )
+    _add_column_if_missing(
+        connection,
+        "uploads",
+        "user_agent",
+        "ALTER TABLE uploads ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE uploads ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''",
+    )
     columns = _table_columns(connection, "uploads")
     if not columns:
         return
@@ -167,6 +184,7 @@ def _migrate_uploads_security_columns(connection: sqlite3.Connection) -> None:
                     status TEXT NOT NULL,
                     duplicate_of_upload_id INTEGER,
                     source_ip TEXT NOT NULL DEFAULT '',
+                    user_agent TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY (user_id) REFERENCES users(id),
                     FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
                     FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads__migration(id)
@@ -177,11 +195,11 @@ def _migrate_uploads_security_columns(connection: sqlite3.Connection) -> None:
                 """
                 INSERT INTO uploads__migration (
                     id, created_at, user_id, client_identity_id, original_file_name, stored_path,
-                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip
+                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip, user_agent
                 )
                 SELECT
                     id, created_at, user_id, client_identity_id, original_file_name, stored_path,
-                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip
+                    payload_sha256, case_count, size_bytes, status, duplicate_of_upload_id, source_ip, user_agent
                 FROM uploads
                 """
             )
@@ -472,6 +490,7 @@ def _migrate_training_case_identity_columns(connection: sqlite3.Connection) -> N
                     outcome TEXT NOT NULL DEFAULT '',
                     tag_ids_json TEXT NOT NULL DEFAULT '[]',
                     payload_json TEXT NOT NULL DEFAULT '{}',
+                    content_deleted_at TEXT,
                     FOREIGN KEY (created_by_user_id) REFERENCES users(id),
                     FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
                     FOREIGN KEY (source_upload_id) REFERENCES uploads(id)
@@ -482,11 +501,11 @@ def _migrate_training_case_identity_columns(connection: sqlite3.Connection) -> N
                 """
                 INSERT INTO training_cases__migration (
                     id, case_id, created_at, updated_at, created_by_user_id, created_by_client_identity_id,
-                    source_upload_id, status, label, outcome, tag_ids_json, payload_json
+                    source_upload_id, status, label, outcome, tag_ids_json, payload_json, content_deleted_at
                 )
                 SELECT
                     id, case_id, created_at, updated_at, created_by_user_id, created_by_client_identity_id,
-                    source_upload_id, status, label, outcome, tag_ids_json, payload_json
+                    source_upload_id, status, label, outcome, tag_ids_json, payload_json, content_deleted_at
                 FROM training_cases
                 """
             )

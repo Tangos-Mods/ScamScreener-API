@@ -193,3 +193,35 @@ def send_account_data_export_email(
 
     _send_message(settings, message)
 
+
+def send_account_deletion_email(
+    settings: TrainingHubSettings,
+    recipient_email: str,
+    username: str,
+    deleted_at: str,
+) -> None:
+    subject = "ScamScreener Account Deleted"
+    formatted_deleted_at = _format_utc_timestamp(deleted_at)
+    message = _build_email_message(
+        settings,
+        recipient_email=recipient_email,
+        subject=subject,
+        plain_text=(
+            "Your ScamScreener account was deleted by an administrator.\n\n"
+            f"Username: {username}\n"
+            f"Deleted at (UTC): {formatted_deleted_at}\n\n"
+            "If you believe this was a mistake, contact support."
+        ),
+        html_template_name="account_deletion_email.html",
+        html_context={
+            "subject": subject,
+            "site_label": _site_label(settings),
+            "site_url": settings.public_base_url,
+            "username": username,
+            "deleted_at": formatted_deleted_at,
+            "support_email": settings.smtp_from_email,
+        },
+    )
+
+    _send_message(settings, message)
+

@@ -22,6 +22,7 @@ BACKUP_TABLE_ORDER = [
     "users",
     "sessions",
     "client_identities",
+    "access_policies",
     "uploads",
     "training_runs",
     "training_cases",
@@ -72,6 +73,7 @@ BACKUP_TABLE_COLUMNS: dict[str, set[str]] = {
         "status",
         "duplicate_of_upload_id",
         "source_ip",
+        "user_agent",
     },
     "client_identities": {
         "id",
@@ -80,6 +82,12 @@ BACKUP_TABLE_COLUMNS: dict[str, set[str]] = {
         "linked_user_id",
         "linked_at",
         "last_seen_at",
+    },
+    "access_policies": {
+        "policy_key",
+        "policy_value",
+        "updated_at",
+        "updated_by_user_id",
     },
     "training_runs": {
         "id",
@@ -105,6 +113,7 @@ BACKUP_TABLE_COLUMNS: dict[str, set[str]] = {
         "outcome",
         "tag_ids_json",
         "payload_json",
+        "content_deleted_at",
     },
     "upload_cases": {
         "id",

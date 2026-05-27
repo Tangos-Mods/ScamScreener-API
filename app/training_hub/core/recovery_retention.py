@@ -176,6 +176,8 @@ def _monitoring_snapshot(settings: TrainingHubSettings) -> dict[str, Any]:
         users = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
         uploads = int(connection.execute("SELECT COUNT(*) FROM uploads").fetchone()[0])
         cases = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
+        approved_cases = int(connection.execute("SELECT COUNT(*) FROM training_cases WHERE status = 'approved'").fetchone()[0])
+        rejected_cases = int(connection.execute("SELECT COUNT(*) FROM training_cases WHERE status = 'rejected'").fetchone()[0])
         runs = int(connection.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0])
         audits = int(connection.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0])
 
@@ -230,6 +232,8 @@ def _monitoring_snapshot(settings: TrainingHubSettings) -> dict[str, Any]:
             "users": users,
             "uploads": uploads,
             "training_cases": cases,
+            "training_cases_approved": approved_cases,
+            "training_cases_rejected": rejected_cases,
             "training_runs": runs,
             "audit_logs": audits,
         },

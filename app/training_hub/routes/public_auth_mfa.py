@@ -23,7 +23,12 @@ from ..core.mfa import (
     _validate_login_challenge,
     _verify_passkey_authentication,
 )
-from .public_utils import logger, mask_email as _mask_email, request_meta as _request_meta
+from .public_utils import (
+    logger,
+    mask_email as _mask_email,
+    request_meta as _request_meta,
+    webauthn_request_context as _webauthn_request_context,
+)
 
 
 def _clear_login_cookie(response: RedirectResponse | JSONResponse, settings: TrainingHubSettings) -> None:
@@ -63,14 +68,6 @@ async def _json_body(request: Request) -> dict:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _webauthn_request_context(request: Request) -> tuple[str, str]:
-    rp_id = (request.url.hostname or "").strip().lower()
-    origin = (request.headers.get("origin") or "").strip().rstrip("/")
-    if not origin:
-        origin = str(request.base_url).rstrip("/")
-    return rp_id, origin
 
 
 def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
@@ -240,7 +237,7 @@ def register_public_auth_mfa_routes(app: FastAPI, settings: TrainingHubSettings)
             return JSONResponse({"detail": "Verification required."}, status_code=401)
 
         source_ip, user_agent = _request_meta(request, settings)
-        rp_id, origin = _webauthn_request_context(request)
+        rp_id, origin = _webauthn_request_context(request, settings)
         challenge_state = await run_in_threadpool(
             _validate_login_challenge,
             settings,

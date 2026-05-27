@@ -196,20 +196,38 @@ def _ingest_cases_from_upload(
     client_identity_id: int | None,
     upload_id: int,
     parsed_cases: list[dict[str, Any]],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     inserted = 0
     updated = 0
+    skipped_rejected = 0
     now = _now_utc_iso()
     with sqlite3.connect(database_path) as connection:
         connection.row_factory = sqlite3.Row
-        _upsert_upload_case_entries(connection, int(upload_id), parsed_cases)
+        accepted_payloads: list[dict[str, Any]] = []
+        existing_rows_by_case_id: dict[str, sqlite3.Row] = {}
         for payload in parsed_cases:
             case_id = str(payload.get("caseId", "")).strip()
             if not case_id:
                 raise HTTPException(status_code=400, detail="Case payload is missing caseId.")
+            existing = connection.execute(
+                "SELECT id, status, content_deleted_at FROM training_cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_rows_by_case_id[case_id] = existing
+                if (
+                    str(existing["status"] or "").strip().lower() == "rejected"
+                    and str(existing["content_deleted_at"] or "").strip()
+                ):
+                    skipped_rejected += 1
+                    continue
+            accepted_payloads.append(payload)
 
+        _upsert_upload_case_entries(connection, int(upload_id), accepted_payloads)
+        for payload in accepted_payloads:
+            case_id = str(payload.get("caseId", "")).strip()
             label, outcome, tags = _extract_case_fields(payload)
-            existing = connection.execute("SELECT id FROM training_cases WHERE case_id = ?", (case_id,)).fetchone()
+            existing = existing_rows_by_case_id.get(case_id)
             if existing is None:
                 connection.execute(
                     """
@@ -253,7 +271,7 @@ def _ingest_cases_from_upload(
                 )
                 updated += 1
         connection.commit()
-    return inserted, updated
+    return inserted, updated, skipped_rejected
 
 
 def _upsert_upload_case_entries(

@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from webauthn import (
     verify_authentication_response,
     verify_registration_response,
 )
+from webauthn.helpers.exceptions import WebAuthnException
 from webauthn.helpers.structs import (
     AuthenticatorSelectionCriteria,
     PublicKeyCredentialDescriptor,
@@ -34,12 +36,14 @@ from ..config.settings import TrainingHubSettings
 from ..infra import db as sqlite3
 from .common import _normalize_user_agent_for_binding, _now_utc_iso
 
+logger = logging.getLogger(__name__)
+
 LOGIN_CHALLENGE_COOKIE_NAME = "training_hub_login_challenge"
 TOTP_ENROLLMENT_TTL_MINUTES = 15
 WEBAUTHN_FLOW_TTL_MINUTES = 15
 TOTP_DIGITS = 6
 TOTP_PERIOD_SECONDS = 30
-TOTP_SKEW_STEPS = 1
+TOTP_SKEW_STEPS = 2
 BACKUP_CODE_COUNT = 10
 _BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 _BACKUP_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -438,13 +442,20 @@ def _totp_at(secret: str, timestamp: int) -> str:
     return str(code % (10**TOTP_DIGITS)).zfill(TOTP_DIGITS)
 
 
-def _verify_totp_secret(secret: str, submitted_code: str, now: datetime | None = None) -> bool:
+def _verify_totp_secret(
+    secret: str,
+    submitted_code: str,
+    now: datetime | None = None,
+    *,
+    skew_steps: int = TOTP_SKEW_STEPS,
+) -> bool:
     normalized_code = _normalize_totp_code(submitted_code)
     if not normalized_code:
         return False
     instant = now or datetime.now(timezone.utc)
     timestamp = int(instant.timestamp())
-    for step_offset in range(-TOTP_SKEW_STEPS, TOTP_SKEW_STEPS + 1):
+    bounded_skew_steps = max(0, int(skew_steps))
+    for step_offset in range(-bounded_skew_steps, bounded_skew_steps + 1):
         if hmac.compare_digest(_totp_at(secret, timestamp + (step_offset * TOTP_PERIOD_SECONDS)), normalized_code):
             return True
     return False
@@ -636,7 +647,7 @@ def _complete_login_challenge_with_code(
             ).fetchall()
             for row in totp_rows:
                 secret = _decrypt_value(str(row["encrypted_secret"]), settings.secret_key)
-                if _verify_totp_secret(secret, normalized_totp):
+                if _verify_totp_secret(secret, normalized_totp, skew_steps=settings.totp_skew_steps):
                     connection.execute(
                         "UPDATE user_totp_factors SET last_used_at = ? WHERE id = ?",
                         (_now_utc_iso(), int(row["id"])),
@@ -688,7 +699,7 @@ def _verify_user_step_up_code(settings: TrainingHubSettings, *, user_id: int, co
             ).fetchall()
             for row in totp_rows:
                 secret = _decrypt_value(str(row["encrypted_secret"]), settings.secret_key)
-                if _verify_totp_secret(secret, normalized_totp):
+                if _verify_totp_secret(secret, normalized_totp, skew_steps=settings.totp_skew_steps):
                     connection.execute(
                         "UPDATE user_totp_factors SET last_used_at = ? WHERE id = ?",
                         (_now_utc_iso(), int(row["id"])),
@@ -771,7 +782,7 @@ def _verify_totp_enrollment(
     if int(flow["user_id"]) != int(user_id):
         return {"ok": False, "error": "TOTP enrollment is invalid or expired.", "status_code": 403}
     secret = _decrypt_value(str(flow["payload"].get("encrypted_secret", "")), settings.secret_key)
-    if not _verify_totp_secret(secret, code):
+    if not _verify_totp_secret(secret, code, skew_steps=settings.totp_skew_steps):
         _increment_auth_flow_failures(settings, int(flow["id"]))
         return {"ok": False, "error": "Invalid authenticator code.", "status_code": 401}
 
@@ -954,7 +965,7 @@ def _generate_passkey_registration_options(
         user_display_name=str(state.get("email") or state.get("username") or f"user-{user_id}"),
         authenticator_selection=AuthenticatorSelectionCriteria(
             resident_key=ResidentKeyRequirement.REQUIRED,
-            user_verification=UserVerificationRequirement.REQUIRED,
+            user_verification=UserVerificationRequirement.PREFERRED,
         ),
         exclude_credentials=exclude_credentials,
         hints=[
@@ -1003,13 +1014,23 @@ def _verify_passkey_registration(
     if int(flow["user_id"]) != int(user_id):
         return {"ok": False, "error": "Passkey registration is invalid or expired.", "status_code": 403}
 
-    verified = verify_registration_response(
-        credential=credential,
-        expected_challenge=_urlsafe_b64decode(str(flow["payload"].get("challenge_b64", ""))),
-        expected_rp_id=_webauthn_flow_rp_id(settings, flow["payload"]),
-        expected_origin=_webauthn_flow_origins(settings, flow["payload"]),
-        require_user_verification=True,
-    )
+    try:
+        verified = verify_registration_response(
+            credential=credential,
+            expected_challenge=_urlsafe_b64decode(str(flow["payload"].get("challenge_b64", ""))),
+            expected_rp_id=_webauthn_flow_rp_id(settings, flow["payload"]),
+            expected_origin=_webauthn_flow_origins(settings, flow["payload"]),
+            require_user_verification=False,
+        )
+    except WebAuthnException as exception:
+        logger.warning(
+            "Passkey registration verification rejected for user_id=%s rp_id=%s origins=%s: %s",
+            int(user_id),
+            _webauthn_flow_rp_id(settings, flow["payload"]),
+            _webauthn_flow_origins(settings, flow["payload"]),
+            exception,
+        )
+        return {"ok": False, "error": "Passkey registration could not be verified.", "status_code": 400}
     credential_id = _urlsafe_b64encode(verified.credential_id)
     with sqlite3.connect(settings.database_path) as connection:
         existing = connection.execute(
@@ -1148,15 +1169,25 @@ def _verify_passkey_authentication(
         if passkey_row is None:
             return {"ok": False, "error": "Passkey is not registered for this account.", "status_code": 404}
 
-        verified = verify_authentication_response(
-            credential=credential,
-            expected_challenge=_urlsafe_b64decode(str(flow["payload"].get("challenge_b64", ""))),
-            expected_rp_id=_webauthn_flow_rp_id(settings, flow["payload"]),
-            expected_origin=_webauthn_flow_origins(settings, flow["payload"]),
-            credential_public_key=_urlsafe_b64decode(str(passkey_row["public_key"])),
-            credential_current_sign_count=int(passkey_row["sign_count"] or 0),
-            require_user_verification=True,
-        )
+        try:
+            verified = verify_authentication_response(
+                credential=credential,
+                expected_challenge=_urlsafe_b64decode(str(flow["payload"].get("challenge_b64", ""))),
+                expected_rp_id=_webauthn_flow_rp_id(settings, flow["payload"]),
+                expected_origin=_webauthn_flow_origins(settings, flow["payload"]),
+                credential_public_key=_urlsafe_b64decode(str(passkey_row["public_key"])),
+                credential_current_sign_count=int(passkey_row["sign_count"] or 0),
+                require_user_verification=True,
+            )
+        except WebAuthnException as exception:
+            logger.warning(
+                "Passkey authentication verification rejected for user_id=%s rp_id=%s origins=%s: %s",
+                int(passkey_row["user_id"]),
+                _webauthn_flow_rp_id(settings, flow["payload"]),
+                _webauthn_flow_origins(settings, flow["payload"]),
+                exception,
+            )
+            return {"ok": False, "error": "Passkey authentication could not be verified.", "status_code": 400}
         connection.execute(
             "UPDATE user_passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?",
             (int(verified.new_sign_count), _now_utc_iso(), int(passkey_row["id"])),

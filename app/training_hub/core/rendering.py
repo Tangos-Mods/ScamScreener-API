@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from urllib.parse import urlencode
 from typing import Any
 
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TrainingHubSettings
-from .admin_ops import _admin_audit_logs, _admin_cases, _admin_runs, _admin_users
+from .access_policies import _access_policies
+from .admin_ops import _admin_audit_logs, _admin_cases, _admin_runs, _admin_users, _normalize_admin_case_sort
 from .account_ops import _user_linked_client_identities
 from .data_exports import _user_data_export_requests
-from .mfa import _mfa_state, _user_passkeys, _user_totp_factors
+from .mfa import _mfa_state, _user_passkeys, _user_requires_admin_mfa_setup, _user_totp_factors
 from .recovery import _monitoring_snapshot
 from .session_auth import _user_active_sessions
 from .training_data import _user_uploads
@@ -52,6 +54,31 @@ def _legal_context(settings: TrainingHubSettings) -> dict[str, Any]:
         "retention_bundles_days": settings.retention_bundles_days,
         "retention_backups_days": settings.retention_backups_days,
         "retention_rate_limit_days": settings.retention_rate_limit_days,
+    }
+
+
+def _admin_case_sort_link(
+    filter_query: str,
+    current_sort_by: str,
+    current_sort_dir: str,
+    target_sort_by: str,
+) -> dict[str, str | bool]:
+    is_active = current_sort_by == target_sort_by
+    next_sort_dir = "desc" if is_active and current_sort_dir == "asc" else "asc"
+    params = {
+        "sort_by": target_sort_by,
+        "sort_dir": next_sort_dir,
+    }
+    if filter_query:
+        params["filter"] = filter_query
+    href = "/admin/cases?" + urlencode(params)
+    indicator = "↑" if is_active and current_sort_dir == "asc" else "↓" if is_active else "↕"
+    aria_sort = "ascending" if is_active and current_sort_dir == "asc" else "descending" if is_active else "none"
+    return {
+        "href": href,
+        "indicator": indicator,
+        "aria_sort": aria_sort,
+        "is_active": is_active,
     }
 
 
@@ -100,6 +127,9 @@ def _dashboard_context(
     sessions = _user_active_sessions(settings.database_path, int(user["id"]), current_session_id)
     data_export_requests = _user_data_export_requests(settings.database_path, int(user["id"]))
     linked_client_identities = _user_linked_client_identities(settings.database_path, int(user["id"]))
+    admin_navigation_locked = bool(
+        int(user.get("is_admin", 0)) == 1 and _user_requires_admin_mfa_setup(settings, int(user["id"]))
+    )
     return {
         "request": request,
         "notice": notice,
@@ -117,6 +147,7 @@ def _dashboard_context(
         "data_export_cooldown_minutes": settings.data_export_cooldown_minutes,
         "active_session_count": len(sessions),
         "linked_client_identity_count": len(linked_client_identities),
+        "admin_navigation_locked": admin_navigation_locked,
         "pending_export_count": len(
             [
                 row
@@ -178,6 +209,7 @@ def _account_context(
     action_values: dict[str, Any] | None = None,
     action_error: str = "",
 ) -> dict[str, Any]:
+    mfa_state = _mfa_state(settings, int(user["id"]))
     context = _dashboard_context(
         request,
         settings,
@@ -190,11 +222,12 @@ def _account_context(
     )
     context.update(
         {
-            "mfa_state": _mfa_state(settings, int(user["id"])),
+            "mfa_state": mfa_state,
             "totp_factors": _user_totp_factors(settings, int(user["id"])),
             "passkeys": _user_passkeys(settings, int(user["id"])),
             "generated_backup_codes": list(backup_codes or []),
             "pending_totp_enrollment": dict(pending_totp or {}),
+            "admin_navigation_locked": bool(int(user.get("is_admin", 0)) == 1 and mfa_state.get("admin_setup_required")),
         }
     )
     return context
@@ -248,16 +281,49 @@ def _admin_context(
     notice: str,
     error: str,
 ) -> dict[str, Any]:
+    access_policies = _access_policies(settings.database_path)
+    case_filter_query = str(request.query_params.get("filter", "") or "").strip() if request.url.path == "/admin/cases" else ""
+    raw_case_sort_by = str(request.query_params.get("sort_by", "") or "").strip() if request.url.path == "/admin/cases" else ""
+    raw_case_sort_dir = str(request.query_params.get("sort_dir", "") or "").strip() if request.url.path == "/admin/cases" else ""
+    case_sort_by, case_sort_dir = _normalize_admin_case_sort(raw_case_sort_by, raw_case_sort_dir)
     users = [dict(row) for row in _admin_users(settings.database_path)]
-    cases = [dict(row) for row in _admin_cases(settings.database_path)]
+    cases = [
+        dict(row)
+        for row in _admin_cases(
+            settings.database_path,
+            filter_query=case_filter_query,
+            sort_by=case_sort_by,
+            sort_dir=case_sort_dir,
+        )
+    ]
     runs = [dict(row) for row in _admin_runs(settings.database_path)]
     audit_logs = [dict(row) for row in _admin_audit_logs(settings.database_path)]
+    admin_navigation_locked = bool(
+        int(user.get("is_admin", 0)) == 1 and _user_requires_admin_mfa_setup(settings, int(user["id"]))
+    )
+    case_sort_links = {
+        "id": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "id"),
+        "case_id": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "case_id"),
+        "status": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "status"),
+        "label": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "label"),
+        "outcome": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "outcome"),
+        "updated": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "updated"),
+        "mod_version": _admin_case_sort_link(case_filter_query, case_sort_by, case_sort_dir, "mod_version"),
+    }
+    clear_case_filter_href = "/admin/cases?" + urlencode({"sort_by": case_sort_by, "sort_dir": case_sort_dir})
     return {
         "request": request,
         "notice": notice,
         "error": error,
         "current_user": user,
         "csrf_token": getattr(request.state, "csrf_token", ""),
+        "outbound_email_enabled": settings.outbound_email_enabled,
+        "access_policies": access_policies,
+        "case_filter_query": case_filter_query,
+        "case_sort_by": case_sort_by,
+        "case_sort_dir": case_sort_dir,
+        "case_sort_links": case_sort_links,
+        "clear_case_filter_href": clear_case_filter_href,
         "monitoring": _monitoring_snapshot(settings),
         "users": users,
         "cases": cases,
@@ -267,6 +333,7 @@ def _admin_context(
         "recent_cases": cases[:8],
         "recent_runs": runs[:6],
         "recent_audit_logs": audit_logs[:8],
+        "admin_navigation_locked": admin_navigation_locked,
     }
 
 

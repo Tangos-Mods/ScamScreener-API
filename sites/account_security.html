@@ -20,7 +20,7 @@
 {% endif %}
 
 {% if mfa_state.admin_setup_required %}
-    <section class="message warning" role="alert">
+    <section id="admin-mfa-setup" class="message warning" role="alert">
         Your admin account still uses the temporary email bridge. Set up Authenticator App or Passkey now to finish migration.
     </section>
 {% endif %}

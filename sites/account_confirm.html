@@ -114,7 +114,7 @@
 {% endblock %}
 
 {% block page_scripts %}
-{% if mfa_state.passkey_count > 0 %}
+{% if mfa_state.passkey_count > 0 or confirm_ready_for_passkey_registration %}
 <script src="/js/passkeys.js"></script>
 {% endif %}
 {% endblock %}

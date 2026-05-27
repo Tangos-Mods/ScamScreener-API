@@ -112,7 +112,11 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
         case_count = int(upload_result["case_count"])
         inserted_cases = int(upload_result["inserted_cases"])
         updated_cases = int(upload_result["updated_cases"])
+        skipped_rejected_cases = int(upload_result.get("skipped_rejected_cases", 0))
         refreshed_user = await run_in_threadpool(_refresh_user, settings.database_path, user_id) or user
+        skipped_notice = ""
+        if skipped_rejected_cases:
+            skipped_notice = f" Rejected-case tombstones skipped: {skipped_rejected_cases}."
         return await run_in_threadpool(
             _render_dashboard,
             request=request,
@@ -121,7 +125,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             user=refreshed_user,
             notice=(
                 f"Upload #{upload_id} accepted with {case_count} cases. "
-                f"Cases inserted: {inserted_cases}, updated: {updated_cases}."
+                f"Cases inserted: {inserted_cases}, updated: {updated_cases}.{skipped_notice}"
             ),
             status_code=201,
             page="uploads",

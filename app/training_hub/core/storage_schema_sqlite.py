@@ -10,6 +10,7 @@ from .storage_migrations import (
     _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
+    _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,
@@ -79,6 +80,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 status TEXT NOT NULL,
                 duplicate_of_upload_id INTEGER,
                 source_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads(id)
@@ -116,6 +118,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 outcome TEXT NOT NULL DEFAULT '',
                 tag_ids_json TEXT NOT NULL DEFAULT '[]',
                 payload_json TEXT NOT NULL DEFAULT '{}',
+                content_deleted_at TEXT,
                 FOREIGN KEY (created_by_user_id) REFERENCES users(id),
                 FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (source_upload_id) REFERENCES uploads(id)
@@ -276,6 +279,17 @@ def _init_database_sqlite(database_path: Path | str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS access_policies (
+                policy_key TEXT PRIMARY KEY,
+                policy_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by_user_id INTEGER,
+                FOREIGN KEY (updated_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
         _migrate_client_identity_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
@@ -284,6 +298,7 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         _migrate_admin_mfa_challenge_columns(connection)
         _migrate_mfa_tables(connection)
         _migrate_training_cases_payload_json(connection)
+        _migrate_training_case_tombstone_columns(connection)
         _migrate_training_case_identity_columns(connection)
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_uploads_user_sha ON uploads(user_id, payload_sha256)")
         connection.execute(

@@ -4,7 +4,9 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.training_hub.core.storage_migrations import (
+    _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
+    _migrate_uploads_security_columns,
     _migrate_users_security_columns,
 )
 
@@ -58,3 +60,53 @@ def test_migrate_users_security_columns_uses_show_columns_for_mariadb_targets() 
 
     assert "ALTER TABLE users ADD COLUMN failed_login_attempts INT NOT NULL DEFAULT 0" in connection.executed
     assert "ALTER TABLE users ADD COLUMN lockout_until VARCHAR(40)" in connection.executed
+
+
+def test_migrate_uploads_security_columns_adds_user_agent_for_mariadb_targets() -> None:
+    connection = _FakeMariaDbConnection(
+        {
+            "uploads": [
+                "id",
+                "created_at",
+                "user_id",
+                "client_identity_id",
+                "original_file_name",
+                "stored_path",
+                "payload_sha256",
+                "case_count",
+                "size_bytes",
+                "status",
+                "duplicate_of_upload_id",
+                "source_ip",
+            ]
+        }
+    )
+
+    _migrate_uploads_security_columns(connection)
+
+    assert "ALTER TABLE uploads ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''" in connection.executed
+
+
+def test_migrate_training_case_tombstone_columns_uses_mariadb_fallback_when_needed() -> None:
+    connection = _FakeMariaDbConnection(
+        {
+            "training_cases": [
+                "id",
+                "case_id",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_client_identity_id",
+                "source_upload_id",
+                "status",
+                "label",
+                "outcome",
+                "tag_ids_json",
+                "payload_json",
+            ]
+        }
+    )
+
+    _migrate_training_case_tombstone_columns(connection)
+
+    assert "ALTER TABLE training_cases ADD COLUMN content_deleted_at VARCHAR(40) NULL" in connection.executed

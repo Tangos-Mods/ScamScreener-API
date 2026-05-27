@@ -10,6 +10,7 @@ from .storage_migrations import (
     _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
+    _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,
@@ -79,6 +80,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 status VARCHAR(32) NOT NULL,
                 duplicate_of_upload_id BIGINT,
                 source_ip VARCHAR(80) NOT NULL DEFAULT '',
+                user_agent VARCHAR(300) NOT NULL DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id),
                 FOREIGN KEY (client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (duplicate_of_upload_id) REFERENCES uploads(id),
@@ -121,6 +123,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 outcome VARCHAR(64) NOT NULL DEFAULT '',
                 tag_ids_json LONGTEXT NOT NULL,
                 payload_json LONGTEXT NOT NULL,
+                content_deleted_at VARCHAR(40) NULL,
                 FOREIGN KEY (created_by_user_id) REFERENCES users(id),
                 FOREIGN KEY (created_by_client_identity_id) REFERENCES client_identities(id),
                 FOREIGN KEY (source_upload_id) REFERENCES uploads(id),
@@ -301,6 +304,17 @@ def _init_database_mariadb(database_path: Path | str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS access_policies (
+                policy_key VARCHAR(64) PRIMARY KEY,
+                policy_value VARCHAR(16) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL,
+                updated_by_user_id BIGINT NULL,
+                FOREIGN KEY (updated_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
         _migrate_client_identity_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
@@ -309,6 +323,7 @@ def _init_database_mariadb(database_path: Path | str) -> None:
         _migrate_admin_mfa_challenge_columns(connection)
         _migrate_mfa_tables(connection)
         _migrate_training_cases_payload_json(connection)
+        _migrate_training_case_tombstone_columns(connection)
         _migrate_training_case_identity_columns(connection)
         connection.commit()
 

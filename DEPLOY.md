@@ -564,6 +564,14 @@ Check:
 - `TRAINING_HUB_SMTP_FROM_EMAIL`
 - only one of `TRAINING_HUB_SMTP_USE_TLS` or `TRAINING_HUB_SMTP_USE_STARTTLS` is `true`
 
+### TOTP codes are rejected on the live server
+
+Check:
+
+- the server clock is synchronized correctly
+- the phone authenticator app time is synchronized correctly
+- `TRAINING_HUB_TOTP_SKEW_STEPS` is not set too low for your deployment
+
 ### First admin registration is blocked
 
 Check:

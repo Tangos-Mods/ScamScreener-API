@@ -9,6 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from ..config.settings import TrainingHubSettings
+from ..core.access_policies import ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN, _access_policies
 from ..core.common import _authorization_bearer_token
 from ..core.hub_core import (
     _consume_login_attempt,
@@ -162,6 +163,20 @@ def register_public_api_client_routes(app: FastAPI, settings: TrainingHubSetting
         user_row = await run_in_threadpool(_refresh_user, settings.database_path, actor_user_id)
         if user_row is None:
             raise HTTPException(status_code=404, detail="Account not found.")
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
+        if bool(policies.get(ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN)) and int(user_row["is_admin"]) != 1:
+            await run_in_threadpool(
+                _create_audit_log,
+                settings.database_path,
+                actor_user_id=actor_user_id,
+                action="auth.api.login.blocked_by_policy",
+                target_type="user",
+                target_id=actor_user_id,
+                details="Non-admin API login blocked by Disable Login policy.",
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+            raise HTTPException(status_code=403, detail="Login is currently disabled for non-admin accounts.")
         if settings.admin_mfa_required and int(user_row["is_admin"]) == 1:
             await run_in_threadpool(
                 _create_audit_log,
@@ -264,6 +279,7 @@ def register_public_api_client_routes(app: FastAPI, settings: TrainingHubSetting
                 "caseCount": int(upload_result["case_count"]),
                 "insertedCases": int(upload_result["inserted_cases"]),
                 "updatedCases": int(upload_result["updated_cases"]),
+                "skippedRejectedCases": int(upload_result.get("skipped_rejected_cases", 0)),
                 "sha256": str(upload_result.get("payload_sha256", "")),
             },
             status_code=201,
@@ -320,6 +336,7 @@ def register_public_api_client_routes(app: FastAPI, settings: TrainingHubSetting
                 "caseCount": int(upload_result["case_count"]),
                 "insertedCases": int(upload_result["inserted_cases"]),
                 "updatedCases": int(upload_result["updated_cases"]),
+                "skippedRejectedCases": int(upload_result.get("skipped_rejected_cases", 0)),
                 "sha256": payload_sha,
             },
             status_code=201,

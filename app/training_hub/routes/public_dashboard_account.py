@@ -46,7 +46,7 @@ from ..core.mfa import (
     _verify_totp_enrollment,
     _verify_user_step_up_code,
 )
-from .public_utils import request_meta as _request_meta
+from .public_utils import request_meta as _request_meta, webauthn_request_context as _webauthn_request_context
 
 ACCOUNT_CONFIRM_COOKIE_NAME = "training_hub_account_confirm"
 ACCOUNT_CONFIRM_TTL_MINUTES = 10
@@ -274,14 +274,6 @@ async def _json_body(request: Request) -> dict:
 
 def _account_security_redirect() -> RedirectResponse:
     return RedirectResponse(url="/account/security", status_code=303)
-
-
-def _webauthn_request_context(request: Request) -> tuple[str, str]:
-    rp_id = (request.url.hostname or "").strip().lower()
-    origin = (request.headers.get("origin") or "").strip().rstrip("/")
-    if not origin:
-        origin = str(request.base_url).rstrip("/")
-    return rp_id, origin
 
 
 def _action_values(**values: str) -> dict[str, str]:
@@ -1092,7 +1084,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
         )
         if not bool(flow.get("ok")) or int(flow.get("user_id", 0)) != int(user["id"]):
             return JSONResponse({"detail": "Confirmation required."}, status_code=401)
-        rp_id, origin = _webauthn_request_context(request)
+        rp_id, origin = _webauthn_request_context(request, settings)
         options_result = await run_in_threadpool(
             _generate_passkey_auth_options,
             settings,
@@ -1183,7 +1175,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
         if str(confirm_payload.get("action", "")).split(":", 1)[0] != "passkey-register" or not bool(confirm_payload.get("passkey_registration_ready")):
             return JSONResponse({"detail": "Passkey registration is not ready."}, status_code=409)
         label = str(dict(confirm_payload.get("values", {})).get("label", "Passkey"))
-        rp_id, origin = _webauthn_request_context(request)
+        rp_id, origin = _webauthn_request_context(request, settings)
         options_result = await run_in_threadpool(
             _generate_passkey_registration_options,
             settings,
@@ -1571,7 +1563,7 @@ def register_public_dashboard_account_routes(app: FastAPI, settings: TrainingHub
         if not bool(password_result.get("ok")):
             return JSONResponse({"detail": str(password_result.get("error", "Current password is incorrect."))}, status_code=int(password_result.get("status_code", 400)))
         source_ip, user_agent = _request_meta(request, settings)
-        rp_id, origin = _webauthn_request_context(request)
+        rp_id, origin = _webauthn_request_context(request, settings)
         options_result = await run_in_threadpool(
             _generate_passkey_registration_options,
             settings,

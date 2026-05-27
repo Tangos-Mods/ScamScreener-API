@@ -5,17 +5,26 @@ import re
 import sys
 import time
 import zipfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.training_hub.infra import db as training_db
-from app.training_hub.core.mfa import _generate_passkey_registration_options, _totp_at
+from app.training_hub.core.mfa import (
+    _generate_passkey_auth_options,
+    _generate_passkey_registration_options,
+    _verify_passkey_authentication,
+    _verify_passkey_registration,
+    _totp_at,
+)
 from app.training_hub.main import TrainingHubSettings, create_app
+from app.training_hub.routes.public_utils import webauthn_request_context
 
 CSRF_COOKIE_NAME = "training_hub_csrf"
 THEME_CSS_PATH = Path(__file__).resolve().parents[1] / "css" / "training-hub.css"
@@ -844,6 +853,24 @@ def test_admin_page_shows_colored_admin_status_indicators(tmp_path: Path) -> Non
     assert 'aria-label="Admin: no"' in admin_page.text
 
 
+def test_admin_user_page_shows_access_policy_switches(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    admin_page = client.get("/admin/users")
+
+    assert admin_page.status_code == 200
+    assert "Disable Login" in admin_page.text
+    assert "Disable Signup" in admin_page.text
+    assert 'role="switch"' in admin_page.text
+
+
 def test_non_admin_cannot_access_admin_page(tmp_path: Path) -> None:
     client = TestClient(create_app(_settings(tmp_path)))
 
@@ -876,6 +903,44 @@ def test_registration_closed_mode_blocks_new_users(tmp_path: Path) -> None:
     assert "Registration is currently disabled." in register.text
 
 
+def test_disable_signup_policy_blocks_registration_and_hides_register_link(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    policy_response = _post_form(
+        client,
+        "/admin/users/access-policy",
+        data={"policy_key": "disable_signup", "enabled": "1"},
+        follow_redirects=True,
+    )
+    assert policy_response.status_code == 200
+    assert "Disable Signup enabled." in policy_response.text
+
+    _post_form(client, "/logout", follow_redirects=True)
+
+    register_form = client.get("/register")
+    assert register_form.status_code == 403
+    assert "Sign up is currently disabled by an administrator." in register_form.text
+
+    login_form = client.get("/login")
+    assert login_form.status_code == 200
+    assert "Registration is currently closed." in login_form.text
+
+    register_submit = _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+    )
+    assert register_submit.status_code == 403
+    assert "Sign up is currently disabled by an administrator." in register_submit.text
+
+
 def test_registration_invite_mode_requires_valid_code(tmp_path: Path) -> None:
     settings = _settings(
         tmp_path,
@@ -900,6 +965,68 @@ def test_registration_invite_mode_requires_valid_code(tmp_path: Path) -> None:
     )
     assert valid.status_code == 200
     assert "Your Case Contributions" in valid.text
+
+
+def test_disable_login_policy_blocks_non_admin_web_and_api_login(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/register",
+        data={"username": "player", "email": "player@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "owner", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    policy_response = _post_form(
+        client,
+        "/admin/users/access-policy",
+        data={"policy_key": "disable_login_non_admin", "enabled": "1"},
+        follow_redirects=True,
+    )
+    assert policy_response.status_code == 200
+    assert "Disable Login enabled." in policy_response.text
+
+    _post_form(client, "/logout", follow_redirects=True)
+
+    blocked_login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "player", "password": "supersecret"},
+    )
+    assert blocked_login.status_code == 403
+    assert "Login is currently disabled for non-admin accounts." in blocked_login.text
+
+    admin_login = _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "owner", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    assert admin_login.status_code == 200
+    assert "Your Case Contributions" in admin_login.text
+
+    _post_form(client, "/logout", follow_redirects=True)
+    api_login = client.post(
+        "/api/v1/client/auth/login",
+        json={"usernameOrEmail": "player", "password": "supersecret"},
+    )
+    assert api_login.status_code == 403
+    assert api_login.json()["detail"] == "Login is currently disabled for non-admin accounts."
 
 
 def test_forgot_password_and_reset_flow(tmp_path: Path) -> None:
@@ -1298,11 +1425,32 @@ def test_admin_renders_workspace_sidebar_and_primary_controls(tmp_path: Path) ->
     assert "workspace-nav" in response.text
     assert "Admin" in response.text
     assert "Build Training Bundle" in response.text
+    assert "Delete Rejected" in response.text
     assert 'href="/admin/users"' in response.text
     assert 'href="/admin/system"' in response.text
     assert response.text.count('<details class="workspace-disclosure" open>') == 1
     assert re.search(r'href="/admin"[^>]*aria-current="page"', response.text) is not None
     assert "Choose a focused area" in response.text
+
+
+def test_admin_sidebar_shows_mfa_setup_entry_until_admin_migration_is_complete(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path, admin_mfa_required=True)))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    response = client.get("/account/security")
+
+    assert response.status_code == 200
+    assert "Finish MFA setup" in response.text
+    assert 'href="/account/security?notice=Complete+MFA+setup#admin-mfa-setup"' in response.text
+    assert "Unlock admin pages after adding an Authenticator App or Passkey." in response.text
+    assert 'href="/admin/users"' not in response.text
+    assert 'href="/admin/system"' not in response.text
 
 
 def test_admin_subpages_render_separate_operational_areas(tmp_path: Path) -> None:
@@ -1726,6 +1874,45 @@ def test_user_can_enable_totp_and_use_it_for_login(tmp_path: Path) -> None:
     assert "Your Case Contributions" in dashboard.text
 
 
+def test_totp_verification_accepts_one_minute_clock_drift_when_configured(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, totp_skew_steps=2)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    enrollment = _post_form(
+        client,
+        "/account/security/totp/enroll",
+        data={"current_password": "supersecret", "label": "Primary Authenticator"},
+    )
+    assert enrollment.status_code == 200
+
+    secret = _extract_pending_totp_secret(enrollment.text)
+    enrollment_token = _extract_hidden_input_value(enrollment.text, "enrollment_token")
+    drifted_code = _totp_at(secret, int(datetime.now(timezone.utc).timestamp()) - 60)
+
+    verified = _post_form(
+        client,
+        "/account/security/totp/verify",
+        data={"enrollment_token": enrollment_token, "code": drifted_code},
+    )
+    assert verified.status_code == 200
+    assert "Authenticator app verified and activated." in verified.text
+
+
 def test_backup_code_can_be_used_only_once_for_login(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
@@ -1936,6 +2123,100 @@ def test_passkey_registration_and_identifier_first_login(tmp_path: Path, monkeyp
     assert dashboard.status_code == 200
 
 
+def test_webauthn_request_context_uses_configured_rp_id_even_when_request_host_differs(tmp_path: Path) -> None:
+    settings = replace(
+        _settings(
+            tmp_path,
+            public_base_url="https://scamscreener.creepans.net",
+            enforce_origin_check=False,
+        ),
+        allowed_hosts={"testserver", "internal.local", "scamscreener.creepans.net"},
+        webauthn_rp_id="scamscreener.creepans.net",
+        webauthn_origins=("https://scamscreener.creepans.net",),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/login/passkey/options",
+            "raw_path": b"/login/passkey/options",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"internal.local"),
+                (b"origin", b"https://scamscreener.creepans.net"),
+                (b"referer", b"https://scamscreener.creepans.net/login"),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("internal.local", 80),
+        }
+    )
+
+    rp_id, origin = webauthn_request_context(request, settings)
+
+    assert rp_id == "scamscreener.creepans.net"
+    assert origin == "https://scamscreener.creepans.net"
+
+
+def test_passkey_authentication_verification_failure_returns_safe_error(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    create_app(settings)
+
+    with training_db.connect(settings.database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_passkeys (
+                created_at,
+                user_id,
+                label,
+                credential_id,
+                public_key,
+                sign_count,
+                aaguid,
+                credential_device_type,
+                backed_up,
+                last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "2026-01-01T00:00:00Z",
+                1,
+                "Laptop",
+                "credential-1",
+                "cHVibGljLWtleQ",
+                0,
+                "",
+                "multi_device",
+                1,
+            ),
+        )
+        connection.commit()
+
+    auth_options = _generate_passkey_auth_options(settings, user_id=1, purpose="passwordless-login")
+    assert auth_options["ok"] is True
+
+    from webauthn.helpers.exceptions import InvalidAuthenticationResponse
+
+    def _boom(**_kwargs):
+        raise InvalidAuthenticationResponse("Unexpected RP ID hash")
+
+    monkeypatch.setattr("app.training_hub.core.mfa.verify_authentication_response", _boom)
+
+    result = _verify_passkey_authentication(
+        settings,
+        flow_token=str(auth_options["flow_token"]),
+        credential={"id": "credential-1", "rawId": "credential-1", "type": "public-key", "response": {}},
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "Passkey authentication could not be verified.",
+        "status_code": 400,
+    }
+
+
 def test_discoverable_passkey_login_options_work_without_identifier(tmp_path: Path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
@@ -2036,10 +2317,41 @@ def test_account_confirm_password_flow_can_complete_totp_enrollment_start(tmp_pa
         client,
         "/account/confirm/password",
         data={"current_password": "supersecret"},
+        follow_redirects=True,
     )
     assert completed.status_code == 200
     assert "Authenticator setup created. Verify one code to activate it." in completed.text
     assert "Verify Authenticator App" in completed.text
+
+
+def test_account_confirm_passkey_registration_ready_page_loads_passkey_script_for_first_passkey(tmp_path: Path) -> None:
+    client = TestClient(create_app(_settings(tmp_path)))
+    _post_form(
+        client,
+        "/register",
+        data={"username": "alice", "email": "alice@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    start = _post_form(
+        client,
+        "/account/security/passkeys/register",
+        data={"label": "Chrome"},
+        follow_redirects=False,
+    )
+    assert start.status_code == 303
+    assert start.headers.get("location") == "/account/confirm"
+
+    completed = _post_form(
+        client,
+        "/account/confirm/password",
+        data={"current_password": "supersecret"},
+        follow_redirects=True,
+    )
+    assert completed.status_code == 200
+    assert "Authentication is complete. Finish the passkey registration on this device now." in completed.text
+    assert 'id="account_confirm_register_passkey_button"' in completed.text
+    assert '<script src="/js/passkeys.js"></script>' in completed.text
 
 
 def test_passkey_registration_options_require_discoverable_credentials(tmp_path: Path) -> None:
@@ -2062,7 +2374,82 @@ def test_passkey_registration_options_require_discoverable_credentials(tmp_path:
     public_key = json.loads(str(options["options_json"]))
     assert public_key["authenticatorSelection"]["residentKey"] == "required"
     assert public_key["authenticatorSelection"]["requireResidentKey"] is True
+    assert public_key["authenticatorSelection"]["userVerification"] == "preferred"
     assert public_key["hints"] == ["client-device", "hybrid", "security-key"]
+
+
+def test_user_can_register_multiple_distinct_passkeys(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    verified_credentials = [
+        SimpleNamespace(
+            credential_id=b"credential-1",
+            credential_public_key=b"public-key-1",
+            sign_count=0,
+            aaguid="",
+            credential_device_type="multi_device",
+            credential_backed_up=True,
+        ),
+        SimpleNamespace(
+            credential_id=b"credential-2",
+            credential_public_key=b"public-key-2",
+            sign_count=0,
+            aaguid="",
+            credential_device_type="multi_device",
+            credential_backed_up=True,
+        ),
+    ]
+
+    def _fake_verify_registration_response(**_kwargs):
+        assert verified_credentials
+        return verified_credentials.pop(0)
+
+    monkeypatch.setattr("app.training_hub.core.mfa.verify_registration_response", _fake_verify_registration_response)
+
+    first_options = _generate_passkey_registration_options(
+        settings,
+        user_id=1,
+        label="Chrome",
+        rp_id="testserver",
+        expected_origin="http://testserver",
+    )
+    first_result = _verify_passkey_registration(
+        settings,
+        user_id=1,
+        flow_token=str(first_options["token"]),
+        credential={"id": "credential-1"},
+    )
+    assert first_result == {"ok": True, "label": "Chrome"}
+
+    second_options = _generate_passkey_registration_options(
+        settings,
+        user_id=1,
+        label="iPhone",
+        rp_id="testserver",
+        expected_origin="http://testserver",
+    )
+    second_result = _verify_passkey_registration(
+        settings,
+        user_id=1,
+        flow_token=str(second_options["token"]),
+        credential={"id": "credential-2"},
+    )
+    assert second_result == {"ok": True, "label": "iPhone"}
+
+    with training_db.connect(settings.database_path) as connection:
+        count = int(connection.execute("SELECT COUNT(*) FROM user_passkeys WHERE user_id = 1").fetchone()[0])
+        labels = [row[0] for row in connection.execute("SELECT label FROM user_passkeys WHERE user_id = 1 ORDER BY id ASC").fetchall()]
+
+    assert count == 2
+    assert labels == ["Chrome", "iPhone"]
 
 
 def test_admin_user_with_registered_passkey_can_complete_generic_mfa_flow(tmp_path: Path, monkeypatch) -> None:
@@ -2303,6 +2690,117 @@ def test_admin_user_management_grant_and_revoke(tmp_path: Path) -> None:
         assert revoke_audit is not None
 
 
+def test_admin_user_management_can_delete_user_with_email_notification(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        smtp_host="mail.local",
+        smtp_port=1025,
+        smtp_from_email="no-reply@scamscreener.local",
+        smtp_use_starttls=False,
+    )
+    client = TestClient(create_app(settings))
+    delivered: list[tuple[str, str, str]] = []
+
+    def _fake_send_account_deletion_email(_settings, recipient_email: str, username: str, deleted_at: str) -> None:
+        delivered.append((recipient_email, username, deleted_at))
+
+    monkeypatch.setattr("app.training_hub.routes.admin_users.send_account_deletion_email", _fake_send_account_deletion_email)
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "owner", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    with training_db.connect(settings.database_path) as connection:
+        bob_id = int(connection.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0])
+
+    users_page = client.get("/admin/users")
+    assert users_page.status_code == 200
+    assert f"/admin/users/{bob_id}/delete" in users_page.text
+    assert "Send the user an email notification about the deletion." in users_page.text
+
+    delete_response = _post_form(
+        client,
+        f"/admin/users/{bob_id}/delete",
+        data={"confirm_delete": "yes", "notify_user_email": "yes"},
+        follow_redirects=True,
+    )
+    assert delete_response.status_code == 200
+    assert "Deleted user bob." in delete_response.text
+    assert "Notification email sent to bob@example.com." in delete_response.text
+
+    assert len(delivered) == 1
+    assert delivered[0][0] == "bob@example.com"
+    assert delivered[0][1] == "bob"
+
+    with training_db.connect(settings.database_path) as connection:
+        bob_row = connection.execute("SELECT id FROM users WHERE id = ?", (bob_id,)).fetchone()
+        delete_audit = connection.execute(
+            "SELECT id FROM audit_logs WHERE action = 'user.delete' AND target_id = ?",
+            (bob_id,),
+        ).fetchone()
+        email_audit = connection.execute(
+            "SELECT id FROM audit_logs WHERE action = 'user.delete.email.sent' AND target_id = ?",
+            (bob_id,),
+        ).fetchone()
+        assert bob_row is None
+        assert delete_audit is not None
+        assert email_audit is not None
+
+
+def test_admin_user_management_delete_requires_server_side_confirmation(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "owner", "email": "owner@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/register",
+        data={"username": "bob", "email": "bob@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(client, "/logout", follow_redirects=True)
+    _post_form(
+        client,
+        "/login",
+        data={"username_or_email": "owner", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    with training_db.connect(settings.database_path) as connection:
+        bob_id = int(connection.execute("SELECT id FROM users WHERE username = 'bob'").fetchone()[0])
+
+    delete_response = _post_form(client, f"/admin/users/{bob_id}/delete", data={}, follow_redirects=True)
+    assert delete_response.status_code == 400
+    assert "Confirm the deletion before removing the user account." in delete_response.text
+
+    with training_db.connect(settings.database_path) as connection:
+        bob_row = connection.execute("SELECT id FROM users WHERE id = ?", (bob_id,)).fetchone()
+        assert bob_row is not None
+
+
 def test_admin_pages_show_case_list_and_audit_log_on_their_separate_views(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
@@ -2329,7 +2827,7 @@ def test_admin_pages_show_case_list_and_audit_log_on_their_separate_views(tmp_pa
     assert "upload.accepted" in system_page.text
 
 
-def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
+def test_admin_overview_shows_case_status_breakdown(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     client = TestClient(create_app(settings))
 
@@ -2342,7 +2840,298 @@ def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
     _post_form(
         client,
         "/dashboard/upload",
-        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(case_id="case_overview_approved"), "application/x-ndjson")},
+    )
+    _post_form(client, "/admin/cases/1/status", data={"action": "approve"}, follow_redirects=True)
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(case_id="case_overview_rejected"), "application/x-ndjson")},
+    )
+    _post_form(client, "/admin/cases/2/status", data={"action": "reject"}, follow_redirects=True)
+
+    admin_page = client.get("/admin")
+
+    assert admin_page.status_code == 200
+    assert "Approved: 1" in admin_page.text
+    assert "Rejected: 1" in admin_page.text
+
+
+def test_admin_cases_page_shows_short_case_id_label_badges_and_mod_version(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(case_id="case.05f94929-2994-4f23-ae6f-7571ac74a63e.review-3", label="risk", outcome="review"),
+                "application/x-ndjson",
+            )
+        },
+        headers={"User-Agent": "ScamScreener/1.4.2+1.20.6"},
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(case_id="case.5dfeb993-0f9f-4e19-91e6-26df33d0caa1.review-2", label="safe", outcome="safe"),
+                "application/x-ndjson",
+            )
+        },
+        headers={"User-Agent": "ScamScreener/2.0.0+1.21.1"},
+    )
+
+    cases_page = client.get("/admin/cases")
+
+    assert cases_page.status_code == 200
+    assert "05f94929-3" in cases_page.text
+    assert "5dfeb993-2" in cases_page.text
+    assert "case.05f94929-2994-4f23-ae6f-7571ac74a63e.review-3" not in cases_page.text
+    assert "Created By" not in cases_page.text
+    assert "Mod Version" in cases_page.text
+    assert "1.4.2 1.20.6" in cases_page.text
+    assert "2.0.0 1.21.1" in cases_page.text
+    assert "chip-label-risk" in cases_page.text
+    assert "chip-label-safe" in cases_page.text
+
+
+def test_admin_cases_page_filters_by_status_label_and_message_text(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(
+                    case_id="case_filter_submitted",
+                    label="safe",
+                    outcome="review",
+                    messages='["i am legit"]',
+                ),
+                "application/x-ndjson",
+            )
+        },
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(
+                    case_id="case_filter_approved",
+                    label="risk",
+                    outcome="review",
+                    messages='["discord carry scam"]',
+                ),
+                "application/x-ndjson",
+            )
+        },
+    )
+    _post_form(client, "/admin/cases/2/status", data={"action": "approve"}, follow_redirects=True)
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(
+                    case_id="case_filter_rejected",
+                    label="risk",
+                    outcome="review",
+                    messages='["totally harmless"]',
+                ),
+                "application/x-ndjson",
+            )
+        },
+    )
+    _post_form(client, "/admin/cases/3/status", data={"action": "reject"}, follow_redirects=True)
+
+    status_filtered = client.get("/admin/cases?filter=status:submitted")
+    assert status_filtered.status_code == 200
+    assert 'value="status:submitted"' in status_filtered.text
+    assert 'role="combobox"' in status_filtered.text
+    assert 'data-case-filter-suggestions' in status_filtered.text
+    assert "case_filter_submitted" in status_filtered.text
+    assert "case_filter_approved" not in status_filtered.text
+    assert "case_filter_rejected" not in status_filtered.text
+
+    label_filtered = client.get("/admin/cases?filter=label:safe")
+    assert label_filtered.status_code == 200
+    assert "case_filter_submitted" in label_filtered.text
+    assert "case_filter_approved" not in label_filtered.text
+    assert "case_filter_rejected" not in label_filtered.text
+
+    text_filtered = client.get("/admin/cases?filter=i%20am%20legit")
+    assert text_filtered.status_code == 200
+    assert "case_filter_submitted" in text_filtered.text
+    assert "case_filter_approved" not in text_filtered.text
+    assert "case_filter_rejected" not in text_filtered.text
+
+
+def test_admin_cases_page_sorts_columns_ascending_and_descending(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    for case_id in ("case_sort_c", "case_sort_a", "case_sort_b"):
+        _post_form(
+            client,
+            "/dashboard/upload",
+            files={
+                "training_file": (
+                    "training-cases-v2.jsonl",
+                    _valid_payload(case_id=case_id, label="safe", outcome="review"),
+                    "application/x-ndjson",
+                )
+            },
+        )
+
+    ascending = client.get("/admin/cases?sort_by=case_id&sort_dir=asc")
+    assert ascending.status_code == 200
+    assert 'href="/admin/cases?sort_by=case_id&amp;sort_dir=desc"' in ascending.text
+    assert ascending.text.index("case_sort_a") < ascending.text.index("case_sort_b") < ascending.text.index("case_sort_c")
+
+    descending = client.get("/admin/cases?sort_by=case_id&sort_dir=desc")
+    assert descending.status_code == 200
+    assert 'href="/admin/cases?sort_by=case_id&amp;sort_dir=asc"' in descending.text
+    assert descending.text.index("case_sort_c") < descending.text.index("case_sort_b") < descending.text.index("case_sort_a")
+
+
+def test_delete_rejected_hides_cases_and_preserves_tombstone_block_on_reupload(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+
+    rejected_case_id = "case_deleted_rejected_0001"
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(case_id=rejected_case_id, label="risk", outcome="review"), "application/x-ndjson")},
+    )
+    _post_form(client, "/admin/cases/1/status", data={"action": "reject"}, follow_redirects=True)
+
+    deleted = _post_form(
+        client,
+        "/admin/cases/rejected/delete",
+        data={},
+        follow_redirects=True,
+    )
+    assert deleted.status_code == 200
+    assert "Deleted content for 1 rejected cases and kept their case IDs blocked." in deleted.text
+
+    cases_page = client.get("/admin/cases")
+    assert cases_page.status_code == 200
+    assert rejected_case_id not in cases_page.text
+
+    with training_db.connect(settings.database_path) as connection:
+        tombstone = connection.execute(
+            "SELECT case_id, status, label, outcome, tag_ids_json, payload_json, source_upload_id, content_deleted_at FROM training_cases WHERE id = 1"
+        ).fetchone()
+        upload_case_count = int(connection.execute("SELECT COUNT(*) FROM upload_cases WHERE case_id = ?", (rejected_case_id,)).fetchone()[0])
+        assert tombstone is not None
+        assert str(tombstone[0]) == rejected_case_id
+        assert str(tombstone[1]) == "rejected"
+        assert str(tombstone[2]) == ""
+        assert str(tombstone[3]) == ""
+        assert str(tombstone[4]) == "[]"
+        assert str(tombstone[5]) == "{}"
+        assert tombstone[6] is None
+        assert str(tombstone[7]) != ""
+        assert upload_case_count == 0
+
+    reupload = _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(case_id=rejected_case_id, label="safe", outcome="safe"), "application/x-ndjson")},
+        follow_redirects=True,
+    )
+    assert reupload.status_code == 201
+    assert "Rejected-case tombstones skipped: 1." in reupload.text
+
+    cases_page_after = client.get("/admin/cases")
+    assert cases_page_after.status_code == 200
+    assert rejected_case_id not in cases_page_after.text
+
+    with training_db.connect(settings.database_path) as connection:
+        tombstone_after = connection.execute(
+            "SELECT status, label, outcome, payload_json, content_deleted_at FROM training_cases WHERE id = 1"
+        ).fetchone()
+        upload_case_count_after = int(connection.execute("SELECT COUNT(*) FROM upload_cases WHERE case_id = ?", (rejected_case_id,)).fetchone()[0])
+        case_row_count = int(connection.execute("SELECT COUNT(*) FROM training_cases WHERE case_id = ?", (rejected_case_id,)).fetchone()[0])
+        assert tombstone_after is not None
+        assert str(tombstone_after[0]) == "rejected"
+        assert str(tombstone_after[1]) == ""
+        assert str(tombstone_after[2]) == ""
+        assert str(tombstone_after[3]) == "{}"
+        assert str(tombstone_after[4]) != ""
+        assert upload_case_count_after == 0
+        assert case_row_count == 1
+
+
+def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+    messages = (
+        '[{"index":0,"role":"other","text":"joo wassup"},'
+        '{"index":1,"role":"other","text":"i am legit"},'
+        '{"index":2,"role":"other","text":"trust me"},'
+        '{"index":3,"role":"other","text":"its a legit middleman"}]'
+    )
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={
+            "training_file": (
+                "training-cases-v2.jsonl",
+                _valid_payload(
+                    messages=messages,
+                    signal_message_indices="[2,3]",
+                    context_message_indices="[1]",
+                    excluded_message_indices="[0]",
+                ),
+                "application/x-ndjson",
+            )
+        },
     )
 
     detail = client.get("/admin/cases/1")
@@ -2352,6 +3141,10 @@ def test_admin_case_detail_page_is_readable(tmp_path: Path) -> None:
     assert "Conversation" in detail.text
     assert "Stage Results" in detail.text
     assert "case_000001" in detail.text
+    assert "Excluded" in detail.text
+    assert "Context" in detail.text
+    assert "Signal" in detail.text
+    assert "OTHER" not in detail.text
 
 
 def test_dashboard_and_admin_core_controls_remain_visible_after_reskin(tmp_path: Path) -> None:
@@ -2465,6 +3258,168 @@ def test_admin_can_delete_case_from_detail_page(tmp_path: Path) -> None:
     with training_db.connect(settings.database_path) as connection:
         case_count = int(connection.execute("SELECT COUNT(*) FROM training_cases").fetchone()[0])
         assert case_count == 0
+
+
+def test_admin_case_detail_page_shows_approve_and_reject_actions(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
+    )
+
+    detail = client.get("/admin/cases/1")
+
+    assert detail.status_code == 200
+    assert "Approve Case" in detail.text
+    assert "Reject Case" in detail.text
+    assert ("Mark Risk" in detail.text) or ("Mark Safe" in detail.text)
+    assert 'action="/admin/cases/1/status"' in detail.text
+    assert 'action="/admin/cases/1/label"' in detail.text
+
+
+def test_admin_can_approve_case_from_detail_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
+    )
+
+    approved = _post_form(
+        client,
+        "/admin/cases/1/status",
+        data={"action": "approve"},
+        follow_redirects=True,
+    )
+
+    assert approved.status_code == 200
+    assert "Approved case case_000001." in approved.text
+
+    with training_db.connect(settings.database_path) as connection:
+        case_row = connection.execute("SELECT status FROM training_cases WHERE id = 1").fetchone()
+        audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'case.approved' LIMIT 1").fetchone()
+        assert case_row is not None
+        assert str(case_row[0]) == "approved"
+        assert audit is not None
+
+
+def test_admin_can_reject_case_from_detail_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(), "application/x-ndjson")},
+    )
+
+    rejected = _post_form(
+        client,
+        "/admin/cases/1/status",
+        data={"action": "reject"},
+        follow_redirects=True,
+    )
+
+    assert rejected.status_code == 200
+    assert "Rejected case case_000001." in rejected.text
+
+    with training_db.connect(settings.database_path) as connection:
+        case_row = connection.execute("SELECT status FROM training_cases WHERE id = 1").fetchone()
+        audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'case.rejected' LIMIT 1").fetchone()
+        assert case_row is not None
+        assert str(case_row[0]) == "rejected"
+        assert audit is not None
+
+
+def test_admin_can_mark_case_safe_from_detail_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(label="risk"), "application/x-ndjson")},
+    )
+
+    marked = _post_form(
+        client,
+        "/admin/cases/1/label",
+        data={"action": "mark-safe"},
+        follow_redirects=True,
+    )
+
+    assert marked.status_code == 200
+    assert "Marked case case_000001 as safe." in marked.text
+
+    with training_db.connect(settings.database_path) as connection:
+        case_row = connection.execute("SELECT label FROM training_cases WHERE id = 1").fetchone()
+        audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'case.label.safe' LIMIT 1").fetchone()
+        assert case_row is not None
+        assert str(case_row[0]) == "safe"
+        assert audit is not None
+
+
+def test_admin_can_mark_case_risk_from_detail_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    _post_form(
+        client,
+        "/register",
+        data={"username": "dev", "email": "dev@example.com", "password": "supersecret"},
+        follow_redirects=True,
+    )
+    _post_form(
+        client,
+        "/dashboard/upload",
+        files={"training_file": ("training-cases-v2.jsonl", _valid_payload(label="safe"), "application/x-ndjson")},
+    )
+
+    marked = _post_form(
+        client,
+        "/admin/cases/1/label",
+        data={"action": "mark-risk"},
+        follow_redirects=True,
+    )
+
+    assert marked.status_code == 200
+    assert "Marked case case_000001 as risk." in marked.text
+
+    with training_db.connect(settings.database_path) as connection:
+        case_row = connection.execute("SELECT label FROM training_cases WHERE id = 1").fetchone()
+        audit = connection.execute("SELECT id FROM audit_logs WHERE action = 'case.label.risk' LIMIT 1").fetchone()
+        assert case_row is not None
+        assert str(case_row[0]) == "risk"
+        assert audit is not None
 
 
 def test_admin_can_create_and_restore_backup(tmp_path: Path) -> None:
@@ -3397,6 +4352,7 @@ def _settings(
     admin_mfa_required: bool = False,
     admin_mfa_ttl_minutes: int = 30,
     admin_mfa_max_attempts: int = 5,
+    totp_skew_steps: int = 2,
     retention_sessions_days: int = 30,
     retention_password_reset_days: int = 7,
     retention_audit_logs_days: int = 180,
@@ -3448,6 +4404,7 @@ def _settings(
         admin_mfa_required=admin_mfa_required,
         admin_mfa_ttl_minutes=admin_mfa_ttl_minutes,
         admin_mfa_max_attempts=admin_mfa_max_attempts,
+        totp_skew_steps=totp_skew_steps,
         webauthn_rp_id="testserver",
         webauthn_rp_name="ScamScreener",
         webauthn_origins=("http://testserver",),
@@ -3573,11 +4530,15 @@ def _valid_payload(
     case_id: str = "case_000001",
     label: str = "risk",
     outcome: str = "review",
+    messages: str = "[]",
+    signal_message_indices: str = "[]",
+    context_message_indices: str = "[]",
+    excluded_message_indices: str = "[]",
 ) -> str:
     return (
         f'{{"format":"training_case_v2","schemaVersion":2,"caseId":"{case_id}",'
-        f'"caseData":{{"label":"{label}","messages":[],"caseSignalTagIds":[]}},'
+        f'"caseData":{{"label":"{label}","messages":{messages},"caseSignalTagIds":[]}},'
         f'"observedPipeline":{{"scoreAtCapture":0,"outcomeAtCapture":"{outcome}","decidedByStageId":"stage.rule","stageResults":[]}},'
-        '"supervision":{"contextStage":{"targetLabel":"risk","signalMessageIndices":[],"contextMessageIndices":[],"excludedMessageIndices":[],"targetSignalTagIds":[]},'
+        f'"supervision":{{"contextStage":{{"targetLabel":"risk","signalMessageIndices":{signal_message_indices},"contextMessageIndices":{context_message_indices},"excludedMessageIndices":{excluded_message_indices},"targetSignalTagIds":[]}},'
         '"fixedStageCalibrations":[]}}'
     )

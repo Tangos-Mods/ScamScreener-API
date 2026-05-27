@@ -185,12 +185,18 @@ def _rate_limit_rule(
             return "admin.train", 4, 600
         if path == "/admin/retention/run":
             return "admin.retention", 4, 600
+        if path == "/admin/cases/rejected/delete":
+            return "admin.case-rejected-delete", 4, 600
         if path == "/admin/backups/create":
             return "admin.backup-create", 4, 600
         if path == "/admin/backups/restore":
             return "admin.backup-restore", 2, 600
         if path.startswith("/admin/users/") and path.endswith("/admin"):
             return "admin.user-role", 30, 600
+        if path == "/admin/users/access-policy":
+            return "admin.user-access-policy", 20, 600
+        if path.startswith("/admin/users/") and path.endswith("/delete"):
+            return "admin.user-delete", 20, 600
         if path.startswith("/admin/cases/") and path.endswith("/delete"):
             return "admin.case-delete", 40, 600
         return None

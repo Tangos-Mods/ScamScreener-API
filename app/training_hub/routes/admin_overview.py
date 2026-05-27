@@ -4,7 +4,14 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..core.hub_core import _create_audit_log, _render_admin, _run_retention_cleanup, _run_training_pipeline, _validate_csrf_token
+from ..core.hub_core import (
+    _create_audit_log,
+    _delete_rejected_training_case_content,
+    _render_admin,
+    _run_retention_cleanup,
+    _run_training_pipeline,
+    _validate_csrf_token,
+)
 from ..config.settings import TrainingHubSettings
 from .admin_utils import request_meta as _request_meta
 
@@ -164,6 +171,49 @@ def register_admin_overview_routes(app: FastAPI, settings: TrainingHubSettings) 
             settings.database_path,
             actor_user_id=int(user["id"]),
             action="retention.cleanup.completed",
+            target_type="system",
+            target_id=None,
+            details=summary,
+            source_ip=source_ip,
+            user_agent=user_agent,
+        )
+        return await run_in_threadpool(
+            _render_admin,
+            request=request,
+            templates=app.state.templates,
+            settings=settings,
+            user=user,
+            notice=summary,
+            page="overview",
+        )
+
+    @app.post("/admin/cases/rejected/delete", response_class=HTMLResponse)
+    async def admin_delete_rejected_cases(request: Request, csrf_token: str = Form(...)):
+        user, redirect = _require_admin(request)
+        if redirect is not None:
+            return redirect
+        _validate_csrf_token(request, csrf_token)
+
+        result = await run_in_threadpool(_delete_rejected_training_case_content, settings.database_path)
+        deleted_cases = int(result.get("deleted_cases", 0))
+        if deleted_cases == 0:
+            return await run_in_threadpool(
+                _render_admin,
+                request=request,
+                templates=app.state.templates,
+                settings=settings,
+                user=user,
+                notice="No rejected cases required cleanup.",
+                page="overview",
+            )
+
+        summary = f"Deleted content for {deleted_cases} rejected cases and kept their case IDs blocked."
+        source_ip, user_agent = _request_meta(request, settings)
+        await run_in_threadpool(
+            _create_audit_log,
+            settings.database_path,
+            actor_user_id=int(user["id"]),
+            action="case.rejected.content_deleted",
             target_type="system",
             target_id=None,
             details=summary,

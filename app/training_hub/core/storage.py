@@ -11,6 +11,7 @@ from .storage_migrations import (
     _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
+    _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,

@@ -14,6 +14,10 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-outline-secondary">Run Retention Cleanup</button>
     </form>
+    <form method="post" action="/admin/cases/rejected/delete" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-outline-danger">Delete Rejected</button>
+    </form>
 {% endblock %}
 
 {% block content %}
@@ -40,6 +44,7 @@
     <article class="overview-stat">
         <span>Cases</span>
         <strong>{{ monitoring.totals.training_cases }}</strong>
+        <p class="overview-stat-detail">Approved: {{ monitoring.totals.training_cases_approved }} · Rejected: {{ monitoring.totals.training_cases_rejected }}</p>
     </article>
     <article class="overview-stat">
         <span>Runs</span>

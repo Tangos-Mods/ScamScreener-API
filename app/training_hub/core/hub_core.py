@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 # Backward-compatible facade for existing imports.
+from .access_policies import (
+    ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN,
+    ACCESS_POLICY_DISABLE_SIGNUP,
+    _access_policies,
+    _effective_registration_mode,
+    _set_access_policy,
+)
 from .admin_ops import (
     _admin_audit_logs,
     _admin_case_detail,
@@ -9,7 +16,10 @@ from .admin_ops import (
     _admin_user_count,
     _admin_users,
     _create_audit_log,
+    _delete_rejected_training_case_content,
     _delete_training_case,
+    _update_training_case_label,
+    _update_training_case_status,
     _normalize_case_messages,
     _normalize_int_list,
     _normalize_stage_results,
@@ -86,6 +96,7 @@ from .storage import (
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
     _migrate_password_reset_token_columns,
+    _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
     _migrate_users_security_columns,

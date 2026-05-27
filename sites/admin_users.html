@@ -27,6 +27,44 @@
             <p class="section-kicker">Access control</p>
             <h2>Users</h2>
         </div>
+        <div class="admin-policy-switches" aria-label="Global access controls">
+            <form method="post" action="/admin/users/access-policy" class="admin-policy-switch-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="policy_key" value="disable_login_non_admin">
+                <input type="hidden" name="enabled" value="{% if access_policies.disable_login_non_admin %}0{% else %}1{% endif %}">
+                <button
+                    type="submit"
+                    class="admin-policy-switch{% if access_policies.disable_login_non_admin %} is-active{% endif %}"
+                    role="switch"
+                    aria-checked="{% if access_policies.disable_login_non_admin %}true{% else %}false{% endif %}"
+                >
+                    <span class="admin-policy-switch-copy">
+                        <span class="admin-policy-switch-label">Disable Login</span>
+                    </span>
+                    <span class="admin-policy-switch-track" aria-hidden="true">
+                        <span class="admin-policy-switch-thumb"></span>
+                    </span>
+                </button>
+            </form>
+            <form method="post" action="/admin/users/access-policy" class="admin-policy-switch-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="policy_key" value="disable_signup">
+                <input type="hidden" name="enabled" value="{% if access_policies.disable_signup %}0{% else %}1{% endif %}">
+                <button
+                    type="submit"
+                    class="admin-policy-switch{% if access_policies.disable_signup %} is-active{% endif %}"
+                    role="switch"
+                    aria-checked="{% if access_policies.disable_signup %}true{% else %}false{% endif %}"
+                >
+                    <span class="admin-policy-switch-copy">
+                        <span class="admin-policy-switch-label">Disable Signup</span>
+                    </span>
+                    <span class="admin-policy-switch-track" aria-hidden="true">
+                        <span class="admin-policy-switch-thumb"></span>
+                    </span>
+                </button>
+            </form>
+        </div>
     </div>
     <div class="table-shell">
         <table class="table align-middle mb-0">
@@ -63,18 +101,77 @@
                         <td>
                             {% if row.id == current_user.id %}
                                 <span class="muted">current user</span>
-                            {% elif row.is_admin == 1 %}
-                                <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
-                                    <input type="hidden" name="action" value="revoke">
-                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                    <button type="submit" class="btn btn-outline-secondary btn-sm">Revoke</button>
-                                </form>
                             {% else %}
-                                <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
-                                    <input type="hidden" name="action" value="grant">
-                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                    <button type="submit" class="btn btn-outline-primary btn-sm">Grant</button>
-                                </form>
+                                <div class="table-actions admin-user-actions">
+                                    {% if row.is_admin == 1 %}
+                                        <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
+                                            <input type="hidden" name="action" value="revoke">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                            <button type="submit" class="btn btn-outline-secondary btn-sm">Revoke</button>
+                                        </form>
+                                    {% else %}
+                                        <form method="post" action="/admin/users/{{ row.id }}/admin" class="inline-form">
+                                            <input type="hidden" name="action" value="grant">
+                                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                            <button type="submit" class="btn btn-outline-primary btn-sm">Grant</button>
+                                        </form>
+                                    {% endif %}
+                                    <details class="admin-action-popover">
+                                        <summary
+                                            class="icon-action-button icon-action-button-danger"
+                                            aria-label="Delete user {{ row.username }}"
+                                            title="Delete user {{ row.username }}"
+                                        >
+                                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                                <path d="M9 3.75h6a1.75 1.75 0 0 1 1.75 1.75V6h3a.75.75 0 0 1 0 1.5h-1.03l-.84 11.3A2.75 2.75 0 0 1 15.14 21H8.86a2.75 2.75 0 0 1-2.74-2.2L5.28 7.5H4.25a.75.75 0 0 1 0-1.5h3v-.5A1.75 1.75 0 0 1 9 3.75Zm6.25 2.25v-.5a.25.25 0 0 0-.25-.25H9a.25.25 0 0 0-.25.25V6h6.5ZM6.78 7.5l.82 11.19c.04.42.39.81 1.26.81h6.28c.87 0 1.22-.39 1.26-.82l.82-11.18H6.78Zm3.47 2.25c.41 0 .75.34.75.75v5.5a.75.75 0 0 1-1.5 0v-5.5c0-.41.34-.75.75-.75Zm3.5 0c.41 0 .75.34.75.75v5.5a.75.75 0 0 1-1.5 0v-5.5c0-.41.34-.75.75-.75Z"></path>
+                                            </svg>
+                                            <span class="visually-hidden">Delete user {{ row.username }}</span>
+                                        </summary>
+                                        <div class="admin-action-popover-card">
+                                            <div class="admin-action-popover-header">
+                                                <h3>Delete {{ row.username }}?</h3>
+                                                <p>This permanently removes the account, sessions, uploads, and related training data.</p>
+                                            </div>
+                                            <dl class="admin-action-impact">
+                                                <div>
+                                                    <dt>Email</dt>
+                                                    <dd>{{ row.email }}</dd>
+                                                </div>
+                                                <div>
+                                                    <dt>Uploads</dt>
+                                                    <dd>{{ row.upload_count }}</dd>
+                                                </div>
+                                                <div>
+                                                    <dt>Cases</dt>
+                                                    <dd>{{ row.case_count }}</dd>
+                                                </div>
+                                            </dl>
+                                            <form method="post" action="/admin/users/{{ row.id }}/delete" class="admin-action-form">
+                                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                                <label class="admin-action-check">
+                                                    <input type="checkbox" name="confirm_delete" value="yes" required>
+                                                    <span>I understand that this deletion is permanent.</span>
+                                                </label>
+                                                <label class="admin-action-check{% if not outbound_email_enabled %} is-disabled{% endif %}">
+                                                    <input
+                                                        type="checkbox"
+                                                        name="notify_user_email"
+                                                        value="yes"
+                                                        {% if not outbound_email_enabled %}disabled{% endif %}
+                                                    >
+                                                    <span>Send the user an email notification about the deletion.</span>
+                                                </label>
+                                                {% if not outbound_email_enabled %}
+                                                    <p class="admin-action-help muted">SMTP is not configured, so deletion emails are currently unavailable.</p>
+                                                {% endif %}
+                                                <div class="table-actions">
+                                                    <button type="submit" class="btn btn-outline-danger btn-sm">Delete User</button>
+                                                    <span class="muted">Click the trash icon again to close.</span>
+                                                </div>
+                                            </form>
+                                        </div>
+                                    </details>
+                                </div>
                             {% endif %}
                         </td>
                     </tr>

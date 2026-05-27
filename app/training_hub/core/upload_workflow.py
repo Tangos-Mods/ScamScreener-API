@@ -116,8 +116,9 @@ def _accept_training_upload(
                 size_bytes,
                 status,
                 duplicate_of_upload_id,
-                source_ip
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_ip,
+                user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _now_utc_iso(),
@@ -131,12 +132,13 @@ def _accept_training_upload(
                 "accepted",
                 int(duplicate_row["id"]) if duplicate_row is not None else None,
                 source_ip,
+                (user_agent or "").strip()[:300],
             ),
         )
         connection.commit()
         upload_id = int(cursor.lastrowid)
 
-    inserted_cases, updated_cases = _ingest_cases_from_upload(
+    inserted_cases, updated_cases, skipped_rejected_cases = _ingest_cases_from_upload(
         settings.database_path,
         int(user_id) if user_id is not None else None,
         int(client_identity_id) if client_identity_id is not None else None,
@@ -146,13 +148,16 @@ def _accept_training_upload(
     details_suffix = audit_details_suffix
     if client_identity_id is not None and user_id is None:
         details_suffix = f" for client {_normalize_client_id(client_id or '')}{audit_details_suffix}"
+    skipped_suffix = ""
+    if skipped_rejected_cases:
+        skipped_suffix = f" Skipped {int(skipped_rejected_cases)} tombstoned rejected cases."
     _create_audit_log(
         settings.database_path,
         actor_user_id=int(user_id) if user_id is not None else linked_user_id,
         action="upload.accepted",
         target_type="upload",
         target_id=upload_id,
-        details=f"Accepted upload {upload_id} ({case_count} cases){details_suffix}.",
+        details=f"Accepted upload {upload_id} ({case_count} cases){details_suffix}.{skipped_suffix}",
         source_ip=source_ip,
         user_agent=user_agent,
     )
@@ -162,6 +167,7 @@ def _accept_training_upload(
         "case_count": case_count,
         "inserted_cases": inserted_cases,
         "updated_cases": updated_cases,
+        "skipped_rejected_cases": skipped_rejected_cases,
         "payload_sha256": payload_sha,
     }
 

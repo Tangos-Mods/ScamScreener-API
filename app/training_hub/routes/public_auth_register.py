@@ -8,6 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..infra import db as sqlite3
+from ..core.access_policies import ACCESS_POLICY_DISABLE_SIGNUP, _access_policies, _effective_registration_mode
 from ..core.hub_core import (
     _hash_password,
     _normalize_email,
@@ -26,20 +27,27 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
     async def register_page(request: Request):
         if request.state.user:
             return RedirectResponse(url="/dashboard", status_code=303)
-        if settings.registration_mode == "closed":
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
+        registration_mode = _effective_registration_mode(settings.registration_mode, policies)
+        if registration_mode == "closed":
+            message = (
+                "Sign up is currently disabled by an administrator."
+                if bool(policies.get(ACCESS_POLICY_DISABLE_SIGNUP))
+                else "Registration is currently disabled."
+            )
             return _render_auth(
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
-                error="Registration is currently disabled.",
+                registration_mode=registration_mode,
+                error=message,
                 status_code=403,
             )
         return _render_auth(
             request=request,
             templates=app.state.templates,
             mode="register",
-            registration_mode=settings.registration_mode,
+            registration_mode=registration_mode,
         )
 
     @app.post("/register", response_class=HTMLResponse)
@@ -55,23 +63,31 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
             return RedirectResponse(url="/dashboard", status_code=303)
         _validate_csrf_token(request, csrf_token)
 
-        if settings.registration_mode == "closed":
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
+        registration_mode = _effective_registration_mode(settings.registration_mode, policies)
+
+        if registration_mode == "closed":
+            message = (
+                "Sign up is currently disabled by an administrator."
+                if bool(policies.get(ACCESS_POLICY_DISABLE_SIGNUP))
+                else "Registration is currently disabled."
+            )
             return _render_auth(
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
-                error="Registration is currently disabled.",
+                registration_mode=registration_mode,
+                error=message,
                 status_code=403,
             )
-        if settings.registration_mode == "invite":
+        if registration_mode == "invite":
             submitted_invite = (invite_code or "").strip()
             if not submitted_invite or not hmac.compare_digest(submitted_invite, settings.registration_invite_code):
                 return _render_auth(
                     request=request,
                     templates=app.state.templates,
                     mode="register",
-                    registration_mode=settings.registration_mode,
+                    registration_mode=registration_mode,
                     error="Invalid invite code.",
                     status_code=403,
                 )
@@ -85,7 +101,7 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 error="Username must be 3-32 chars: letters, numbers, _ or -.",
                 status_code=400,
             )
@@ -94,7 +110,7 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 error="Enter a valid email address.",
                 status_code=400,
             )
@@ -103,7 +119,7 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 error=password_error,
                 status_code=400,
             )
@@ -156,7 +172,7 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
                 request=request,
                 templates=app.state.templates,
                 mode="register",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 error=str(register_result["error"]),
                 status_code=int(register_result.get("status_code", 400)),
             )
@@ -169,12 +185,13 @@ def register_public_auth_register_routes(app: FastAPI, settings: TrainingHubSett
     async def login_page(request: Request, notice: str | None = None):
         if request.state.user:
             return RedirectResponse(url="/dashboard", status_code=303)
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
         return _render_auth(
             request=request,
             templates=app.state.templates,
             mode="login",
             notice=notice or "",
-            registration_mode=settings.registration_mode,
+            registration_mode=_effective_registration_mode(settings.registration_mode, policies),
         )
 
 

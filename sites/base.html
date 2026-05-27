@@ -13,6 +13,8 @@
 {% set page_intro %}{% block page_intro %}{% endblock %}{% endset %}
 {% set main_content %}{% block content %}{% endblock %}{% endset %}
 {% set path = request.url.path %}
+{% set admin_navigation_locked = admin_navigation_locked|default(false) %}
+{% set admin_setup_href = '/account/security?notice=Complete+MFA+setup#admin-mfa-setup' %}
 {% set workspace_open = path in ['/dashboard', '/dashboard/uploads'] %}
 {% set account_open = path.startswith('/account') or path == '/dashboard/account' %}
 {% set admin_open = path.startswith('/admin') %}
@@ -96,41 +98,54 @@
                                     <span>Admin</span>
                                 </summary>
                                 <ul class="workspace-subnav-list" aria-label="Admin sections">
-                                    <li>
-                                        <a
-                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin' %} is-active{% endif %}"
-                                            href="/admin"
-                                            {% if path == '/admin' %}aria-current="page"{% endif %}
-                                        >Overview</a>
-                                    </li>
-                                    <li>
-                                        <a
-                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/users' %} is-active{% endif %}"
-                                            href="/admin/users"
-                                            {% if path == '/admin/users' %}aria-current="page"{% endif %}
-                                        >Users</a>
-                                    </li>
-                                    <li>
-                                        <a
-                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/cases' or path.startswith('/admin/cases/') %} is-active{% endif %}"
-                                            href="/admin/cases"
-                                            {% if path == '/admin/cases' or path.startswith('/admin/cases/') %}aria-current="page"{% endif %}
-                                        >Cases</a>
-                                    </li>
-                                    <li>
-                                        <a
-                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/runs' %} is-active{% endif %}"
-                                            href="/admin/runs"
-                                            {% if path == '/admin/runs' %}aria-current="page"{% endif %}
-                                        >Runs</a>
-                                    </li>
-                                    <li>
-                                        <a
-                                            class="workspace-nav-link workspace-subnav-link{% if path == '/admin/system' %} is-active{% endif %}"
-                                            href="/admin/system"
-                                            {% if path == '/admin/system' %}aria-current="page"{% endif %}
-                                        >System</a>
-                                    </li>
+                                    {% if admin_navigation_locked %}
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/account/security' %} is-active{% endif %}"
+                                                href="{{ admin_setup_href }}"
+                                                {% if path == '/account/security' %}aria-current="page"{% endif %}
+                                            >Finish MFA setup</a>
+                                        </li>
+                                        <li class="workspace-nav-help muted">
+                                            Unlock admin pages after adding an Authenticator App or Passkey.
+                                        </li>
+                                    {% else %}
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin' %} is-active{% endif %}"
+                                                href="/admin"
+                                                {% if path == '/admin' %}aria-current="page"{% endif %}
+                                            >Overview</a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin/users' %} is-active{% endif %}"
+                                                href="/admin/users"
+                                                {% if path == '/admin/users' %}aria-current="page"{% endif %}
+                                            >Users</a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin/cases' or path.startswith('/admin/cases/') %} is-active{% endif %}"
+                                                href="/admin/cases"
+                                                {% if path == '/admin/cases' or path.startswith('/admin/cases/') %}aria-current="page"{% endif %}
+                                            >Cases</a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin/runs' %} is-active{% endif %}"
+                                                href="/admin/runs"
+                                                {% if path == '/admin/runs' %}aria-current="page"{% endif %}
+                                            >Runs</a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin/system' %} is-active{% endif %}"
+                                                href="/admin/system"
+                                                {% if path == '/admin/system' %}aria-current="page"{% endif %}
+                                            >System</a>
+                                        </li>
+                                    {% endif %}
                                 </ul>
                             </details>
                         </li>

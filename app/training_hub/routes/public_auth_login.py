@@ -7,6 +7,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from ..config.settings import SESSION_COOKIE_NAME, TrainingHubSettings
+from ..core.access_policies import (
+    ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN,
+    _access_policies,
+    _effective_registration_mode,
+)
 from ..core.hub_core import (
     _consume_login_attempt,
     _create_audit_log,
@@ -25,7 +30,7 @@ from ..core.mfa import (
     _resolve_user_by_identifier,
     _verify_passkey_authentication,
 )
-from .public_utils import logger, request_meta as _request_meta
+from .public_utils import logger, request_meta as _request_meta, webauthn_request_context as _webauthn_request_context
 
 
 def _clear_login_challenge_cookie(response: RedirectResponse | JSONResponse, settings: TrainingHubSettings) -> None:
@@ -56,15 +61,10 @@ async def _json_body(request: Request) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _webauthn_request_context(request: Request) -> tuple[str, str]:
-    rp_id = (request.url.hostname or "").strip().lower()
-    origin = (request.headers.get("origin") or "").strip().rstrip("/")
-    if not origin:
-        origin = str(request.base_url).rstrip("/")
-    return rp_id, origin
-
-
 def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
+    def _login_block_message() -> str:
+        return "Login is currently disabled for non-admin accounts."
+
     @app.post("/login", response_class=HTMLResponse)
     async def login_user(
         request: Request,
@@ -75,6 +75,8 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         if request.state.user:
             return RedirectResponse(url="/dashboard", status_code=303)
         _validate_csrf_token(request, csrf_token)
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
+        registration_mode = _effective_registration_mode(settings.registration_mode, policies)
 
         login_result = await run_in_threadpool(
             _consume_login_attempt,
@@ -117,7 +119,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 templates=app.state.templates,
                 mode="login",
                 error=f"Too many failed attempts. Please wait {int(login_result.get('retry_after', 60))}s.",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 status_code=429,
             )
 
@@ -154,7 +156,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 templates=app.state.templates,
                 mode="login",
                 error="Invalid credentials.",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 status_code=401,
             )
 
@@ -166,8 +168,29 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                 templates=app.state.templates,
                 mode="login",
                 error="Account not found.",
-                registration_mode=settings.registration_mode,
+                registration_mode=registration_mode,
                 status_code=404,
+            )
+
+        if bool(policies.get(ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN)) and int(user_row["is_admin"]) != 1:
+            await run_in_threadpool(
+                _create_audit_log,
+                settings.database_path,
+                actor_user_id=actor_user_id,
+                action="auth.login.blocked_by_policy",
+                target_type="user",
+                target_id=actor_user_id,
+                details="Non-admin web login blocked by Disable Login policy.",
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+            return _render_auth(
+                request=request,
+                templates=app.state.templates,
+                mode="login",
+                error=_login_block_message(),
+                registration_mode=registration_mode,
+                status_code=403,
             )
 
         mfa_state = await run_in_threadpool(_mfa_state, settings, actor_user_id)
@@ -211,7 +234,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
                         templates=app.state.templates,
                         mode="login",
                         error="Verification code could not be delivered.",
-                        registration_mode=settings.registration_mode,
+                        registration_mode=registration_mode,
                         status_code=503,
                     )
 
@@ -261,7 +284,8 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
         payload = await _json_body(request)
         identifier = str(payload.get("identifier", "")).strip()
         source_ip, user_agent = _request_meta(request, settings)
-        rp_id, origin = _webauthn_request_context(request)
+        rp_id, origin = _webauthn_request_context(request, settings)
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
         if identifier and len(identifier) > 320:
             return JSONResponse({"detail": "identifier must be <= 320 characters."}, status_code=400)
 
@@ -269,6 +293,8 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
             user_row = await run_in_threadpool(_resolve_user_by_identifier, settings.database_path, identifier)
             if user_row is None:
                 return JSONResponse({"detail": "No passkeys are registered for this account."}, status_code=404)
+            if bool(policies.get(ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN)) and int(user_row["is_admin"]) != 1:
+                return JSONResponse({"detail": _login_block_message()}, status_code=403)
             options_result = await run_in_threadpool(
                 _generate_passkey_auth_options,
                 settings,
@@ -313,6 +339,7 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
             return JSONResponse({"detail": "flowToken and credential are required."}, status_code=400)
 
         source_ip, user_agent = _request_meta(request, settings)
+        policies = await run_in_threadpool(_access_policies, settings.database_path)
         verify_result = await run_in_threadpool(
             _verify_passkey_authentication,
             settings,
@@ -338,6 +365,22 @@ def register_public_auth_login_routes(app: FastAPI, settings: TrainingHubSetting
             return JSONResponse({"detail": str(verify_result.get("error", "Passkey login failed."))}, status_code=int(verify_result.get("status_code", 400)))
 
         actor_user_id = int(verify_result["user_id"])
+        user_row = await run_in_threadpool(_refresh_user, settings.database_path, actor_user_id)
+        if user_row is None:
+            return JSONResponse({"detail": "Account not found."}, status_code=404)
+        if bool(policies.get(ACCESS_POLICY_DISABLE_LOGIN_NON_ADMIN)) and int(user_row["is_admin"]) != 1:
+            await run_in_threadpool(
+                _create_audit_log,
+                settings.database_path,
+                actor_user_id=actor_user_id,
+                action="auth.passkey.login.blocked_by_policy",
+                target_type="user",
+                target_id=actor_user_id,
+                details="Non-admin passkey login blocked by Disable Login policy.",
+                source_ip=source_ip,
+                user_agent=user_agent,
+            )
+            return JSONResponse({"detail": _login_block_message()}, status_code=403)
         response = JSONResponse({"ok": True, "redirectUrl": "/dashboard"}, status_code=200)
         _set_session_cookie(response, settings, actor_user_id, request)
         _clear_login_challenge_cookie(response, settings)

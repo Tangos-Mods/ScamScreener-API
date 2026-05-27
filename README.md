@@ -196,6 +196,7 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `TRAINING_HUB_ADMIN_MFA_REQUIRED` default `false`
 - `TRAINING_HUB_ADMIN_MFA_TTL_MINUTES` default `30`
 - `TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS` default `5`
+- `TRAINING_HUB_TOTP_SKEW_STEPS` default `2` (allows moderate clock drift in 30-second TOTP windows)
 - `TRAINING_HUB_WEBAUTHN_RP_ID` optional WebAuthn relying-party ID (defaults from `TRAINING_HUB_PUBLIC_BASE_URL` or allowed hosts)
 - `TRAINING_HUB_WEBAUTHN_RP_NAME` default `ScamScreener`
 - `TRAINING_HUB_WEBAUTHN_ORIGINS` optional comma-separated WebAuthn origins (defaults from `TRAINING_HUB_PUBLIC_BASE_URL`, or from allowed hosts in production)
