@@ -41,6 +41,11 @@ def test_update_runs_preflight_build_up_and_health_checks(tmp_path: Path, monkey
         "ensure_service_running",
         lambda _context, service_name: calls.append(("running", service_name)),
     )
+    monkeypatch.setattr(
+        compose_ops,
+        "write_deployment_auth_marker",
+        lambda _context, mode="external": calls.append(("marker", mode)),
+    )
 
     args = argparse.Namespace(skip_preflight=False, skip_pull=False, health_timeout=120, log_tail_lines=40)
 
@@ -56,6 +61,7 @@ def test_update_runs_preflight_build_up_and_health_checks(tmp_path: Path, monkey
     assert ("wait", ("marketguard-hub", 120)) in calls
     assert ("compose", ["up", "-d", "--force-recreate", "caddy"]) in calls
     assert ("running", "caddy") in calls
+    assert ("marker", "external") in calls
     assert ("compose", ["ps"]) in calls
 
 
@@ -98,6 +104,11 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
         "ensure_service_running",
         lambda _context, service_name: None,
     )
+    monkeypatch.setattr(
+        compose_ops,
+        "write_deployment_auth_marker",
+        lambda _context, mode="external": None,
+    )
 
     args = argparse.Namespace(skip_preflight=False, skip_pull=True, health_timeout=90, log_tail_lines=40)
     assert update_module.run_update(context, args) == 0
@@ -109,6 +120,23 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
         ["up", "-d", "--force-recreate", "caddy"],
         ["ps"],
     ]
+
+
+def test_update_rejects_running_legacy_local_auth_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    update_module = _load_script_module("scamscreener_update_legacy_auth_test", "update.py")
+    compose_ops = update_module.compose_ops
+    context = _compose_context(compose_ops, tmp_path)
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "preflight.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
+    monkeypatch.setattr(compose_ops, "detect_running_auth_mode", lambda _context: "local")
+
+    with pytest.raises(RuntimeError, match="scripts/migrate.py"):
+        update_module.run_update(
+            context,
+            argparse.Namespace(skip_preflight=False, skip_pull=False, health_timeout=90, log_tail_lines=40),
+        )
 
 
 def test_caddyfile_routes_marketguard_hub() -> None:
@@ -166,6 +194,97 @@ def test_reset_runs_down_with_volumes_and_optional_image_prune(tmp_path: Path, m
         ["down", "--volumes", "--remove-orphans", "--rmi", "local"],
         ["ps"],
     ]
+
+
+def test_migrate_backs_up_state_and_restarts_with_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    migrate_module = _load_script_module("scamscreener_migrate_run_test", "migrate.py")
+    compose_ops = migrate_module.compose_ops
+    context = _compose_context(compose_ops, tmp_path)
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "preflight.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    compose_calls: list[list[str]] = []
+    command_calls: list[list[str]] = []
+    update_calls: list[argparse.Namespace] = []
+
+    monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
+    monkeypatch.setattr(compose_ops, "deployment_state_exists", lambda _context: True)
+    monkeypatch.setattr(compose_ops, "detect_running_auth_mode", lambda _context: "local")
+    monkeypatch.setattr(compose_ops, "read_deployment_auth_marker", lambda _context: "")
+    monkeypatch.setattr(
+        compose_ops,
+        "resolve_named_volumes",
+        lambda _context: {
+            "scamscreener_data": "project_scamscreener_data",
+            "scamscreener_db_data": "project_scamscreener_db_data",
+        },
+    )
+    monkeypatch.setattr(compose_ops, "backup_repo_tree", lambda _context, destination_dir: destination_dir / "repo")
+    monkeypatch.setattr(
+        compose_ops,
+        "backup_named_volume",
+        lambda volume_name, destination_dir, archive_name, *, cwd: destination_dir / archive_name,
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "run_command",
+        lambda command, *, cwd, capture_output=False: command_calls.append(command) or SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "run_compose",
+        lambda _context, args, *, capture_output=False: compose_calls.append(args) or SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        migrate_module.update_script,
+        "run_update",
+        lambda _context, args: update_calls.append(args) or 0,
+    )
+
+    backup_dir = tmp_path / "backups"
+    result = migrate_module.run_migrate(
+        context,
+        argparse.Namespace(
+            skip_preflight=False,
+            skip_pull=True,
+            health_timeout=75,
+            log_tail_lines=55,
+            backup_dir=backup_dir,
+        ),
+    )
+
+    assert result == 0
+    assert command_calls == [["bash", str(tmp_path / "scripts" / "preflight.sh")]]
+    assert compose_calls == [["down", "--remove-orphans"]]
+    assert len(update_calls) == 1
+    assert update_calls[0].skip_preflight is True
+    assert update_calls[0].skip_pull is True
+    assert update_calls[0].health_timeout == 75
+    assert update_calls[0].log_tail_lines == 55
+    assert (backup_dir / "manifest.json").is_file()
+
+
+def test_migrate_rejects_already_external_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    migrate_module = _load_script_module("scamscreener_migrate_external_test", "migrate.py")
+    compose_ops = migrate_module.compose_ops
+    context = _compose_context(compose_ops, tmp_path)
+
+    monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
+    monkeypatch.setattr(compose_ops, "deployment_state_exists", lambda _context: True)
+    monkeypatch.setattr(compose_ops, "detect_running_auth_mode", lambda _context: "external")
+    monkeypatch.setattr(compose_ops, "read_deployment_auth_marker", lambda _context: "")
+
+    with pytest.raises(RuntimeError, match="scripts/update.py"):
+        migrate_module.run_migrate(
+            context,
+            argparse.Namespace(
+                skip_preflight=True,
+                skip_pull=False,
+                health_timeout=75,
+                log_tail_lines=55,
+                backup_dir=tmp_path / "backups",
+            ),
+        )
 
 
 def _compose_context(compose_ops_module, tmp_path: Path, *, env_contents: str = "TRAINING_HUB_ENV=production\n"):

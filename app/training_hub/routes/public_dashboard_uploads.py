@@ -113,10 +113,15 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
         inserted_cases = int(upload_result["inserted_cases"])
         updated_cases = int(upload_result["updated_cases"])
         skipped_rejected_cases = int(upload_result.get("skipped_rejected_cases", 0))
+        scrubbed_fields = int(upload_result.get("scrubbed_fields", 0))
+        scrubbed_replacements = int(upload_result.get("scrubbed_replacements", 0))
         refreshed_user = await run_in_threadpool(_refresh_user, settings.database_path, user_id) or user
         skipped_notice = ""
         if skipped_rejected_cases:
             skipped_notice = f" Rejected-case tombstones skipped: {skipped_rejected_cases}."
+        scrub_notice = ""
+        if scrubbed_fields:
+            scrub_notice = f" Content scrubbing removed {scrubbed_replacements} matches across {scrubbed_fields} fields."
         return await run_in_threadpool(
             _render_dashboard,
             request=request,
@@ -125,7 +130,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             user=refreshed_user,
             notice=(
                 f"Upload #{upload_id} accepted with {case_count} cases. "
-                f"Cases inserted: {inserted_cases}, updated: {updated_cases}.{skipped_notice}"
+                f"Cases inserted: {inserted_cases}, updated: {updated_cases}.{scrub_notice}{skipped_notice}"
             ),
             status_code=201,
             page="uploads",

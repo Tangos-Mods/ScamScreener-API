@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import shutil
@@ -12,11 +13,167 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..infra import db as sqlite3
 from ..config.settings import TrainingHubSettings
 from .common import _is_path_within, _normalize_user_agent_for_binding, _now_utc_iso
 from .session_auth import _hash_password, _validate_password
+
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _parse_utc_iso(value: str) -> datetime:
+    normalized = (value or "").strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_bytes(value: int) -> str:
+    size = max(0, int(value))
+    units = ("B", "KB", "MB", "GB", "TB")
+    scaled = float(size)
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if scaled < 1024.0 or candidate == units[-1]:
+            break
+        scaled /= 1024.0
+    if unit == "B":
+        return f"{int(scaled)} {unit}"
+    return f"{scaled:.2f} {unit}"
+
+
+def _format_duration(seconds: int) -> str:
+    remaining = max(0, int(seconds))
+    days, remaining = divmod(remaining, 86400)
+    hours, remaining = divmod(remaining, 3600)
+    minutes, remaining = divmod(remaining, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{remaining}s")
+    return " ".join(parts)
+
+
+def _safe_file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def _pathify(value: Any) -> Path:
+    return Path(str(value)).expanduser()
+
+
+def _database_storage_metadata(settings: TrainingHubSettings) -> dict[str, Any]:
+    database_target = settings.database_path
+    if isinstance(database_target, str):
+        parsed = urlsplit(database_target.strip())
+        scheme = (parsed.scheme or "database").lower()
+        host = parsed.hostname or "configured-host"
+        port = f":{parsed.port}" if parsed.port else ""
+        database_name = parsed.path.lstrip("/") or "configured-db"
+        return {
+            "database_exists": True,
+            "database_mode": "remote",
+            "database_location": f"{scheme}://{host}{port}/{database_name}",
+            "database_size_bytes": 0,
+            "database_size_display": "Remote",
+        }
+
+    database_path = _pathify(database_target)
+    database_exists = database_path.exists()
+    database_size_bytes = _safe_file_size(database_path) if database_exists else 0
+    return {
+        "database_exists": database_exists,
+        "database_mode": "local",
+        "database_location": str(database_path),
+        "database_size_bytes": database_size_bytes,
+        "database_size_display": _format_bytes(database_size_bytes),
+    }
+
+
+def _operational_metrics(settings: TrainingHubSettings, now: datetime) -> dict[str, Any]:
+    storage_dir = _pathify(settings.storage_dir)
+    uploads_dir = _pathify(settings.uploads_dir)
+    bundles_dir = _pathify(settings.bundles_dir)
+    backups_dir = _pathify(settings.backups_dir)
+    storage_probe_path = storage_dir if storage_dir.exists() else storage_dir.parent
+    disk_total = 0
+    disk_free = 0
+    try:
+        disk_usage = shutil.disk_usage(storage_probe_path)
+        disk_total = int(disk_usage.total)
+        disk_free = int(disk_usage.free)
+    except OSError:
+        disk_total = 0
+        disk_free = 0
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    load_available = False
+    load_1m = 0.0
+    load_5m = 0.0
+    load_15m = 0.0
+    load_ratio_1m = 0.0
+    try:
+        raw_load_1m, raw_load_5m, raw_load_15m = os.getloadavg()
+        load_1m = float(raw_load_1m)
+        load_5m = float(raw_load_5m)
+        load_15m = float(raw_load_15m)
+        load_ratio_1m = load_1m / cpu_count
+        load_available = True
+    except (AttributeError, OSError):
+        pass
+
+    uptime_seconds = int(max(0.0, (now - _PROCESS_STARTED_AT).total_seconds()))
+    database_storage = _database_storage_metadata(settings)
+
+    return {
+        "process": {
+            "pid": os.getpid(),
+            "started_at": _PROCESS_STARTED_AT.isoformat().replace("+00:00", "Z"),
+            "uptime_seconds": uptime_seconds,
+            "uptime_display": _format_duration(uptime_seconds),
+            "active_threads": threading.active_count(),
+        },
+        "host": {
+            "cpu_count": cpu_count,
+            "load_available": load_available,
+            "load_1m": load_1m,
+            "load_5m": load_5m,
+            "load_15m": load_15m,
+            "load_1m_percent": load_ratio_1m * 100.0,
+        },
+        "storage": {
+            "database_exists": database_storage["database_exists"],
+            "database_mode": database_storage["database_mode"],
+            "database_path": database_storage["database_location"],
+            "database_size_bytes": database_storage["database_size_bytes"],
+            "database_size_display": database_storage["database_size_display"],
+            "storage_probe_path": str(storage_probe_path),
+            "disk_total_bytes": disk_total,
+            "disk_total_display": _format_bytes(disk_total),
+            "disk_free_bytes": disk_free,
+            "disk_free_display": _format_bytes(disk_free),
+            "uploads_dir": str(uploads_dir),
+            "bundles_dir": str(bundles_dir),
+            "backups_dir": str(backups_dir),
+        },
+        "endpoints": {
+            "health_path": "/api/v1/health",
+            "metrics_path": "/api/v1/metrics",
+        },
+    }
 
 
 def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
@@ -166,11 +323,63 @@ def _run_retention_cleanup(settings: TrainingHubSettings) -> dict[str, int]:
     }
 
 
+def _training_case_statistics(
+    connection: sqlite3.Connection,
+    now: datetime,
+    total_cases: int,
+) -> dict[str, float | int]:
+    today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    last_7_days_start = today_start - timedelta(days=6)
+    today_start_iso = today_start.isoformat().replace("+00:00", "Z")
+    last_7_days_start_iso = last_7_days_start.isoformat().replace("+00:00", "Z")
+
+    cases_today = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM training_cases WHERE created_at >= ?",
+            (today_start_iso,),
+        ).fetchone()[0]
+    )
+    cases_last_7_days = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM training_cases WHERE created_at >= ?",
+            (last_7_days_start_iso,),
+        ).fetchone()[0]
+    )
+    oldest_case_row = connection.execute(
+        """
+        SELECT created_at
+        FROM training_cases
+        WHERE created_at IS NOT NULL AND created_at != ''
+        ORDER BY created_at ASC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    recording_days = 0
+    daily_average = 0.0
+    if oldest_case_row is not None:
+        try:
+            oldest_case_date = _parse_utc_iso(str(oldest_case_row[0])).date()
+        except (TypeError, ValueError):
+            oldest_case_date = None
+        if oldest_case_date is not None:
+            recording_days = max(1, (now.date() - oldest_case_date).days + 1)
+            daily_average = total_cases / recording_days
+
+    return {
+        "today": cases_today,
+        "last_7_days": cases_last_7_days,
+        "recording_days": recording_days,
+        "daily_average": daily_average,
+    }
+
+
 def _monitoring_snapshot(settings: TrainingHubSettings) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     since_iso = (
         now - timedelta(minutes=max(1, int(settings.security_alert_window_minutes)))
     ).isoformat().replace("+00:00", "Z")
+    operational_metrics = _operational_metrics(settings, now)
 
     with sqlite3.connect(settings.database_path) as connection:
         users = int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
@@ -180,6 +389,7 @@ def _monitoring_snapshot(settings: TrainingHubSettings) -> dict[str, Any]:
         rejected_cases = int(connection.execute("SELECT COUNT(*) FROM training_cases WHERE status = 'rejected'").fetchone()[0])
         runs = int(connection.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0])
         audits = int(connection.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0])
+        case_statistics = _training_case_statistics(connection, now, cases)
 
         login_failed = int(
             connection.execute(
@@ -237,6 +447,8 @@ def _monitoring_snapshot(settings: TrainingHubSettings) -> dict[str, Any]:
             "training_runs": runs,
             "audit_logs": audits,
         },
+        "case_statistics": case_statistics,
+        "operational": operational_metrics,
         "events": {
             "login_failed": login_failed,
             "login_locked": login_locked,

@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin Analytics Metrics{% endblock %}
+{% block page_eyebrow %}Analytics{% endblock %}
+{% block page_title %}Metrics{% endblock %}
+{% block page_intro %}Inspect internal runtime and storage signals without leaving the admin shell. All values reflect the current application process and host state.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section
+    id="live-api-metrics"
+    class="section-shell workspace-section"
+    data-stream-url="/admin/analytics/metrics/stream"
+    data-initial-snapshot='{{ live_api_metrics|tojson }}'
+>
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Live API load</p>
+            <h2>Push-updated request window</h2>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">Last 10s</p>
+            <strong id="live-total-10s" class="summary-metric">{{ live_api_metrics.totalLast10s|int_grouped }}</strong>
+            <p>Incoming API requests received in the last 10 seconds.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Last 60s</p>
+            <strong id="live-total-60s" class="summary-metric">{{ live_api_metrics.totalLast60s|int_grouped }}</strong>
+            <p>Rolling one-minute request volume for the current process.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">This day</p>
+            <strong id="live-total-today" class="summary-metric">{{ live_api_metrics.totalToday|int_grouped }}</strong>
+            <p>API requests received since 00:00 UTC today.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">All Time</p>
+            <strong id="live-total-all-time" class="summary-metric">{{ live_api_metrics.totalSinceStart|int_grouped }}</strong>
+            <p>Total tracked API requests across persisted history.</p>
+        </article>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Breakdown</p>
+            <h2>Requests by API group</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Group</th>
+                <th>This day</th>
+                <th>Last 10s</th>
+                <th>Req/s (10s)</th>
+                <th>Last 60s</th>
+                <th>All Time</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr>
+                <td>Public API</td>
+                <td id="live-public-today">{{ live_api_metrics.publicApi.requestsToday|int_grouped }}</td>
+                <td id="live-public-10s">{{ live_api_metrics.publicApi.requestsLast10s|int_grouped }}</td>
+                <td id="live-public-rps">{{ "%.2f"|format(live_api_metrics.publicApi.requestsPerSecond10s) }}</td>
+                <td id="live-public-60s">{{ live_api_metrics.publicApi.requestsLast60s|int_grouped }}</td>
+                <td id="live-public-total">{{ live_api_metrics.publicApi.totalSinceStart|int_grouped }}</td>
+            </tr>
+            <tr>
+                <td>Client uploads API</td>
+                <td id="live-client-today">{{ live_api_metrics.clientApi.requestsToday|int_grouped }}</td>
+                <td id="live-client-10s">{{ live_api_metrics.clientApi.requestsLast10s|int_grouped }}</td>
+                <td id="live-client-rps">{{ "%.2f"|format(live_api_metrics.clientApi.requestsPerSecond10s) }}</td>
+                <td id="live-client-60s">{{ live_api_metrics.clientApi.requestsLast60s|int_grouped }}</td>
+                <td id="live-client-total">{{ live_api_metrics.clientApi.totalSinceStart|int_grouped }}</td>
+            </tr>
+            <tr>
+                <td>Internal probes</td>
+                <td id="live-internal-today">{{ live_api_metrics.internalApi.requestsToday|int_grouped }}</td>
+                <td id="live-internal-10s">{{ live_api_metrics.internalApi.requestsLast10s|int_grouped }}</td>
+                <td id="live-internal-rps">{{ "%.2f"|format(live_api_metrics.internalApi.requestsPerSecond10s) }}</td>
+                <td id="live-internal-60s">{{ live_api_metrics.internalApi.requestsLast60s|int_grouped }}</td>
+                <td id="live-internal-total">{{ live_api_metrics.internalApi.totalSinceStart|int_grouped }}</td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Live endpoint activity</p>
+            <h2>Endpoints and agents</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Endpoint</th>
+                <th>Last 10s</th>
+                <th>Last 60s</th>
+                <th>Today</th>
+                <th>All Time</th>
+                <th>Agent</th>
+            </tr>
+            </thead>
+            <tbody id="live-endpoint-rows">
+            {% if live_api_metrics.entries %}
+                {% for row in live_api_metrics.entries %}
+                    <tr>
+                        <td class="table-wrap">{{ row.endpoint }}</td>
+                        <td>{{ row.requestsLast10s|int_grouped }}</td>
+                        <td>{{ row.requestsLast60s|int_grouped }}</td>
+                        <td>{{ row.requestsToday|int_grouped }}</td>
+                        <td>{{ row.totalSinceStart|int_grouped }}</td>
+                        <td class="table-wrap">{{ row.agent }}</td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="6" class="table-empty">No API traffic recorded yet.</td>
+                </tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Runtime</p>
+            <h2>Current process and host load</h2>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">API uptime</p>
+            <strong class="summary-metric">{{ monitoring.operational.process.uptime_display }}</strong>
+            <p>Started {{ monitoring.operational.process.started_at|datetime_utc }} · PID {{ monitoring.operational.process.pid|int_grouped }}</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Active threads</p>
+            <strong class="summary-metric">{{ monitoring.operational.process.active_threads|int_grouped }}</strong>
+            <p>Current worker-thread count inside this process.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">CPU load (1m)</p>
+            <strong class="summary-metric">
+                {% if monitoring.operational.host.load_available %}
+                    {{ "%.2f"|format(monitoring.operational.host.load_1m) }}
+                {% else %}
+                    N/A
+                {% endif %}
+            </strong>
+            <p>
+                {% if monitoring.operational.host.load_available %}
+                    {{ "%.0f"|format(monitoring.operational.host.load_1m_percent) }}% of {{ monitoring.operational.host.cpu_count|int_grouped }} CPU{% if monitoring.operational.host.cpu_count != 1 %}s{% endif %} · 5m {{ "%.2f"|format(monitoring.operational.host.load_5m) }} · 15m {{ "%.2f"|format(monitoring.operational.host.load_15m) }}
+                {% else %}
+                    Host load average is not available on this platform.
+                {% endif %}
+            </p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Disk free</p>
+            <strong class="summary-metric">{{ monitoring.operational.storage.disk_free_display }}</strong>
+            <p>Total {{ monitoring.operational.storage.disk_total_display }} on {{ monitoring.operational.storage.storage_probe_path }}</p>
+        </article>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Health</p>
+            <h2>Internal health metrics</h2>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">Database target</p>
+            <strong class="summary-metric">{% if monitoring.operational.storage.database_exists %}{{ monitoring.operational.storage.database_size_display }}{% else %}Missing{% endif %}</strong>
+            <p>{{ monitoring.operational.storage.database_path }}</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Health endpoint</p>
+            <strong class="summary-metric"><a href="{{ monitoring.operational.endpoints.health_path }}">{{ monitoring.operational.endpoints.health_path }}</a></strong>
+            <p>Basic service heartbeat and storage summary.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Prometheus</p>
+            <strong class="summary-metric"><a href="{{ monitoring.operational.endpoints.metrics_path }}">{{ monitoring.operational.endpoints.metrics_path }}</a></strong>
+            <p>Machine-readable counters for external monitoring.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Auth alert state</p>
+            <strong class="summary-metric">
+                {% if monitoring.alerts.failed_login_spike == 1 or monitoring.alerts.mfa_failed_spike == 1 or monitoring.alerts.password_reset_spike == 1 %}
+                    Alerting
+                {% else %}
+                    Normal
+                {% endif %}
+            </strong>
+            <p>{{ monitoring.events.login_failures_total|int_grouped }} login failures · {{ monitoring.events.mfa_failed|int_grouped }} MFA failures · {{ monitoring.events.password_reset_requested|int_grouped }} reset requests</p>
+        </article>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Storage paths</p>
+            <h2>Managed directories</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>Area</th>
+                <th>Path</th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr>
+                <td>Uploads</td>
+                <td class="table-wrap">{{ monitoring.operational.storage.uploads_dir }}</td>
+            </tr>
+            <tr>
+                <td>Bundles</td>
+                <td class="table-wrap">{{ monitoring.operational.storage.bundles_dir }}</td>
+            </tr>
+            <tr>
+                <td>Backups</td>
+                <td class="table-wrap">{{ monitoring.operational.storage.backups_dir }}</td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+    <script src="/js/admin-live-metrics.js"></script>
+{% endblock %}

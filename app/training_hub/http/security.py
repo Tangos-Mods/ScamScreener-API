@@ -69,8 +69,6 @@ def _is_client_api_post(request: Request) -> bool:
         return False
 
     content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
-    if path == "/api/v1/client/auth/login":
-        return content_type == "application/json"
     if path in {"/api/v1/client/auth/logout", "/api/v1/client/uploads", "/api/v1/client/uploads/anonymous"}:
         return True
     return False

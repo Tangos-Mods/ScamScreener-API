@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, ConfigDict, Field, RootModel
+from pydantic import BaseModel, Field
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,24 +68,6 @@ class BazaarSnapshot:
 
 class ApiErrorResponse(BaseModel):
     detail: str = Field(..., examples=["Lowest BIN data is temporarily unavailable."])
-
-
-class LowestBinV1Response(RootModel[dict[str, float]]):
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "CRIMSON_BOOTS": 7000000.0,
-                "CRIMSON_BOOTS+ATTRIBUTE_MANA_POOL+ATTRIBUTE_VETERAN": 7000000.0,
-                "CRIMSON_BOOTS+ATTRIBUTE_MANA_POOL;1": 7000000.0,
-                "CRIMSON_BOOTS+ATTRIBUTE_VETERAN;2": 7000000.0,
-                "ENDERMAN;4": 5000000.0,
-                "ENDERMAN;4+100": 12000000.0,
-                "HYPERION": 98000000.0,
-                "ICE_RUNE;3": 250000.0,
-                "TRUE_ESSENCE": 23437.5,
-            }
-        }
-    )
 
 
 class LowestBinV2Product(BaseModel):

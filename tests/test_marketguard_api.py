@@ -26,7 +26,7 @@ from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinS
 from app.training_hub.config.settings import TrainingHubSettings
 
 
-def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) -> None:
+def test_lowestbin_v1_returns_gone_with_upgrade_message(tmp_path: Path) -> None:
     requests: list[int] = []
     legendary_enderman = {"petInfo": json.dumps({"type": "ENDERMAN", "tier": "LEGENDARY"})}
 
@@ -88,25 +88,9 @@ def test_lowestbin_returns_moulberry_style_lowest_bin_mapping(tmp_path: Path) ->
     with TestClient(app) as client:
         response = client.get("/api/v1/lowestbin")
 
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "public, max-age=60, stale-if-error=300"
-    assert response.headers["x-data-stale"] == "false"
-    assert response.headers["x-api-provider"] == "Pankraz01"
-    assert response.headers["deprecation"] == "true"
-    assert response.headers["sunset"] == "Mon, 01 Jun 2026 00:00:00 GMT"
-    assert "set-cookie" not in response.headers
-    assert response.json() == {
-        "CRIMSON_BOOTS": 7_000_000.0,
-        "CRIMSON_BOOTS+ATTRIBUTE_MANA_POOL+ATTRIBUTE_VETERAN": 7_000_000.0,
-        "CRIMSON_BOOTS+ATTRIBUTE_MANA_POOL;1": 7_000_000.0,
-        "CRIMSON_BOOTS+ATTRIBUTE_VETERAN;2": 7_000_000.0,
-        "ENDERMAN;4": 5_000_000.0,
-        "ENDERMAN;4+100": 12_000_000.0,
-        "HYPERION": 98_000_000.0,
-        "ICE_RUNE;3": 250_000.0,
-        "TRUE_ESSENCE": 23_437.5,
-    }
-    assert requests == [0, 1]
+    assert response.status_code == 410
+    assert response.json() == {"detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."}
+    assert requests == []
 
 
 def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path) -> None:
@@ -220,7 +204,7 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
     }
 
 
-def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
+def test_lowestbin_v1_is_marked_gone_in_openapi(tmp_path: Path) -> None:
     settings = _marketguard_settings()
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
@@ -235,7 +219,11 @@ def test_lowestbin_v1_is_marked_deprecated_in_openapi(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     schema = response.json()
-    assert schema["paths"]["/api/v1/lowestbin"]["get"]["deprecated"] is True
+    assert "deprecated" not in schema["paths"]["/api/v1/lowestbin"]["get"]
+    assert set(schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]) == {"200", "410"}
+    assert schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]["410"]["content"]["application/json"]["example"] == {
+        "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
+    }
     assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
 
 
@@ -263,19 +251,9 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
         "detail": "Bazaar data is temporarily unavailable."
     }
 
-    lowestbin_get = schema["paths"]["/api/v1/lowestbin"]["get"]
-    assert set(lowestbin_get["responses"]) == {"200", "429", "503"}
-    assert lowestbin_get["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
-        "/LowestBinV1Response"
-    )
-    assert lowestbin_get["responses"]["503"]["content"]["application/json"]["example"] == {
-        "detail": "Lowest BIN data is temporarily unavailable."
-    }
-
     schemas = schema["components"]["schemas"]
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
     assert schemas["BazaarProductResponse"]["properties"]["item_name"]["examples"][0] == "Corrupted Bait"
-    assert schemas["LowestBinV1Response"]["example"]["HYPERION"] == 98000000.0
     assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
     assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
     assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000
@@ -491,7 +469,7 @@ def test_bazaar_returns_transformed_quick_status_snapshot(tmp_path: Path) -> Non
     assert request_count == 1
 
 
-def test_lowestbin_uses_cached_snapshot_between_requests(tmp_path: Path) -> None:
+def test_lowestbin_v2_uses_cached_snapshot_between_requests(tmp_path: Path) -> None:
     request_count = 0
 
     async def _handler(request: httpx.Request) -> httpx.Response:
@@ -517,13 +495,13 @@ def test_lowestbin_uses_cached_snapshot_between_requests(tmp_path: Path) -> None
     )
 
     with TestClient(app) as client:
-        first = client.get("/api/v1/lowestbin")
-        second = client.get("/api/v1/lowestbin")
+        first = client.get("/api/v2/lowestbin")
+        second = client.get("/api/v2/lowestbin")
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json() == {"HYPERION": 99_000_000.0}
-    assert second.json() == {"HYPERION": 99_000_000.0}
+    assert first.json()["products"]["HYPERION"]["price"] == 99_000_000.0
+    assert second.json()["products"]["HYPERION"]["price"] == 99_000_000.0
     assert request_count == 1
 
 
@@ -960,7 +938,7 @@ def test_bazaar_returns_stale_cache_when_refresh_fails() -> None:
     assert request_count == 2
 
 
-def test_lowestbin_rate_limit_uses_platform_limiter(tmp_path: Path) -> None:
+def test_lowestbin_v2_rate_limit_uses_platform_limiter(tmp_path: Path) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -982,8 +960,8 @@ def test_lowestbin_rate_limit_uses_platform_limiter(tmp_path: Path) -> None:
     )
 
     with TestClient(app) as client:
-        first = client.get("/api/v1/lowestbin")
-        second = client.get("/api/v1/lowestbin")
+        first = client.get("/api/v2/lowestbin")
+        second = client.get("/api/v2/lowestbin")
 
     assert first.status_code == 200
     assert second.status_code == 429
@@ -1049,8 +1027,8 @@ def test_standalone_marketguard_app_enforces_rate_limit_without_training_hub(tmp
     )
 
     with TestClient(app) as client:
-        first = client.get("/api/v1/lowestbin")
-        second = client.get("/api/v1/lowestbin")
+        first = client.get("/api/v2/lowestbin")
+        second = client.get("/api/v2/lowestbin")
 
     assert first.status_code == 200
     assert second.status_code == 429
@@ -1109,7 +1087,7 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
 
 
 def test_standalone_marketguard_app_exposes_internal_health() -> None:
-    settings = _marketguard_settings()
+    settings = _marketguard_settings(trusted_proxies={"testclient"})
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_marketguard_app(
         settings=settings,
@@ -1118,12 +1096,80 @@ def test_standalone_marketguard_app_exposes_internal_health() -> None:
     )
 
     with TestClient(app) as client:
-        response = client.get("/api/internal/health")
+        response = client.get("/api/internal/health", headers={"X-Forwarded-For": "127.0.0.1"})
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["service"] == "marketguard-api"
+
+
+def test_standalone_marketguard_app_exposes_internal_live_metrics() -> None:
+    settings = _marketguard_settings(trusted_proxies={"testclient"})
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+    )
+
+    with TestClient(app) as client:
+        client.get("/api/v2/lowestbin", headers={"User-Agent": "Mozilla/5.0"})
+        client.get("/api/v1/bazaar", headers={"User-Agent": "ScamScreener-MarketGuard/1.0"})
+        response = client.get("/api/internal/live-metrics", headers={"X-Forwarded-For": "127.0.0.1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["totalToday"] == 2
+    assert payload["totalSinceStart"] == 2
+    assert payload["publicApi"]["requestsToday"] == 2
+    assert payload["entries"][0]["endpoint"] in {"/api/v2/lowestbin", "/api/v1/bazaar"}
+    assert {entry["endpoint"] for entry in payload["entries"]} == {"/api/v2/lowestbin", "/api/v1/bazaar"}
+
+
+def test_standalone_marketguard_observability_endpoints_block_public_requests() -> None:
+    settings = _marketguard_settings(trusted_proxies={"testclient"})
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+    )
+
+    with TestClient(app) as client:
+        health_response = client.get("/api/internal/health", headers={"X-Forwarded-For": "203.0.113.10"})
+        metrics_response = client.get("/api/internal/live-metrics", headers={"X-Forwarded-For": "203.0.113.10"})
+
+    assert health_response.status_code == 403
+    assert metrics_response.status_code == 403
+    assert health_response.json()["detail"] == "Observability endpoint is not available from public networks."
+    assert metrics_response.json()["detail"] == "Observability endpoint is not available from public networks."
+
+
+def test_combined_app_observability_endpoints_block_public_requests(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, trusted_proxies={"testclient"})
+    app = create_app(training_hub_settings=settings)
+
+    with TestClient(app) as client:
+        health_response = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.10"})
+        metrics_response = client.get("/api/v1/metrics", headers={"X-Forwarded-For": "203.0.113.10"})
+
+    assert health_response.status_code == 403
+    assert metrics_response.status_code == 403
+
+
+def test_combined_app_observability_endpoints_allow_internal_requests(tmp_path: Path) -> None:
+    settings = _training_hub_settings(tmp_path, trusted_proxies={"testclient"})
+    app = create_app(training_hub_settings=settings)
+
+    with TestClient(app) as client:
+        health_response = client.get("/api/v1/health", headers={"X-Forwarded-For": "127.0.0.1"})
+        metrics_response = client.get("/api/v1/metrics", headers={"X-Forwarded-For": "10.0.0.5"})
+
+    assert health_response.status_code == 200
+    assert metrics_response.status_code == 200
+    assert health_response.json()["status"] == "ok"
+    assert "scamscreener_users_total" in metrics_response.text
 
 
 def test_standalone_marketguard_app_disables_docs_when_configured() -> None:
@@ -1237,6 +1283,7 @@ def _marketguard_settings(
     local_cache_max_entries: int = 32,
     redis_enabled: bool = False,
     redis_url: str = "",
+    trusted_proxies: set[str] | None = None,
 ) -> MarketGuardSettings:
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
@@ -1250,6 +1297,7 @@ def _marketguard_settings(
         local_cache_max_entries=local_cache_max_entries,
         redis_enabled=redis_enabled,
         redis_url=redis_url,
+        trusted_proxies=set(trusted_proxies or set()),
         api_docs_enabled=api_docs_enabled,
     )
 
@@ -1295,7 +1343,12 @@ def _noop_marketguard_services(settings: MarketGuardSettings) -> tuple[LowestBin
     )
 
 
-def _training_hub_settings(tmp_path: Path, *, api_docs_enabled: bool = True) -> TrainingHubSettings:
+def _training_hub_settings(
+    tmp_path: Path,
+    *,
+    api_docs_enabled: bool = True,
+    trusted_proxies: set[str] | None = None,
+) -> TrainingHubSettings:
     return TrainingHubSettings(
         host="127.0.0.1",
         port=18080,
@@ -1308,7 +1361,7 @@ def _training_hub_settings(tmp_path: Path, *, api_docs_enabled: bool = True) -> 
         project_root=tmp_path,
         admin_emails=set(),
         admin_usernames={"alice", "dev", "owner"},
-        trusted_proxies=set(),
+        trusted_proxies=set(trusted_proxies or set()),
         enable_rate_limit=True,
         enforce_origin_check=True,
         smtp_use_starttls=False,

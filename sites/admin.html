@@ -4,7 +4,7 @@
 {% block title %}Training Hub Admin Overview{% endblock %}
 {% block page_eyebrow %}Admin{% endblock %}
 {% block page_title %}Operations Overview{% endblock %}
-{% block page_intro %}Use this page for global monitoring and high-level actions. User management, cases, runs, and system controls live on their own pages.{% endblock %}
+{% block page_intro %}Use this page for global monitoring and high-level actions. User management, cases, scrubbing, runs, and system controls live on their own pages.{% endblock %}
 {% block page_actions %}
     <form method="post" action="/admin/train" class="inline-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -45,6 +45,11 @@
         <span>Cases</span>
         <strong>{{ monitoring.totals.training_cases }}</strong>
         <p class="overview-stat-detail">Approved: {{ monitoring.totals.training_cases_approved }} · Rejected: {{ monitoring.totals.training_cases_rejected }}</p>
+    </article>
+    <article class="overview-stat">
+        <span>Statistics</span>
+        <strong>{{ monitoring.case_statistics.today }}</strong>
+        <p class="overview-stat-detail">Last 7d: {{ monitoring.case_statistics.last_7_days }}<br>Avg: {{ "%.2f"|format(monitoring.case_statistics.daily_average) }}/day</p>
     </article>
     <article class="overview-stat">
         <span>Runs</span>
@@ -105,6 +110,12 @@
             <strong class="summary-metric">{{ cases|length }}</strong>
             <p>Review case records and inspect message traces in detail.</p>
             <a class="button-small" href="/admin/cases">Open Cases</a>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Scrubbing</p>
+            <strong class="summary-metric">{{ content_scrub_rules|length }}</strong>
+            <p>Remove sensitive phrases from future uploads before they are stored.</p>
+            <a class="button-small" href="/admin/scrub-rules">Open Scrubbing</a>
         </article>
         <article class="summary-panel">
             <p class="summary-panel-label">Runs</p>

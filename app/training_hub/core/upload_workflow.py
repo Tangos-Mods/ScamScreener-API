@@ -10,9 +10,11 @@ from ..config.settings import TrainingHubSettings
 from ..infra import db as sqlite3
 from .admin_ops import _create_audit_log
 from .common import _now_utc_iso
+from .content_scrubbing import _apply_content_scrub_rules_to_cases
 from .training_data import (
     _ensure_client_identity,
     _ingest_cases_from_upload,
+    _json_dumps,
     _normalize_client_id,
     _parse_training_cases,
     _safe_file_name,
@@ -31,6 +33,10 @@ def _parse_training_upload_payload(payload: bytes) -> list[dict[str, Any]]:
     return _parse_training_cases(payload_text)
 
 
+def _serialize_training_upload_payload(parsed_cases: list[dict[str, Any]]) -> bytes:
+    return "\n".join(_json_dumps(payload) for payload in parsed_cases).encode("utf-8")
+
+
 def _accept_training_upload(
     settings: TrainingHubSettings,
     *,
@@ -46,8 +52,12 @@ def _accept_training_upload(
         raise HTTPException(status_code=400, detail="Upload identity is required.")
 
     parsed_cases = _parse_training_upload_payload(payload)
+    parsed_cases, scrub_summary = _apply_content_scrub_rules_to_cases(settings.database_path, parsed_cases)
+    stored_payload = payload
+    if int(scrub_summary.get("fields_scrubbed", 0)) > 0:
+        stored_payload = _serialize_training_upload_payload(parsed_cases)
     case_count = len(parsed_cases)
-    payload_sha = hashlib.sha256(payload).hexdigest()
+    payload_sha = hashlib.sha256(stored_payload).hexdigest()
     normalized_name = _safe_file_name(original_name)
 
     with sqlite3.connect(settings.database_path) as connection:
@@ -89,7 +99,7 @@ def _accept_training_upload(
             int(user_id) if user_id is not None else None,
             int(client_identity_id) if client_identity_id is not None else None,
             source_ip,
-            len(payload),
+            len(stored_payload),
             case_count,
         )
         if quota_error:
@@ -101,7 +111,7 @@ def _accept_training_upload(
             }
 
         stored_path = settings.uploads_dir / f"{payload_sha}.jsonl"
-        _write_payload(stored_path, payload)
+        _write_payload(stored_path, stored_payload)
 
         cursor = connection.execute(
             """
@@ -128,7 +138,7 @@ def _accept_training_upload(
                 str(stored_path),
                 payload_sha,
                 case_count,
-                len(payload),
+                len(stored_payload),
                 "accepted",
                 int(duplicate_row["id"]) if duplicate_row is not None else None,
                 source_ip,
@@ -151,13 +161,19 @@ def _accept_training_upload(
     skipped_suffix = ""
     if skipped_rejected_cases:
         skipped_suffix = f" Skipped {int(skipped_rejected_cases)} tombstoned rejected cases."
+    scrub_suffix = ""
+    if int(scrub_summary.get("fields_scrubbed", 0)) > 0:
+        scrub_suffix = (
+            f" Scrubbed {int(scrub_summary['replacements_removed'])} matches across "
+            f"{int(scrub_summary['fields_scrubbed'])} fields using {int(scrub_summary['rule_count'])} rules."
+        )
     _create_audit_log(
         settings.database_path,
         actor_user_id=int(user_id) if user_id is not None else linked_user_id,
         action="upload.accepted",
         target_type="upload",
         target_id=upload_id,
-        details=f"Accepted upload {upload_id} ({case_count} cases){details_suffix}.{skipped_suffix}",
+        details=f"Accepted upload {upload_id} ({case_count} cases){details_suffix}.{scrub_suffix}{skipped_suffix}",
         source_ip=source_ip,
         user_agent=user_agent,
     )
@@ -169,6 +185,8 @@ def _accept_training_upload(
         "updated_cases": updated_cases,
         "skipped_rejected_cases": skipped_rejected_cases,
         "payload_sha256": payload_sha,
+        "scrubbed_fields": int(scrub_summary.get("fields_scrubbed", 0)),
+        "scrubbed_replacements": int(scrub_summary.get("replacements_removed", 0)),
     }
 
 

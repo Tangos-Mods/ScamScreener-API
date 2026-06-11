@@ -115,6 +115,156 @@ def _migrate_client_identity_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_external_auth_tables(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_auth_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                state_sha256 TEXT NOT NULL UNIQUE,
+                code_verifier TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                redirect_path TEXT NOT NULL DEFAULT '/dashboard',
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                source_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                email TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                last_login_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_identities_provider_subject ON external_identities(provider, issuer, subject)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_auth_states_provider ON external_auth_states(provider)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_external_auth_states_expires ON external_auth_states(expires_at)"
+        )
+        return
+    except Exception:
+        pass
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS external_auth_states (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            provider VARCHAR(32) NOT NULL,
+            state_sha256 CHAR(64) NOT NULL UNIQUE,
+            code_verifier VARCHAR(255) NOT NULL,
+            nonce VARCHAR(255) NOT NULL,
+            redirect_path VARCHAR(1024) NOT NULL DEFAULT '/dashboard',
+            expires_at VARCHAR(40) NOT NULL,
+            consumed_at VARCHAR(40),
+            source_ip VARCHAR(80) NOT NULL DEFAULT '',
+            user_agent VARCHAR(300) NOT NULL DEFAULT '',
+            KEY idx_external_auth_states_provider (provider),
+            KEY idx_external_auth_states_expires (expires_at)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS external_identities (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            updated_at VARCHAR(40) NOT NULL,
+            user_id BIGINT NOT NULL,
+            provider VARCHAR(32) NOT NULL,
+            issuer VARCHAR(255) NOT NULL,
+            subject VARCHAR(255) NOT NULL,
+            email VARCHAR(254) NOT NULL DEFAULT '',
+            username VARCHAR(64) NOT NULL DEFAULT '',
+            last_login_at VARCHAR(40),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE KEY idx_external_identities_provider_subject (provider, issuer, subject),
+            KEY idx_external_identities_user (user_id)
+        )
+        """
+    )
+
+
+def _migrate_content_scrub_rule_tables(connection: sqlite3.Connection) -> None:
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_scrub_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                match_mode TEXT NOT NULL,
+                pattern_text TEXT NOT NULL,
+                use_regex INTEGER NOT NULL DEFAULT 0,
+                match_count INTEGER NOT NULL DEFAULT 0,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_scrub_rules_signature
+            ON content_scrub_rules(match_mode, pattern_text, use_regex, is_enabled)
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_content_scrub_rules_created_by_user ON content_scrub_rules(created_by_user_id)"
+        )
+        return
+    except Exception:
+        pass
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS content_scrub_rules (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            created_at VARCHAR(40) NOT NULL,
+            updated_at VARCHAR(40) NOT NULL,
+            created_by_user_id BIGINT NOT NULL,
+            match_mode VARCHAR(16) NOT NULL,
+            pattern_text VARCHAR(256) NOT NULL,
+            use_regex TINYINT NOT NULL DEFAULT 0,
+            match_count BIGINT NOT NULL DEFAULT 0,
+            is_enabled TINYINT NOT NULL DEFAULT 1,
+            FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+            UNIQUE KEY idx_content_scrub_rules_signature (match_mode, pattern_text, use_regex, is_enabled),
+            KEY idx_content_scrub_rules_created_by_user (created_by_user_id)
+        )
+        """
+    )
+    _add_column_if_missing(
+        connection,
+        "content_scrub_rules",
+        "match_count",
+        "ALTER TABLE content_scrub_rules ADD COLUMN match_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE content_scrub_rules ADD COLUMN match_count BIGINT NOT NULL DEFAULT 0",
+    )
+
+
 def _migrate_users_security_columns(connection: sqlite3.Connection) -> None:
     _add_column_if_missing(
         connection,

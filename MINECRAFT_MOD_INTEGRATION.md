@@ -179,7 +179,7 @@ Optional but safe to include:
 
 - `supervision.fixedStageCalibrations`
 
-The current server stores and exports the entire payload, but several pages derive their visible values from these exact fields. If a field is missing, the upload still succeeds; the page simply cannot render that value.
+The current server stores and exports the submitted payload, unless an admin-configured content-scrubbing rule removes matching text during ingestion. Several pages derive their visible values from these exact fields. If a field is missing, the upload still succeeds; the page simply cannot render that value.
 
 ## Field-by-field contract
 
@@ -455,7 +455,7 @@ Use this when a value is missing in the website or admin UI.
 
 These rules affect how the mod should serialize and resend files.
 
-- Duplicate detection is based on the SHA-256 hash of the exact raw uploaded file bytes.
+- Duplicate detection is based on the SHA-256 hash of the stored upload bytes. When no admin scrubbing rule changes the content, this is the exact raw uploaded file bytes.
 - For the same ScamScreener account, uploading byte-identical NDJSON again returns `status=duplicate`.
 - Changing any byte changes the hash. This includes whitespace, field order, number formatting, and line order.
 - If a different client ID uploads the exact same bytes, the upload is still accepted for that client ID. It is only linked internally as a duplicate of the first upload.

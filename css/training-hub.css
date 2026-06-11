@@ -505,6 +505,16 @@ thead th {
     border-left: 1px solid var(--hub-nav-border);
 }
 
+.workspace-subnav-section-label {
+    margin-top: 0.35rem;
+    padding: 0.45rem 0.45rem 0.1rem;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
 .workspace-subnav-link {
     min-height: var(--hub-control-height-sm);
     padding: var(--hub-control-padding-y-sm) var(--hub-control-padding-x-sm);
@@ -828,6 +838,51 @@ thead th {
     color: var(--hub-title);
     font-size: 1.75rem;
     line-height: 1.1;
+}
+
+.metric-odometer {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 0.02em;
+    font-variant-numeric: tabular-nums;
+}
+
+.metric-odometer-static {
+    display: inline-block;
+    min-width: 0.32em;
+    line-height: 1em;
+    white-space: pre;
+}
+
+.metric-odometer-slot {
+    position: relative;
+    display: inline-block;
+    height: 1em;
+    min-width: 0.62em;
+    overflow: hidden;
+}
+
+.metric-odometer-track {
+    display: grid;
+    grid-template-rows: repeat(2, 1fr);
+    transition:
+        transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+        filter 420ms cubic-bezier(0.22, 1, 0.36, 1),
+        opacity 420ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
+}
+
+.metric-odometer-value {
+    display: block;
+    height: 1em;
+    line-height: 1em;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.metric-odometer-slot.is-animating .metric-odometer-track {
+    filter: blur(0.7px);
+    opacity: 0.92;
 }
 
 .workflow-grid {

@@ -106,11 +106,6 @@ main() {
     require_non_empty_env "TRAINING_HUB_PUBLIC_BASE_URL"
     require_non_empty_env "TRAINING_HUB_ENV"
     require_non_empty_env "TRAINING_HUB_ENFORCE_HTTPS"
-    require_non_empty_env "TRAINING_HUB_ADMIN_MFA_REQUIRED"
-    require_non_empty_env "TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL"
-    require_non_empty_env "TRAINING_HUB_SMTP_HOST"
-    require_non_empty_env "TRAINING_HUB_SMTP_PORT"
-    require_non_empty_env "TRAINING_HUB_SMTP_FROM_EMAIL"
 
     local caddy_site_address
     local public_base_url
@@ -125,6 +120,11 @@ main() {
     local site_operator_name
     local site_postal_address
     local site_contact_channel
+    local smtp_host
+    local smtp_port
+    local smtp_from_email
+    local smtp_username
+    local smtp_password
     local database_driver
     local database_url
     local db_password
@@ -136,18 +136,36 @@ main() {
     local redis_url
     local redis_host
     local redis_password
+    local github_client_id
+    local github_client_secret
+    local github_allowed_logins
+    local github_allowed_emails
+    local github_allowed_subjects
+    local authelia_issuer_url
+    local authelia_client_id
+    local authelia_client_secret
+    local authelia_allowed_emails
+    local authelia_allowed_usernames
+    local authelia_allowed_subjects
+    local admin_usernames
+    local admin_emails
 
     caddy_site_address="$(read_env_value "CADDY_SITE_ADDRESS")"
     public_base_url="$(read_env_value "TRAINING_HUB_PUBLIC_BASE_URL")"
     env_name="$(read_env_value "TRAINING_HUB_ENV")"
     enforce_https="$(read_env_value "TRAINING_HUB_ENFORCE_HTTPS")"
-    admin_mfa_required="$(read_env_value "TRAINING_HUB_ADMIN_MFA_REQUIRED")"
-    password_reset_send_email="$(read_env_value "TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL")"
+    admin_mfa_required="$(read_env_value "TRAINING_HUB_ADMIN_MFA_REQUIRED" 2>/dev/null || true)"
+    password_reset_send_email="$(read_env_value "TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL" 2>/dev/null || true)"
     smtp_use_tls="$(read_env_value "TRAINING_HUB_SMTP_USE_TLS" 2>/dev/null || true)"
     smtp_use_starttls="$(read_env_value "TRAINING_HUB_SMTP_USE_STARTTLS" 2>/dev/null || true)"
     site_operator_name="$(read_env_value "TRAINING_HUB_SITE_OPERATOR_NAME" 2>/dev/null || true)"
     site_postal_address="$(read_env_value "TRAINING_HUB_SITE_POSTAL_ADDRESS" 2>/dev/null || true)"
     site_contact_channel="$(read_env_value "TRAINING_HUB_SITE_CONTACT_CHANNEL" 2>/dev/null || true)"
+    smtp_host="$(read_env_value "TRAINING_HUB_SMTP_HOST" 2>/dev/null || true)"
+    smtp_port="$(read_env_value "TRAINING_HUB_SMTP_PORT" 2>/dev/null || true)"
+    smtp_from_email="$(read_env_value "TRAINING_HUB_SMTP_FROM_EMAIL" 2>/dev/null || true)"
+    smtp_username="$(read_env_value "TRAINING_HUB_SMTP_USERNAME" 2>/dev/null || true)"
+    smtp_password="$(read_env_value "TRAINING_HUB_SMTP_PASSWORD" 2>/dev/null || true)"
     database_driver="$(read_env_value "TRAINING_HUB_DB_DRIVER" 2>/dev/null || true)"
     database_url="$(read_env_value "TRAINING_HUB_DATABASE_URL" 2>/dev/null || true)"
     db_password="$(read_env_value "TRAINING_HUB_DB_PASSWORD" 2>/dev/null || true)"
@@ -159,6 +177,19 @@ main() {
     redis_url="$(read_env_value "MARKETGUARD_REDIS_URL" 2>/dev/null || true)"
     redis_host="$(read_env_value "MARKETGUARD_REDIS_HOST" 2>/dev/null || true)"
     redis_password="$(read_env_value "MARKETGUARD_REDIS_PASSWORD" 2>/dev/null || true)"
+    github_client_id="$(read_env_value "TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID" 2>/dev/null || true)"
+    github_client_secret="$(read_env_value "TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET" 2>/dev/null || true)"
+    github_allowed_logins="$(read_env_value "TRAINING_HUB_GITHUB_OAUTH_ALLOWED_LOGINS" 2>/dev/null || true)"
+    github_allowed_emails="$(read_env_value "TRAINING_HUB_GITHUB_OAUTH_ALLOWED_EMAILS" 2>/dev/null || true)"
+    github_allowed_subjects="$(read_env_value "TRAINING_HUB_GITHUB_OAUTH_ALLOWED_SUBJECTS" 2>/dev/null || true)"
+    authelia_issuer_url="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL" 2>/dev/null || true)"
+    authelia_client_id="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_CLIENT_ID" 2>/dev/null || true)"
+    authelia_client_secret="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_CLIENT_SECRET" 2>/dev/null || true)"
+    authelia_allowed_emails="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_EMAILS" 2>/dev/null || true)"
+    authelia_allowed_usernames="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_USERNAMES" 2>/dev/null || true)"
+    authelia_allowed_subjects="$(read_env_value "TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_SUBJECTS" 2>/dev/null || true)"
+    admin_usernames="$(read_env_value "TRAINING_HUB_ADMIN_USERNAMES" 2>/dev/null || true)"
+    admin_emails="$(read_env_value "TRAINING_HUB_ADMIN_EMAILS" 2>/dev/null || true)"
 
     if [[ -z "${db_managed}" && "${env_name}" == "production" ]]; then
         db_managed="true"
@@ -203,13 +234,35 @@ main() {
         exit 1
     fi
 
-    if [[ "${admin_mfa_required}" != "true" ]]; then
-        echo "TRAINING_HUB_ADMIN_MFA_REQUIRED must be true." >&2
+    if [[ -n "${github_client_id}" || -n "${github_client_secret}" ]]; then
+        if [[ -z "${github_client_id}" || -z "${github_client_secret}" ]]; then
+            echo "TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID and TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET must be set together." >&2
+            exit 1
+        fi
+        if [[ -z "${github_allowed_logins}" && -z "${github_allowed_emails}" && -z "${github_allowed_subjects}" ]]; then
+            echo "Configure at least one GitHub OAuth allowlist: TRAINING_HUB_GITHUB_OAUTH_ALLOWED_LOGINS, TRAINING_HUB_GITHUB_OAUTH_ALLOWED_EMAILS, or TRAINING_HUB_GITHUB_OAUTH_ALLOWED_SUBJECTS." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -n "${authelia_issuer_url}" || -n "${authelia_client_id}" || -n "${authelia_client_secret}" ]]; then
+        if [[ -z "${authelia_issuer_url}" || -z "${authelia_client_id}" || -z "${authelia_client_secret}" ]]; then
+            echo "TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL, TRAINING_HUB_AUTHELIA_OIDC_CLIENT_ID, and TRAINING_HUB_AUTHELIA_OIDC_CLIENT_SECRET must be set together." >&2
+            exit 1
+        fi
+        if [[ -z "${authelia_allowed_emails}" && -z "${authelia_allowed_usernames}" && -z "${authelia_allowed_subjects}" ]]; then
+            echo "Configure at least one Authelia OIDC allowlist: TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_EMAILS, TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_USERNAMES, or TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_SUBJECTS." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -z "${github_client_id}" && -z "${authelia_issuer_url}" ]]; then
+        echo "Configure at least one external sign-in provider: GitHub OAuth and/or Authelia OIDC." >&2
         exit 1
     fi
 
-    if [[ "${password_reset_send_email}" != "true" ]]; then
-        echo "TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL must be true." >&2
+    if [[ -z "${admin_usernames}" && -z "${admin_emails}" ]]; then
+        echo "Set TRAINING_HUB_ADMIN_USERNAMES and/or TRAINING_HUB_ADMIN_EMAILS so the first OAuth/OIDC admin remains bootstrapable." >&2
         exit 1
     fi
 
@@ -218,9 +271,30 @@ main() {
         exit 1
     fi
 
-    if [[ "${smtp_use_tls}" != "true" && "${smtp_use_starttls}" != "true" ]]; then
-        echo "Enable either TRAINING_HUB_SMTP_USE_TLS or TRAINING_HUB_SMTP_USE_STARTTLS." >&2
-        exit 1
+    if is_true "${password_reset_send_email}" || is_true "${admin_mfa_required}"; then
+        if [[ -z "${smtp_host}" ]]; then
+            echo "TRAINING_HUB_SMTP_HOST must be set when password reset mail or admin MFA mail is enabled." >&2
+            exit 1
+        fi
+        if [[ -z "${smtp_port}" ]]; then
+            echo "TRAINING_HUB_SMTP_PORT must be set when password reset mail or admin MFA mail is enabled." >&2
+            exit 1
+        fi
+        if [[ -z "${smtp_from_email}" ]]; then
+            echo "TRAINING_HUB_SMTP_FROM_EMAIL must be set when password reset mail or admin MFA mail is enabled." >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -n "${smtp_host}" || -n "${smtp_port}" || -n "${smtp_from_email}" || -n "${smtp_username}" || -n "${smtp_password}" ]]; then
+        if [[ -z "${smtp_host}" || -z "${smtp_port}" || -z "${smtp_from_email}" ]]; then
+            echo "When SMTP is configured, set TRAINING_HUB_SMTP_HOST, TRAINING_HUB_SMTP_PORT, and TRAINING_HUB_SMTP_FROM_EMAIL together." >&2
+            exit 1
+        fi
+        if [[ "${smtp_use_tls}" != "true" && "${smtp_use_starttls}" != "true" ]]; then
+            echo "Enable either TRAINING_HUB_SMTP_USE_TLS or TRAINING_HUB_SMTP_USE_STARTTLS when SMTP is configured." >&2
+            exit 1
+        fi
     fi
 
     if [[ "${database_driver}" == "mariadb" ]]; then

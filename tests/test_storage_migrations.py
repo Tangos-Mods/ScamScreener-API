@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.training_hub.core.storage_migrations import (
+    _migrate_external_auth_tables,
     _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,
     _migrate_uploads_security_columns,
@@ -85,6 +86,15 @@ def test_migrate_uploads_security_columns_adds_user_agent_for_mariadb_targets() 
     _migrate_uploads_security_columns(connection)
 
     assert "ALTER TABLE uploads ADD COLUMN user_agent VARCHAR(300) NOT NULL DEFAULT ''" in connection.executed
+
+
+def test_migrate_external_auth_tables_create_mariadb_compatible_tables() -> None:
+    connection = _FakeMariaDbConnection({"users": ["id", "username", "email", "password_hash", "is_admin"]})
+
+    _migrate_external_auth_tables(connection)
+
+    assert any("CREATE TABLE IF NOT EXISTS external_auth_states" in sql for sql in connection.executed)
+    assert any("CREATE TABLE IF NOT EXISTS external_identities" in sql for sql in connection.executed)
 
 
 def test_migrate_training_case_tombstone_columns_uses_mariadb_fallback_when_needed() -> None:

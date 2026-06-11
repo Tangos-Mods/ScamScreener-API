@@ -98,6 +98,40 @@ def test_from_env_disables_api_docs_by_default_in_production(monkeypatch) -> Non
     assert settings.api_docs_enabled is False
 
 
+def test_from_env_allows_external_auth_in_production_without_local_admin_mfa(monkeypatch) -> None:
+    _clear_training_hub_env(monkeypatch)
+    settings_module = _load_settings_module()
+    monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _set_production_env(monkeypatch)
+    monkeypatch.setenv("TRAINING_HUB_ADMIN_MFA_REQUIRED", "false")
+    monkeypatch.setenv("TRAINING_HUB_PUBLIC_BASE_URL", "https://scamscreener.example.com")
+    monkeypatch.setenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID", "github-client")
+    monkeypatch.setenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET", "github-secret")
+    monkeypatch.setenv("TRAINING_HUB_GITHUB_OAUTH_ALLOWED_LOGINS", "owner")
+
+    settings = settings_module.TrainingHubSettings.from_env()
+
+    assert settings.external_auth_enabled is True
+    assert settings.github_oauth_enabled is True
+    assert settings.admin_mfa_required is False
+
+
+def test_from_env_requires_external_auth_allowlist(monkeypatch) -> None:
+    _clear_training_hub_env(monkeypatch)
+    settings_module = _load_settings_module()
+    monkeypatch.setattr(settings_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("TRAINING_HUB_PUBLIC_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID", "github-client")
+    monkeypatch.setenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET", "github-secret")
+
+    try:
+        settings_module.TrainingHubSettings.from_env()
+    except ValueError as exception:
+        assert "GitHub OAuth allowlist" in str(exception)
+    else:
+        raise AssertionError("Expected allowlist validation error for GitHub OAuth.")
+
+
 def test_from_env_loads_site_legal_configuration(monkeypatch) -> None:
     _clear_training_hub_env(monkeypatch)
     settings_module = _load_settings_module()

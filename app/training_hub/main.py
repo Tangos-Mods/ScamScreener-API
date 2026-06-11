@@ -17,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .http.live_api_metrics import LiveApiRequestMetrics
+from .http.persistent_api_metrics import PersistentApiMetricsRecorder
 from .http.rate_limit import _DatabaseRateLimiter, _rate_limit_identity, _rate_limit_rule
 from .http.security import _apply_security_headers, _is_same_origin_post, _request_is_https
 from .core.hub_core import (
@@ -27,7 +29,7 @@ from .core.hub_core import (
     _process_next_data_export_request,
     _run_retention_cleanup,
 )
-from .core.common import _format_utc_timestamp
+from .core.common import _format_integer_grouped, _format_utc_timestamp
 from .core.mfa import _user_requires_admin_mfa_setup
 from .routes import register_admin_routes, register_public_routes
 from .config.settings import CSRF_COOKIE_NAME, TrainingHubSettings
@@ -118,6 +120,10 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
                 app.state.data_export_wake.clear()
 
         app.state.data_export_task = asyncio.create_task(_data_export_worker(), name="account-data-export-worker")
+        app.state.persistent_api_metrics_task = asyncio.create_task(
+            _persistent_api_metrics_worker(),
+            name="persistent-api-metrics-worker",
+        )
         if settings.retention_auto_enabled:
 
             async def _retention_worker() -> None:
@@ -140,6 +146,14 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
                 data_export_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await data_export_task
+            persistent_api_metrics_task = getattr(app.state, "persistent_api_metrics_task", None)
+            if persistent_api_metrics_task is not None:
+                persistent_api_metrics_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await persistent_api_metrics_task
+            persistent_api_metrics = getattr(app.state, "persistent_api_metrics", None)
+            if persistent_api_metrics is not None:
+                await run_in_threadpool(persistent_api_metrics.flush)
             retention_task = getattr(app.state, "retention_task", None)
             if retention_task is not None:
                 retention_task.cancel()
@@ -162,9 +176,20 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
     app.state.settings = settings
     app.state.templates = Jinja2Templates(directory=str(base_dir / "sites"))
     app.state.templates.env.filters["datetime_utc"] = _format_utc_timestamp
+    app.state.templates.env.filters["int_grouped"] = _format_integer_grouped
     app.state.rate_limiter = _DatabaseRateLimiter(settings.database_path)
+    app.state.live_api_metrics = LiveApiRequestMetrics()
+    app.state.persistent_api_metrics = PersistentApiMetricsRecorder(settings.database_path)
     app.mount("/css", StaticFiles(directory=str(base_dir / "css")), name="css")
     app.mount("/js", StaticFiles(directory=str(base_dir / "js")), name="js")
+
+    async def _persistent_api_metrics_worker() -> None:
+        while True:
+            try:
+                await run_in_threadpool(app.state.persistent_api_metrics.flush)
+            except Exception:
+                logger.exception("Persistent API metrics flush failed.")
+            await asyncio.sleep(1)
 
     def _apply_no_store_headers(response, request: Request) -> None:
         path = request.url.path
@@ -172,10 +197,9 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
             path.startswith("/admin")
             or path.startswith("/dashboard")
             or path.startswith("/account")
-            or path.startswith("/mfa")
-            or path.startswith("/login/passkey")
+            or path.startswith("/auth/external")
             or path.startswith("/api/v1/client/")
-            or path in {"/login", "/register", "/forgot-password", "/reset-password", "/admin/mfa"}
+            or path in {"/login"}
             or "set-cookie" in response.headers
         ):
             response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -205,9 +229,8 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
             if (
                 requires_setup
                 and path.startswith("/admin")
-                and path not in {"/admin/mfa", "/mfa"}
             ):
-                redirect = RedirectResponse(url="/account/security?notice=Complete+MFA+setup", status_code=303)
+                redirect = RedirectResponse(url="/account/security?notice=Complete+account+authentication+setup", status_code=303)
                 _apply_no_store_headers(redirect, request)
                 return _apply_security_headers(redirect, settings.enforce_https, request.url.path)
 
@@ -218,47 +241,60 @@ def create_training_hub_app(settings: TrainingHubSettings | None = None) -> Fast
             csrf_token = _new_csrf_token()
             set_csrf_cookie = True
         request.state.csrf_token = csrf_token
-
-        if settings.enable_rate_limit:
-            rule = _rate_limit_rule(request.method, request.url.path, settings)
-            if rule is not None:
-                bucket, max_requests, window_seconds = rule
-                key = f"{bucket}:{_rate_limit_identity(request, settings)}"
-                allowed, retry_after = await run_in_threadpool(
-                    app.state.rate_limiter.allow,
-                    key,
-                    max_requests,
-                    window_seconds,
-                )
-                if not allowed:
-                    limited = PlainTextResponse("Too many requests.", status_code=429)
-                    limited.headers["Retry-After"] = str(retry_after)
-                    if set_csrf_cookie:
-                        limited.set_cookie(
-                            CSRF_COOKIE_NAME,
-                            csrf_token,
-                            httponly=False,
-                            samesite="strict",
-                            secure=settings.enforce_https,
-                            max_age=settings.session_ttl_minutes * 60,
-                            path="/",
-                        )
-                    _apply_no_store_headers(limited, request)
-                    return _apply_security_headers(limited, settings.enforce_https, request.url.path)
-
-        response = await call_next(request)
-        if should_manage_csrf_cookie and set_csrf_cookie:
-            response.set_cookie(
-                CSRF_COOKIE_NAME,
-                csrf_token,
-                httponly=False,
-                samesite="strict",
-                secure=settings.enforce_https,
-                max_age=settings.session_ttl_minutes * 60,
-                path="/",
+        live_metrics_token = app.state.live_api_metrics.start_request(
+            request.url.path,
+            str(request.headers.get("user-agent", "")),
+        )
+        if live_metrics_token is not None:
+            app.state.persistent_api_metrics.record_request(
+                live_metrics_token.bucket,
+                live_metrics_token.endpoint,
+                live_metrics_token.agent,
             )
-        _apply_no_store_headers(response, request)
-        return _apply_security_headers(response, settings.enforce_https, request.url.path)
+
+        try:
+            if settings.enable_rate_limit:
+                rule = _rate_limit_rule(request.method, request.url.path, settings)
+                if rule is not None:
+                    bucket, max_requests, window_seconds = rule
+                    key = f"{bucket}:{_rate_limit_identity(request, settings)}"
+                    allowed, retry_after = await run_in_threadpool(
+                        app.state.rate_limiter.allow,
+                        key,
+                        max_requests,
+                        window_seconds,
+                    )
+                    if not allowed:
+                        limited = PlainTextResponse("Too many requests.", status_code=429)
+                        limited.headers["Retry-After"] = str(retry_after)
+                        if set_csrf_cookie:
+                            limited.set_cookie(
+                                CSRF_COOKIE_NAME,
+                                csrf_token,
+                                httponly=False,
+                                samesite="strict",
+                                secure=settings.enforce_https,
+                                max_age=settings.session_ttl_minutes * 60,
+                                path="/",
+                            )
+                        _apply_no_store_headers(limited, request)
+                        return _apply_security_headers(limited, settings.enforce_https, request.url.path)
+
+            response = await call_next(request)
+            if should_manage_csrf_cookie and set_csrf_cookie:
+                response.set_cookie(
+                    CSRF_COOKIE_NAME,
+                    csrf_token,
+                    httponly=False,
+                    samesite="strict",
+                    secure=settings.enforce_https,
+                    max_age=settings.session_ttl_minutes * 60,
+                    path="/",
+                )
+            _apply_no_store_headers(response, request)
+            return _apply_security_headers(response, settings.enforce_https, request.url.path)
+        finally:
+            app.state.live_api_metrics.finish_request(live_metrics_token)
 
     register_public_routes(app, settings)
     register_admin_routes(app, settings)

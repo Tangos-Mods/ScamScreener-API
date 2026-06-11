@@ -91,6 +91,7 @@ services:
       SCAMSCREENER_DB_NAME: ${SCAMSCREENER_DB_NAME:-scamscreener_hub}
       SCAMSCREENER_DB_USER: ${SCAMSCREENER_DB_USER:-scamscreener}
       SCAMSCREENER_EXTRA_TRUSTED_PROXIES: "172.31.255.10"
+      SCAMSCREENER_INTERNAL_API_METRICS_URL: "http://scamscreener-api:8081/api/internal/live-metrics"
     volumes:
       - scamscreener_data:/app/data
     restart: unless-stopped

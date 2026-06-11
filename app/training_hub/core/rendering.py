@@ -10,8 +10,15 @@ from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TrainingHub
 from .access_policies import _access_policies
 from .admin_ops import _admin_audit_logs, _admin_cases, _admin_runs, _admin_users, _normalize_admin_case_sort
 from .account_ops import _user_linked_client_identities
+from .content_scrubbing import (
+    CONTENT_SCRUB_MATCH_MODES,
+    CONTENT_SCRUB_MAX_RULES,
+    CONTENT_SCRUB_PATTERN_MAX_LENGTH,
+    _admin_content_scrub_rules,
+)
 from .data_exports import _user_data_export_requests
-from .mfa import _mfa_state, _user_passkeys, _user_requires_admin_mfa_setup, _user_totp_factors
+from .mfa import _mfa_state, _user_requires_admin_mfa_setup
+from .external_auth import external_auth_provider_options, external_identities_for_user
 from .recovery import _monitoring_snapshot
 from .session_auth import _user_active_sessions
 from .training_data import _user_uploads
@@ -40,9 +47,7 @@ def _legal_context(settings: TrainingHubSettings) -> dict[str, Any]:
         "public_base_url": settings.public_base_url or "Not configured",
         "site_operator_identity_complete": settings.site_operator_identity_complete,
         "compliance_warnings": compliance_warnings,
-        "email_features_enabled": (
-            settings.password_reset_send_email or settings.admin_mfa_required or settings.outbound_email_enabled
-        ),
+        "email_features_enabled": settings.outbound_email_enabled,
         "account_data_export_email_enabled": settings.outbound_email_enabled,
         "smtp_host": settings.smtp_host or "Not configured",
         "session_cookie_name": SESSION_COOKIE_NAME,
@@ -80,35 +85,6 @@ def _admin_case_sort_link(
         "aria_sort": aria_sort,
         "is_active": is_active,
     }
-
-
-def _render_auth(
-    request: Request,
-    templates: Jinja2Templates,
-    mode: str,
-    notice: str = "",
-    error: str = "",
-    registration_mode: str = "open",
-    status_code: int = 200,
-):
-    is_register = mode == "register"
-    normalized_registration_mode = (
-        registration_mode if registration_mode in {"open", "invite", "closed"} else "open"
-    )
-    context = {
-        "request": request,
-        "mode": mode,
-        "title": "Register" if is_register else "Login",
-        "form_action": "/register" if is_register else "/login",
-        "notice": notice,
-        "error": error,
-        "current_user": request.state.user,
-        "csrf_token": getattr(request.state, "csrf_token", ""),
-        "registration_mode": normalized_registration_mode,
-        "registration_invite_required": normalized_registration_mode == "invite",
-        "registration_closed": normalized_registration_mode == "closed",
-    }
-    return templates.TemplateResponse(request, "auth.html", context, status_code=status_code)
 
 
 def _dashboard_context(
@@ -177,7 +153,6 @@ def _render_dashboard(
     template_map = {
         "overview": "dashboard.html",
         "uploads": "dashboard_uploads.html",
-        "account": "dashboard_account.html",
     }
     template_name = template_map.get(page)
     if template_name is None:
@@ -223,10 +198,11 @@ def _account_context(
     context.update(
         {
             "mfa_state": mfa_state,
-            "totp_factors": _user_totp_factors(settings, int(user["id"])),
-            "passkeys": _user_passkeys(settings, int(user["id"])),
             "generated_backup_codes": list(backup_codes or []),
             "pending_totp_enrollment": dict(pending_totp or {}),
+            "external_auth_enabled": settings.external_auth_enabled,
+            "external_auth_providers": external_auth_provider_options(settings),
+            "linked_external_identities": external_identities_for_user(settings, int(user["id"])),
             "admin_navigation_locked": bool(int(user.get("is_admin", 0)) == 1 and mfa_state.get("admin_setup_required")),
         }
     )
@@ -298,6 +274,7 @@ def _admin_context(
     ]
     runs = [dict(row) for row in _admin_runs(settings.database_path)]
     audit_logs = [dict(row) for row in _admin_audit_logs(settings.database_path)]
+    content_scrub_rules = _admin_content_scrub_rules(settings.database_path)
     admin_navigation_locked = bool(
         int(user.get("is_admin", 0)) == 1 and _user_requires_admin_mfa_setup(settings, int(user["id"]))
     )
@@ -333,6 +310,10 @@ def _admin_context(
         "recent_cases": cases[:8],
         "recent_runs": runs[:6],
         "recent_audit_logs": audit_logs[:8],
+        "content_scrub_rules": content_scrub_rules,
+        "content_scrub_match_modes": CONTENT_SCRUB_MATCH_MODES,
+        "content_scrub_rule_max_count": CONTENT_SCRUB_MAX_RULES,
+        "content_scrub_pattern_max_length": CONTENT_SCRUB_PATTERN_MAX_LENGTH,
         "admin_navigation_locked": admin_navigation_locked,
     }
 
@@ -353,6 +334,9 @@ def _render_admin(
         "cases": "admin_cases.html",
         "runs": "admin_runs.html",
         "system": "admin_system.html",
+        "scrub_rules": "admin_scrub_rules.html",
+        "analytics_statistics": "admin_analytics_statistics.html",
+        "analytics_metrics": "admin_analytics_metrics.html",
     }
     template_name = template_map.get(page)
     if template_name is None:

@@ -56,6 +56,15 @@ def _env_csv_list(name: str) -> list[str]:
     return values
 
 
+def _env_csv_tuple_lower(name: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for part in _env_csv_list(name):
+        normalized = part.strip().lower()
+        if normalized:
+            values.append(normalized)
+    return tuple(values)
+
+
 def _first(values: list[str] | None) -> str:
     if not values:
         return ""
@@ -100,6 +109,18 @@ class TrainingHubSettings:
     trusted_proxies: set[str]
     environment: str = "development"
     public_base_url: str = ""
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_allowed_emails: tuple[str, ...] = ()
+    github_oauth_allowed_logins: tuple[str, ...] = ()
+    github_oauth_allowed_subjects: tuple[str, ...] = ()
+    authelia_oidc_issuer_url: str = ""
+    authelia_oidc_client_id: str = ""
+    authelia_oidc_client_secret: str = ""
+    authelia_oidc_scopes: tuple[str, ...] = ("openid", "profile", "email")
+    authelia_oidc_allowed_emails: tuple[str, ...] = ()
+    authelia_oidc_allowed_usernames: tuple[str, ...] = ()
+    authelia_oidc_allowed_subjects: tuple[str, ...] = ()
     allowed_hosts: set[str] = field(default_factory=lambda: {"localhost", "127.0.0.1", "testserver"})
     registration_mode: str = "open"
     registration_invite_code: str = ""
@@ -156,6 +177,7 @@ class TrainingHubSettings:
     site_privacy_contact: str = ""
     site_hosting_location: str = "Ashburn, Virginia, USA"
     api_docs_enabled: bool = True
+    internal_api_metrics_url: str = ""
 
     @property
     def database_path(self) -> Path | str:
@@ -178,6 +200,22 @@ class TrainingHubSettings:
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def github_oauth_enabled(self) -> bool:
+        return bool(self.github_oauth_client_id and self.github_oauth_client_secret)
+
+    @property
+    def authelia_oidc_enabled(self) -> bool:
+        return bool(
+            self.authelia_oidc_issuer_url
+            and self.authelia_oidc_client_id
+            and self.authelia_oidc_client_secret
+        )
+
+    @property
+    def external_auth_enabled(self) -> bool:
+        return bool(self.github_oauth_enabled or self.authelia_oidc_enabled)
 
     @property
     def outbound_email_enabled(self) -> bool:
@@ -327,10 +365,31 @@ class TrainingHubSettings:
             or "Ashburn, Virginia, USA"
         )
         api_docs_enabled = _env_bool("TRAINING_HUB_API_DOCS_ENABLED", not is_production)
+        internal_api_metrics_url = _env_absolute_url("SCAMSCREENER_INTERNAL_API_METRICS_URL")
         storage_dir_raw = os.getenv("TRAINING_HUB_STORAGE_DIR", str(base_dir / "data")).strip()
         pipeline_command = os.getenv("TRAINING_HUB_PIPELINE_COMMAND", "").strip()
         project_root_raw = os.getenv("TRAINING_HUB_PROJECT_ROOT", "").strip()
         public_base_url = _env_absolute_url("TRAINING_HUB_PUBLIC_BASE_URL")
+        github_oauth_client_id = (os.getenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID", "") or "").strip()
+        github_oauth_client_secret = (os.getenv("TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET", "") or "").strip()
+        github_oauth_allowed_emails = _env_csv_tuple_lower("TRAINING_HUB_GITHUB_OAUTH_ALLOWED_EMAILS")
+        github_oauth_allowed_logins = _env_csv_tuple_lower("TRAINING_HUB_GITHUB_OAUTH_ALLOWED_LOGINS")
+        github_oauth_allowed_subjects = tuple(value.strip() for value in _env_csv_list("TRAINING_HUB_GITHUB_OAUTH_ALLOWED_SUBJECTS") if value.strip())
+        authelia_oidc_issuer_url = _env_absolute_url("TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL")
+        authelia_oidc_client_id = (os.getenv("TRAINING_HUB_AUTHELIA_OIDC_CLIENT_ID", "") or "").strip()
+        authelia_oidc_client_secret = (os.getenv("TRAINING_HUB_AUTHELIA_OIDC_CLIENT_SECRET", "") or "").strip()
+        authelia_oidc_scopes = tuple(
+            value.strip()
+            for value in _env_csv_list("TRAINING_HUB_AUTHELIA_OIDC_SCOPES")
+            if value.strip()
+        ) or ("openid", "profile", "email")
+        authelia_oidc_allowed_emails = _env_csv_tuple_lower("TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_EMAILS")
+        authelia_oidc_allowed_usernames = _env_csv_tuple_lower("TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_USERNAMES")
+        authelia_oidc_allowed_subjects = tuple(
+            value.strip()
+            for value in _env_csv_list("TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_SUBJECTS")
+            if value.strip()
+        )
         public_origin = public_base_url
         allowed_hosts = _env_csv_set("TRAINING_HUB_ALLOWED_HOSTS")
         if not allowed_hosts and public_base_url:
@@ -390,6 +449,39 @@ class TrainingHubSettings:
             raise ValueError(
                 "TRAINING_HUB_REGISTRATION_INVITE_CODE must be set when TRAINING_HUB_REGISTRATION_MODE=invite."
             )
+        if bool(github_oauth_client_id) != bool(github_oauth_client_secret):
+            raise ValueError(
+                "TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID and TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET must be set together."
+            )
+        if github_oauth_client_id and not (
+            github_oauth_allowed_emails or github_oauth_allowed_logins or github_oauth_allowed_subjects
+        ):
+            raise ValueError(
+                "Configure at least one GitHub OAuth allowlist: emails, logins, or subjects."
+            )
+        authelia_fields_present = any(
+            (
+                authelia_oidc_issuer_url,
+                authelia_oidc_client_id,
+                authelia_oidc_client_secret,
+            )
+        )
+        if authelia_fields_present and not (
+            authelia_oidc_issuer_url and authelia_oidc_client_id and authelia_oidc_client_secret
+        ):
+            raise ValueError(
+                "TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL, CLIENT_ID, and CLIENT_SECRET must be set together."
+            )
+        if authelia_oidc_issuer_url and not (
+            authelia_oidc_allowed_emails
+            or authelia_oidc_allowed_usernames
+            or authelia_oidc_allowed_subjects
+        ):
+            raise ValueError(
+                "Configure at least one Authelia OIDC allowlist: emails, usernames, or subjects."
+            )
+        if (github_oauth_client_id or authelia_oidc_issuer_url) and not public_base_url:
+            raise ValueError("TRAINING_HUB_PUBLIC_BASE_URL must be set when external authentication is enabled.")
         if (password_reset_send_email or admin_mfa_required) and not smtp_host:
             raise ValueError(
                 "TRAINING_HUB_SMTP_HOST must be set when password reset email or admin MFA email is enabled."
@@ -413,7 +505,7 @@ class TrainingHubSettings:
                 raise ValueError("TRAINING_HUB_WEBAUTHN_ORIGINS must use https in production.")
             if secret_key == "change-me-in-env" or len(secret_key) < 32:
                 raise ValueError("TRAINING_HUB_SECRET_KEY must be at least 32 chars in production.")
-            if not admin_mfa_required:
+            if not admin_mfa_required and not (github_oauth_client_id or authelia_oidc_issuer_url):
                 raise ValueError("TRAINING_HUB_ADMIN_MFA_REQUIRED must be true in production.")
             if password_reset_show_token:
                 raise ValueError("TRAINING_HUB_PASSWORD_RESET_SHOW_TOKEN must be false in production.")
@@ -448,6 +540,18 @@ class TrainingHubSettings:
             trusted_proxies=_env_csv_set("TRAINING_HUB_TRUSTED_PROXIES"),
             environment=environment,
             public_base_url=public_base_url,
+            github_oauth_client_id=github_oauth_client_id,
+            github_oauth_client_secret=github_oauth_client_secret,
+            github_oauth_allowed_emails=github_oauth_allowed_emails,
+            github_oauth_allowed_logins=github_oauth_allowed_logins,
+            github_oauth_allowed_subjects=github_oauth_allowed_subjects,
+            authelia_oidc_issuer_url=authelia_oidc_issuer_url,
+            authelia_oidc_client_id=authelia_oidc_client_id,
+            authelia_oidc_client_secret=authelia_oidc_client_secret,
+            authelia_oidc_scopes=authelia_oidc_scopes,
+            authelia_oidc_allowed_emails=authelia_oidc_allowed_emails,
+            authelia_oidc_allowed_usernames=authelia_oidc_allowed_usernames,
+            authelia_oidc_allowed_subjects=authelia_oidc_allowed_subjects,
             allowed_hosts=allowed_hosts,
             registration_mode=registration_mode,
             registration_invite_code=registration_invite_code,
@@ -504,5 +608,6 @@ class TrainingHubSettings:
             site_privacy_contact=site_privacy_contact,
             site_hosting_location=site_hosting_location,
             api_docs_enabled=api_docs_enabled,
+            internal_api_metrics_url=internal_api_metrics_url,
         )
 

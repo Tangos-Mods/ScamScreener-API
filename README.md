@@ -8,20 +8,18 @@ This repository contains two separate applications in one repo:
 ## What it provides
 
 - Clear package split between `app/training_hub` and `app/marketguard_api`
-- Player registration + login
-- Authenticator App (TOTP), Passkey, and backup-code MFA for web accounts
-- Admin MFA migration bridge with one-time email code until a standard MFA method is enrolled
-- Branded HTML emails with plain-text fallback for password reset and MFA bridge mail
+- External web sign-in via approved GitHub OAuth and/or Authelia OIDC identities
+- Local app session management after external provider sign-in
+- Branded HTML emails with plain-text fallback for operational mail where enabled
 - Admin backup create/restore for DB + uploads + bundles
-- Forgot-password + token-based password reset flow
 - Player dashboard with own contribution stats
 - Upload form for `training-cases-v2.jsonl` files
 - Per-account upload history with download links
 - Self-service upload deletion, full contribution purge, and account deletion
 - Self-service account data export workflow delivered by email
 - Admin view over users, basic case list, training runs, and audit log
+- Admin-managed content scrubbing rules for removing sensitive phrases from future uploads before storage
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
-- Public Lowest BIN endpoint at `/api/v1/lowestbin`
 - Public Lowest BIN v2 endpoint at `/api/v2/lowestbin`
 - Public Bazaar endpoint at `/api/v1/bazaar`
 - Admin button to:
@@ -32,7 +30,7 @@ Data/state:
 
 - the default deployment stores app state under `/app/data`
 - Training Hub stores users, sessions, uploads, cases, and audit metadata in MariaDB for staging/production deployments
-- uploaded raw payloads and generated bundles are kept in the persistent app data volume
+- uploaded payloads (after any configured content scrubbing) and generated bundles are kept in the persistent app data volume
 
 Frontend files:
 
@@ -63,10 +61,10 @@ Set at least:
 
 Optional:
 
-- `TRAINING_HUB_ADMIN_USERNAMES` (comma-separated bootstrap allowlist for first admin account)
+- `TRAINING_HUB_ADMIN_USERNAMES` (comma-separated admin allowlist for externally provisioned users)
 - `TRAINING_HUB_DB_DRIVER=sqlite` if you intentionally want a local development fallback instead of MariaDB
 
-Bootstrap note: first registration is locked until `TRAINING_HUB_ADMIN_USERNAMES` contains the first admin username.
+Bootstrap note: web access now comes from external identity providers. Configure either GitHub OAuth or Authelia OIDC plus an explicit allowlist before first sign-in.
 
 ## 2) Run locally
 
@@ -86,7 +84,6 @@ Open:
 
 - `http://localhost:8080` (Training Hub landing page)
 - `http://localhost:8080/hub` (redirects to login/dashboard)
-- `http://localhost:8081/api/v1/lowestbin` (deprecated MarketGuard Lowest BIN JSON)
 - `http://localhost:8081/api/v2/lowestbin` (MarketGuard Lowest BIN JSON with `lastUpdated`, `products`, seller UUID, and auction `item_name`)
 - `http://localhost:8081/api/v1/bazaar` (MarketGuard Bazaar summary JSON)
 - `http://localhost:8081/docs` (interactive OpenAPI docs for local validation)
@@ -120,8 +117,9 @@ What this path expects:
 
 - a real public domain in `CADDY_SITE_ADDRESS` such as `scamscreener.creepans.net`
 - `TRAINING_HUB_PUBLIC_BASE_URL` is set to the real public `https://...` URL
-- SMTP is configured for password reset and MFA bridge mail
-- WebAuthn RP ID/origins are configured or derivable from the public site address
+- GitHub OAuth and/or Authelia OIDC are configured with explicit allowlists
+- `TRAINING_HUB_ADMIN_USERNAMES` and/or `TRAINING_HUB_ADMIN_EMAILS` are set for deterministic admin bootstrap
+- SMTP is configured only if you explicitly enable password reset or admin MFA mail flows
 - `TRAINING_HUB_SITE_*` values are reviewed for `/impressum` and `/datenschutz`
 - persistent storage is kept on the Docker volumes
 
@@ -131,14 +129,14 @@ What this path provides automatically:
 - automatic HTTPS via Caddy
 - `/api/v1/health` healthchecks for the hub and a dedicated internal health route for the API
 - public blocking of `/api/v1/health`, `/api/v1/metrics`, and internal-only health paths
-- default bootstrap admin username `admin` when `TRAINING_HUB_ADMIN_USERNAMES` is omitted
 - generated persistent secret key when `TRAINING_HUB_SECRET_KEY` is omitted
 - generated persistent MariaDB app/root passwords when `SCAMSCREENER_DB_MANAGED=true`
 
 Operational helpers for this path:
 
-- `python scripts/update.py` runs preflight, rebuilds the image, restarts the stack, and waits for app health
+- `python scripts/update.py` runs preflight, rebuilds the image, restarts the stack, waits for app health, and marks the deployment as OAuth-ready
 - `python scripts/update.py --skip-pull` skips upstream base-image pulls during rebuild
+- `python scripts/migrate.py` creates repo/volume backups, stops the legacy local-login split stack without deleting volumes, and then starts the OAuth/OIDC release in place
 - `python scripts/reset.py` asks for confirmation and then deletes the full compose deployment state for a clean restart
 - `python scripts/reset.py --yes --prune-images` also removes the locally built app image
 
@@ -175,16 +173,16 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `TRAINING_HUB_SESSION_TTL_MINUTES` default `720`
 - `TRAINING_HUB_SESSION_BIND_IP` default `false`
 - `TRAINING_HUB_SESSION_BIND_USER_AGENT` default `false`
-- `TRAINING_HUB_REGISTRATION_MODE` default `open` (`open`, `invite`, `closed`)
-- `TRAINING_HUB_REGISTRATION_INVITE_CODE` required when mode is `invite`
-- `TRAINING_HUB_PASSWORD_RESET_TTL_MINUTES` default `30`
-- `TRAINING_HUB_PASSWORD_RESET_SHOW_TOKEN` default `false` (dev only)
-- `TRAINING_HUB_PASSWORD_RESET_SEND_EMAIL` default `false`
+- `TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID` / `TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET` enable GitHub sign-in
+- `TRAINING_HUB_GITHUB_OAUTH_ALLOWED_LOGINS` / `TRAINING_HUB_GITHUB_OAUTH_ALLOWED_EMAILS` / `TRAINING_HUB_GITHUB_OAUTH_ALLOWED_SUBJECTS` restrict GitHub access
+- `TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL` / `TRAINING_HUB_AUTHELIA_OIDC_CLIENT_ID` / `TRAINING_HUB_AUTHELIA_OIDC_CLIENT_SECRET` enable Authelia OIDC
+- `TRAINING_HUB_AUTHELIA_OIDC_SCOPES` default `openid,profile,email`
+- `TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_EMAILS` / `TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_USERNAMES` / `TRAINING_HUB_AUTHELIA_OIDC_ALLOWED_SUBJECTS` restrict Authelia access
 - `TRAINING_HUB_SMTP_HOST` SMTP server host
 - `TRAINING_HUB_SMTP_PORT` SMTP server port (default `587`)
 - `TRAINING_HUB_SMTP_USERNAME` optional SMTP username
 - `TRAINING_HUB_SMTP_PASSWORD` optional SMTP password
-- `TRAINING_HUB_SMTP_FROM_EMAIL` sender address for reset emails
+- `TRAINING_HUB_SMTP_FROM_EMAIL` sender address for outbound account exports and operational mail
 - `TRAINING_HUB_SMTP_USE_TLS` default `false` (implicit TLS/SMTPS)
 - `TRAINING_HUB_SMTP_USE_STARTTLS` default `true` (explicit STARTTLS)
 - `TRAINING_HUB_SITE_PROJECT_CLASSIFICATION` default `Private non-commercial community project`
@@ -193,10 +191,6 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `TRAINING_HUB_SITE_CONTACT_CHANNEL` optional public contact channel rendered on `/impressum`
 - `TRAINING_HUB_SITE_PRIVACY_CONTACT` optional privacy contact rendered on `/datenschutz`
 - `TRAINING_HUB_SITE_HOSTING_LOCATION` default `Ashburn, Virginia, USA`
-- `TRAINING_HUB_ADMIN_MFA_REQUIRED` default `false`
-- `TRAINING_HUB_ADMIN_MFA_TTL_MINUTES` default `30`
-- `TRAINING_HUB_ADMIN_MFA_MAX_ATTEMPTS` default `5`
-- `TRAINING_HUB_TOTP_SKEW_STEPS` default `2` (allows moderate clock drift in 30-second TOTP windows)
 - `TRAINING_HUB_WEBAUTHN_RP_ID` optional WebAuthn relying-party ID (defaults from `TRAINING_HUB_PUBLIC_BASE_URL` or allowed hosts)
 - `TRAINING_HUB_WEBAUTHN_RP_NAME` default `ScamScreener`
 - `TRAINING_HUB_WEBAUTHN_ORIGINS` optional comma-separated WebAuthn origins (defaults from `TRAINING_HUB_PUBLIC_BASE_URL`, or from allowed hosts in production)
@@ -227,10 +221,11 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `TRAINING_HUB_SECURITY_ALERT_MFA_FAILED_THRESHOLD` default `6`
 - `TRAINING_HUB_SECURITY_ALERT_PASSWORD_RESET_THRESHOLD` default `10`
 - `TRAINING_HUB_STORAGE_DIR` default `./data`
-- `TRAINING_HUB_ADMIN_EMAILS` optional, comma-separated (informational only)
-- `TRAINING_HUB_ADMIN_USERNAMES` required for first-account admin bootstrap
+- `TRAINING_HUB_ADMIN_EMAILS` optional in development, but required in production unless `TRAINING_HUB_ADMIN_USERNAMES` is set
+- `TRAINING_HUB_ADMIN_USERNAMES` optional in development, but required in production unless `TRAINING_HUB_ADMIN_EMAILS` is set
 - `TRAINING_HUB_TRUSTED_PROXIES` optional, comma-separated exact IPs or CIDR ranges (`docker-compose.yml` keeps `127.0.0.1` for the internal healthcheck and appends the internal Caddy IP automatically)
 - `TRAINING_HUB_PROJECT_ROOT` optional
+- `SCAMSCREENER_INTERNAL_API_METRICS_URL` optional absolute internal URL for aggregating live API metrics from a separate API process or container
 - `MARKETGUARD_HYPIXEL_API_BASE_URL` default `https://api.hypixel.net/v2`
 - `MARKETGUARD_REQUEST_TIMEOUT_SECONDS` default `10`
 - `MARKETGUARD_MAX_PARALLEL_PAGES` default `8`
@@ -259,23 +254,21 @@ The production topology is Compose-first. Running a single `docker run` containe
 Production-mode startup checks (`TRAINING_HUB_ENV=production`) enforce:
 - `TRAINING_HUB_ENFORCE_HTTPS=true`
 - strong `TRAINING_HUB_SECRET_KEY` (>= 32 chars)
-- `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`
 - `TRAINING_HUB_ENABLE_RATE_LIMIT=true`
 - `TRAINING_HUB_ENFORCE_ORIGIN_CHECK=true`
 - explicit `TRAINING_HUB_ALLOWED_HOSTS` (no wildcard)
 - MariaDB selected by default unless `TRAINING_HUB_DB_DRIVER` is explicitly overridden
 - MariaDB TLS enabled for external MariaDB connections unless the managed internal compose database is used
-- no token disclosure in forgot-password UI (`TRAINING_HUB_PASSWORD_RESET_SHOW_TOKEN=false`)
+- at least one external sign-in provider must be configured
 
 Admin trigger creates a merged bundle and records the run as `prepared`.
 
 Security headers include CSP, COOP/CORP, `X-Frame-Options`, and `Permissions-Policy`.
 Failed/locked login attempts for known accounts are written to the audit log.
-Users can change their password from the dashboard; this revokes other active sessions.
 Admin can run retention cleanup from `/admin` to prune stale sessions, reset tokens, legacy MFA challenges, generic auth flows, logs, uploads, bundles, backups, and rate-limit rows.
 Automatic retention cleanup runs in the background when `TRAINING_HUB_RETENTION_AUTO_ENABLED=true`.
 Admin can create and restore backups from `/admin` (archive includes DB export + uploads + bundles; restore requires valid signed manifest).
-Prometheus-compatible monitoring is available at `/api/v1/metrics`.
+Prometheus-compatible monitoring is available at the internal-only `/api/v1/metrics` endpoint.
 
 Container hardening defaults:
 - runs as non-root user
@@ -290,29 +283,18 @@ Supply-chain checks:
 
 ## 5) API endpoints
 
-- `GET /api/v1/health`
-- `GET /api/v1/lowestbin`
+- `GET /api/v1/health` (internal only)
 - `GET /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
 - `GET /market/`
 - `GET /market/bazaar`
-- `POST /api/v1/client/auth/login`
 - `POST /api/v1/client/uploads`
 - `POST /api/v1/client/uploads/anonymous`
 - `POST /api/v1/client/auth/logout`
 
-`/api/v1/health` returns status, UTC time, user/upload counts, and storage metadata.
-`/api/v1/lowestbin` returns a flat Moulberry-compatible JSON object whose keys are item identifiers and whose values are the current Lowest BIN prices. This endpoint is deprecated and emits `Deprecation: true` plus `Sunset: Mon, 01 Jun 2026 00:00:00 GMT`.
+`/api/v1/health` is an internal-only observability endpoint that returns status, UTC time, user/upload counts, and storage metadata.
+`/api/v1/lowestbin` is disabled and returns `410 Gone` with a pointer to `/api/v2/lowestbin`.
 `/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
-
-Example `GET /api/v1/lowestbin` response:
-
-```json
-{
-  "HYPERION": 98000000.0,
-  "TRUE_ESSENCE": 23437.5
-}
-```
 
 Example `GET /api/v2/lowestbin` response:
 
@@ -338,11 +320,12 @@ Example `GET /api/v2/lowestbin` response:
 }
 ```
 
-Example deprecation headers for `GET /api/v1/lowestbin`:
+Example disabled response for `GET /api/v1/lowestbin`:
 
-```http
-Deprecation: true
-Sunset: Mon, 01 Jun 2026 00:00:00 GMT
+```json
+{
+  "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
+}
 ```
 
 API documentation:
@@ -351,7 +334,7 @@ API documentation:
 - the combined production app disables them by default when `TRAINING_HUB_ENV=production`
 - the standalone MarketGuard app can disable them explicitly with `MARKETGUARD_API_DOCS_ENABLED=false`
 
-The client upload API is meant for non-browser clients such as a Minecraft mod. The preferred mod path is the anonymous endpoint authenticated by a normalized local `clientId` plus server-verified SHA-256 headers over the raw NDJSON payload. The legacy session-based login flow remains available for explicit API clients, but the mod should use the anonymous upload contract. Do not add custom application-layer crypto on top of TLS without a concrete threat model.
+The client upload API is meant for non-browser clients such as a Minecraft mod. The preferred mod path is the anonymous endpoint authenticated by a normalized local `clientId` plus server-verified SHA-256 headers over the raw NDJSON payload. Browser-backed API use can still rely on the normal external web sign-in session, but password-based API login is no longer part of the supported surface. Do not add custom application-layer crypto on top of TLS without a concrete threat model.
 
 Example anonymous upload:
 
@@ -366,21 +349,11 @@ curl -sS https://scamscreener.creepans.net/api/v1/client/uploads/anonymous \
   --data-binary @training-cases-v2.jsonl
 ```
 
-Legacy login flow:
-
-```bash
-curl -sS https://scamscreener.creepans.net/api/v1/client/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"usernameOrEmail":"alice","password":"supersecret"}'
-```
-
 Notes:
 
 - The anonymous mod endpoint is `POST /api/v1/client/uploads/anonymous`.
 - Users can manually link already-known mod `clientId` values from `Account -> Clients`; once linked, historical uploads for that client ID appear in the dashboard.
 - The server recalculates `X-ScamScreener-Payload-Sha256` and `X-ScamScreener-Handshake-Sha256`; mismatches are rejected with `400`.
-- Admin accounts are intentionally blocked from the legacy API login flow when `TRAINING_HUB_ADMIN_MFA_REQUIRED=true`; use the anonymous mod contract or a non-admin uploader account for the session-based client API.
-- `/api/v1/client/auth/login` requires `application/json`.
 - `/api/v1/client/uploads` accepts the raw JSONL body and applies the same validation, quotas, deduplication, and audit logging as the dashboard upload form.
 - `/api/v1/client/uploads/anonymous` accepts the raw JSONL body and applies the same validation, quotas, deduplication, and audit logging without requiring a web login.
 - Full mod-side integration guidance: `MINECRAFT_MOD_INTEGRATION.md`

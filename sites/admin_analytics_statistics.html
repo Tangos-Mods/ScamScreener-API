@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin Analytics Statistics{% endblock %}
+{% block page_eyebrow %}Analytics{% endblock %}
+{% block page_title %}Statistics{% endblock %}
+{% block page_intro %}This area is reserved for historical dashboards and deeper analytical views. The page is intentionally kept minimal until those reports are defined.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Analytics</p>
+            <h2>Statistics</h2>
+        </div>
+    </div>
+    <article class="summary-panel">
+        <p class="summary-panel-label">Reserved</p>
+        <p>Future trend dashboards, cohort views, and longer-running case statistics will live here.</p>
+    </article>
+</section>
+{% endblock %}

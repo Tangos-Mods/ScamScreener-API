@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}app{% endblock %}
+{% block title %}Training Hub Admin Scrubbing{% endblock %}
+{% block page_eyebrow %}Admin Scrubbing{% endblock %}
+{% block page_title %}Content Scrubbing Rules{% endblock %}
+{% block page_intro %}Define phrases that should be removed from future upload content before raw files, case payloads, and exports are stored. Schema fields <code>format</code>, <code>schemaVersion</code>, and <code>caseId</code> are preserved.{% endblock %}
+{% block page_actions %}
+    <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
+{% endblock %}
+
+{% block content %}
+{% if notice or error %}
+    <section class="notice-stack">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+    </section>
+{% endif %}
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">New rule</p>
+            <h2>Create scrub rule</h2>
+        </div>
+    </div>
+    <p class="muted">Rules are applied in creation order to future uploads only. Regex runs server-side, so keep patterns specific and short.</p>
+    <form method="post" action="/admin/scrub-rules" class="surface-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-row">
+            <label for="pattern_text">Phrase or regex</label>
+            <input
+                id="pattern_text"
+                class="form-control"
+                type="text"
+                name="pattern_text"
+                maxlength="{{ content_scrub_pattern_max_length }}"
+                required
+            >
+        </div>
+        <div class="form-row">
+            <label for="match_mode">Match mode</label>
+            <select id="match_mode" class="form-select" name="match_mode" required>
+                <option value="exact">Exact</option>
+                <option value="starts_with">Starts With</option>
+                <option value="contains" selected>Contains</option>
+                <option value="ends_with">Ends With</option>
+            </select>
+        </div>
+        <label class="admin-action-check">
+            <input type="checkbox" name="use_regex" value="1">
+            <span>Treat the pattern as regex.</span>
+        </label>
+        <div class="table-actions">
+            <button type="submit" class="btn btn-outline-primary btn-sm">Create Rule</button>
+            <span class="muted">{{ content_scrub_rules|length }} / {{ content_scrub_rule_max_count }} rules configured.</span>
+        </div>
+    </form>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
+            <p class="section-kicker">Configured rules</p>
+            <h2>Active scrub rules</h2>
+        </div>
+    </div>
+    <div class="table-shell">
+        <table class="table align-middle mb-0">
+            <thead>
+            <tr>
+                <th>ID</th>
+                <th>Mode</th>
+                <th>Regex</th>
+                <th>Pattern</th>
+                <th>Hits</th>
+                <th>Created</th>
+                <th>Action</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% if content_scrub_rules %}
+                {% for row in content_scrub_rules %}
+                    <tr>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.match_mode_label }}</td>
+                        <td>{{ "Yes" if row.use_regex else "No" }}</td>
+                        <td><code>{{ row.pattern_text }}</code></td>
+                        <td>{{ row.match_count|int_grouped }}</td>
+                        <td>{{ row.created_at|datetime_utc }}</td>
+                        <td>
+                            <form method="post" action="/admin/scrub-rules/{{ row.id }}/delete" class="inline-form">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="7" class="table-empty">No scrub rules configured.</td></tr>
+            {% endif %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}public{% endblock %}
+{% block title %}Training Hub - Login{% endblock %}
+
+{% block content %}
+<section class="auth-layout">
+    <div class="auth-context">
+        <p class="section-kicker">Secure Access</p>
+        <h1>Login</h1>
+        <p class="auth-copy">
+            Access to this workspace is handled by approved external identity providers.
+        </p>
+        <div class="auth-meta">
+            <strong>Security note</strong>
+            <span>Local passwords, passkeys, registration, and password reset are disabled for this deployment.</span>
+        </div>
+    </div>
+
+    <div class="auth-surface">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+        <div class="message warning auth-warning" role="alert">Do NOT enter your Minecraft credentials anywhere on this page.</div>
+
+        {% if providers %}
+            <div class="surface-form surface-form-compact">
+                {% for provider in providers %}
+                    <a class="btn btn-primary w-100" href="/auth/external/{{ provider.name }}">{{ provider.label }}</a>
+                    <p class="muted" style="margin: 0.5rem 0 1rem 0;">{{ provider.description }}</p>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="surface-copy">No external identity provider is configured yet. Configure GitHub OAuth or Authelia OIDC to sign in.</p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

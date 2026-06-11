@@ -34,12 +34,24 @@ from .account_ops import (
     _user_linked_client_identities,
     _verify_user_action_password,
 )
+from .content_scrubbing import (
+    CONTENT_SCRUB_MATCH_MODES,
+    CONTENT_SCRUB_MAX_RULES,
+    CONTENT_SCRUB_PATTERN_MAX_LENGTH,
+    _admin_content_scrub_rules,
+    _apply_content_scrub_rules_to_cases,
+    _create_content_scrub_rule,
+    _delete_content_scrub_rule,
+)
 from .common import (
     _is_path_within,
+    _is_internal_network_ip,
     _is_request_from_trusted_proxy,
     _normalize_user_agent_for_binding,
     _now_utc_iso,
+    _parse_ip_address,
     _request_client_ip,
+    _request_originates_from_internal_network,
 )
 from .data_exports import (
     _process_next_data_export_request,
@@ -63,7 +75,7 @@ from .recovery import (
     _validate_admin_mfa_challenge,
     _validate_password_reset_token,
 )
-from .rendering import _render_account, _render_admin, _render_auth, _render_dashboard
+from .rendering import _render_account, _render_admin, _render_dashboard
 from .session_auth import (
     LOGIN_LOCKOUT_MINUTES,
     LOGIN_MAX_FAILURES,
@@ -95,6 +107,7 @@ from .storage import (
     _init_database_mariadb,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_content_scrub_rule_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_tombstone_columns,
     _migrate_training_cases_payload_json,

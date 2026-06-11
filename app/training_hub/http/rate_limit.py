@@ -153,24 +153,6 @@ def _rate_limit_rule(
     if normalized_method == "POST":
         if path == "/login":
             return "auth.login", 12, 300
-        if path == "/login/passkey/options":
-            return "auth.passkey-login-options", 12, 300
-        if path == "/login/passkey/verify":
-            return "auth.passkey-login-verify", 12, 600
-        if path == "/api/v1/client/auth/login":
-            return "auth.api-login", 12, 300
-        if path in {"/admin/mfa", "/mfa"}:
-            return "auth.admin-mfa", 12, 600
-        if path == "/mfa/passkey/options":
-            return "auth.mfa-passkey-options", 12, 300
-        if path == "/mfa/passkey/verify":
-            return "auth.mfa-passkey-verify", 12, 600
-        if path == "/forgot-password":
-            return "auth.password-reset-request", 10, 600
-        if path == "/reset-password":
-            return "auth.password-reset-submit", 10, 600
-        if path == "/register":
-            return "auth.register", 10, 600
         if path == "/dashboard/upload":
             return "upload.submit", 12, 600
         if path == "/api/v1/client/uploads":
@@ -179,8 +161,6 @@ def _rate_limit_rule(
             return "upload.api-anonymous-submit", 12, 600
         if path == "/api/v1/client/auth/logout":
             return "auth.api-logout", 30, 600
-        if path in {"/dashboard/password", "/account/security/password"}:
-            return "auth.password-change", 10, 600
         if path == "/admin/train":
             return "admin.train", 4, 600
         if path == "/admin/retention/run":
@@ -202,6 +182,12 @@ def _rate_limit_rule(
         return None
 
     if normalized_method == "GET":
+        if path.startswith("/auth/external/") and not path.endswith("/callback"):
+            return "auth.external-start", 20, 300
+        if path.startswith("/auth/external/") and path.endswith("/callback"):
+            return "auth.external-callback", 20, 300
+        if path.startswith("/account/confirm/external/"):
+            return "auth.external-step-up-start", 20, 300
         if path.startswith("/dashboard/uploads/") and path.endswith("/download"):
             return "download.upload", settings.max_upload_downloads_per_minute_per_user, 60
         if path.startswith("/admin/runs/") and path.endswith("/bundle"):

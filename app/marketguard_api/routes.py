@@ -10,13 +10,11 @@ from fastapi.responses import JSONResponse
 from .cache import CachedResponse
 from .config import MarketGuardSettings
 from .exceptions import HypixelRateLimitError, HypixelUpstreamError, MarketGuardStorageError
-from .models import ApiErrorResponse, BazaarResponse, LowestBinV1Response, LowestBinV2Response
+from .models import ApiErrorResponse, BazaarResponse, LowestBinV2Response
 from .service import BazaarService, LowestBinService
 
-_LOWESTBIN_V1_DEPRECATION_HEADER = "true"
-_LOWESTBIN_V1_SUNSET_HEADER = "Mon, 01 Jun 2026 00:00:00 GMT"
+_LOWESTBIN_V1_GONE_DETAIL = "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
 _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
-_CACHE_KEY_LOWESTBIN_V1 = "lowestbin:v1"
 _CACHE_KEY_LOWESTBIN_V2 = "lowestbin:v2"
 _CACHE_KEY_BAZAAR_V1 = "bazaar:v1"
 
@@ -71,41 +69,15 @@ def register_marketguard_routes(
 
     @app.get(
         "/api/v1/lowestbin",
-        deprecated=True,
-        response_model=LowestBinV1Response,
         responses={
-            429: _error_response_docs("Too many requests.", retry_after=True),
-            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
+            410: _error_response_docs(_LOWESTBIN_V1_GONE_DETAIL),
         },
     )
-    async def lowestbin(request: Request, response: Response) -> JSONResponse:
-        await _apply_rate_limit(
-            request,
-            route_key="lowestbin",
-            max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
-            trusted_proxies=marketguard_settings.trusted_proxies,
+    async def lowestbin_v1_gone() -> JSONResponse:
+        return JSONResponse(
+            {"detail": _LOWESTBIN_V1_GONE_DETAIL},
+            status_code=410,
         )
-        cached_response = await _read_cached_response(request, _CACHE_KEY_LOWESTBIN_V1)
-        if cached_response is not None:
-            return _lowestbin_v1_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
-        try:
-            snapshot = await marketguard_service.get_lowest_bins()
-        except HypixelRateLimitError as exc:
-            headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds else None
-            raise HTTPException(
-                status_code=503,
-                detail="Lowest BIN data is temporarily unavailable.",
-                headers=headers,
-            ) from exc
-        except (HypixelUpstreamError, MarketGuardStorageError) as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="Lowest BIN data is temporarily unavailable.",
-            ) from exc
-
-        payload = dict(snapshot.items)
-        await _write_cached_response(request, _CACHE_KEY_LOWESTBIN_V1, payload, is_stale=snapshot.is_stale)
-        return _lowestbin_v1_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
 
     @app.get(
         "/api/v2/lowestbin",
@@ -268,14 +240,6 @@ def _cache_headers(settings: MarketGuardSettings, *, is_stale: bool) -> dict[str
         "X-Data-Stale": "true" if is_stale else "false",
         "X-API-Provider": "Pankraz01",
     }
-
-
-def _lowestbin_v1_response(settings: MarketGuardSettings, payload: dict[str, float], *, is_stale: bool) -> JSONResponse:
-    headers = _cache_headers(settings, is_stale=is_stale)
-    headers["Deprecation"] = _LOWESTBIN_V1_DEPRECATION_HEADER
-    headers["Sunset"] = _LOWESTBIN_V1_SUNSET_HEADER
-    return JSONResponse(payload, headers=headers)
-
 
 def _json_cache_response(settings: MarketGuardSettings, payload: dict[str, object], *, is_stale: bool) -> JSONResponse:
     return JSONResponse(payload, headers=_cache_headers(settings, is_stale=is_stale))

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
-from ..core.hub_core import _global_stats, _monitoring_snapshot, _now_utc_iso
+from ..core.hub_core import (
+    _global_stats,
+    _monitoring_snapshot,
+    _now_utc_iso,
+    _request_originates_from_internal_network,
+)
 from ..core.rendering import _legal_context
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TrainingHubSettings
 from .public_utils import prometheus_metrics as _prometheus_metrics
@@ -18,9 +23,18 @@ def _base_context(request: Request) -> dict[str, Any]:
         "current_user": request.state.user,
         "csrf_token": getattr(request.state, "csrf_token", ""),
     }
+
+
+def _require_internal_observability_access(request: Request, settings: TrainingHubSettings) -> None:
+    if _request_originates_from_internal_network(request, settings.trusted_proxies):
+        return
+    raise HTTPException(status_code=403, detail="Observability endpoint is not available from public networks.")
+
+
 def register_public_site_routes(app: FastAPI, settings: TrainingHubSettings) -> None:
     @app.get("/api/v1/health")
-    async def health() -> dict[str, Any]:
+    async def health(request: Request) -> dict[str, Any]:
+        _require_internal_observability_access(request, settings)
         stats = await run_in_threadpool(_global_stats, settings.database_path)
         return {
             "status": "ok",
@@ -32,7 +46,8 @@ def register_public_site_routes(app: FastAPI, settings: TrainingHubSettings) -> 
         }
 
     @app.get("/api/v1/metrics")
-    async def metrics() -> PlainTextResponse:
+    async def metrics(request: Request) -> PlainTextResponse:
+        _require_internal_observability_access(request, settings)
         snapshot = await run_in_threadpool(_monitoring_snapshot, settings)
         payload = _prometheus_metrics(snapshot)
         return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")

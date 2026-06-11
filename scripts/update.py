@@ -46,6 +46,58 @@ def _preflight_script(context: compose_ops.ComposeContext) -> Path:
     return context.repo_root / "scripts" / "preflight.sh"
 
 
+def _configured_external_providers(context: compose_ops.ComposeContext) -> list[str]:
+    providers: list[str] = []
+    github_client_id = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_GITHUB_OAUTH_CLIENT_ID")
+    github_client_secret = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_GITHUB_OAUTH_CLIENT_SECRET")
+    authelia_issuer = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_AUTHELIA_OIDC_ISSUER_URL")
+    authelia_client_id = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_AUTHELIA_OIDC_CLIENT_ID")
+    authelia_client_secret = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_AUTHELIA_OIDC_CLIENT_SECRET")
+    if github_client_id and github_client_secret:
+        providers.append("GitHub")
+    if authelia_issuer and authelia_client_id and authelia_client_secret:
+        providers.append("Authelia")
+    return providers
+
+
+def _bootstrap_admin_summary(context: compose_ops.ComposeContext) -> str:
+    usernames = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_ADMIN_USERNAMES")
+    emails = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_ADMIN_EMAILS")
+    parts: list[str] = []
+    if usernames:
+        parts.append(f"usernames={usernames}")
+    if emails:
+        parts.append(f"emails={emails}")
+    return ", ".join(parts) if parts else "not configured"
+
+
+def _assert_not_running_legacy_local_auth_stack(context: compose_ops.ComposeContext) -> None:
+    auth_mode = compose_ops.detect_running_auth_mode(context)
+    if auth_mode == "local":
+        raise RuntimeError(
+            "The running stack still exposes legacy local sign-in routes. "
+            "Run python3 scripts/migrate.py for the one-time OAuth/OIDC cutover."
+        )
+
+
+def _print_success_summary(context: compose_ops.ComposeContext) -> None:
+    public_base_url = compose_ops.read_env_value(context.env_file, "TRAINING_HUB_PUBLIC_BASE_URL")
+    providers = _configured_external_providers(context)
+    print("Update completed successfully.")
+    if public_base_url:
+        print(f"Login URL: {public_base_url.rstrip('/')}/login")
+    if providers:
+        print(f"External providers: {', '.join(providers)}")
+    print(f"Bootstrap admin anchors: {_bootstrap_admin_summary(context)}")
+
+
+def _write_marker_best_effort(context: compose_ops.ComposeContext) -> None:
+    try:
+        compose_ops.write_deployment_auth_marker(context, "external")
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        print(f"Warning: could not persist the OAuth deployment marker: {exc}", file=sys.stderr)
+
+
 def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) -> int:
     compose_ops.require_command("docker")
     if not args.skip_preflight:
@@ -59,6 +111,7 @@ def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) ->
     preflight_script = _preflight_script(context)
     if not args.skip_preflight and not preflight_script.is_file():
         raise FileNotFoundError(f"Preflight script not found: {preflight_script}")
+    _assert_not_running_legacy_local_auth_stack(context)
     healthchecked_services = list(_BASE_HEALTHCHECKED_SERVICES)
     if compose_ops.marketguard_redis_enabled(context):
         healthchecked_services.append("scamscreener-redis")
@@ -81,12 +134,13 @@ def run_update(context: compose_ops.ComposeContext, args: argparse.Namespace) ->
             )
         for service_name in _RUNNING_ONLY_SERVICES:
             compose_ops.ensure_service_running(context, service_name)
+        _write_marker_best_effort(context)
         compose_ops.run_compose(context, ["ps"])
     except (RuntimeError, subprocess.CalledProcessError):
         compose_ops.show_compose_logs(context, tail_lines=args.log_tail_lines)
         raise
 
-    print("Update completed successfully.")
+    _print_success_summary(context)
     return 0
 
 

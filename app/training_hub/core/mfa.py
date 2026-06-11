@@ -381,9 +381,21 @@ def _mfa_state(settings: TrainingHubSettings, user_id: int) -> dict[str, Any]:
     is_admin = int(user_row["is_admin"]) == 1
     stored_enabled = int(user_row["mfa_enabled"] or 0) == 1
     standard_factor_count = int(counts["standard"])
-    admin_setup_required = bool(is_admin and settings.admin_mfa_required and standard_factor_count == 0)
+    admin_setup_required = bool(
+        not settings.external_auth_enabled
+        and is_admin
+        and settings.admin_mfa_required
+        and standard_factor_count == 0
+    )
     mfa_enabled = bool(stored_enabled or admin_setup_required)
-    mfa_required_for_login = bool((stored_enabled and standard_factor_count > 0) or admin_setup_required or (is_admin and settings.admin_mfa_required and standard_factor_count > 0))
+    mfa_required_for_login = bool(
+        not settings.external_auth_enabled
+        and (
+            (stored_enabled and standard_factor_count > 0)
+            or admin_setup_required
+            or (is_admin and settings.admin_mfa_required and standard_factor_count > 0)
+        )
+    )
     return {
         "user_found": True,
         "user_id": int(user_row["id"]),

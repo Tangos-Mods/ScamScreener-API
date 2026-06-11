@@ -58,6 +58,34 @@ def _request_client_ip(request: Request, settings: TrainingHubSettings) -> str:
     return source_ip
 
 
+def _parse_ip_address(value: str) -> ipaddress._BaseAddress | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        return ipaddress.ip_address(normalized)
+    except ValueError:
+        return None
+
+
+def _is_internal_network_ip(value: str) -> bool:
+    address = _parse_ip_address(value)
+    if address is None:
+        return False
+    return bool(address.is_private or address.is_loopback or address.is_link_local)
+
+
+def _request_originates_from_internal_network(request: Request, trusted_proxies: set[str]) -> bool:
+    source_ip = request.client.host if request.client and request.client.host else ""
+    if _is_request_from_trusted_proxy(request, trusted_proxies):
+        forwarded_for = str(request.headers.get("x-forwarded-for", "")).strip()
+        if forwarded_for:
+            first_ip = forwarded_for.split(",")[0].strip()
+            if first_ip:
+                source_ip = first_ip
+    return _is_internal_network_ip(source_ip)
+
+
 def _normalize_user_agent_for_binding(value: str) -> str:
     return (value or "").strip().lower()[:180]
 
@@ -112,4 +140,19 @@ def _format_utc_timestamp(value: Any) -> str:
     if parsed.second or parsed.microsecond:
         return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
     return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_integer_grouped(value: Any) -> str:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+
+    sign = "-" if numeric < 0 else ""
+    digits = str(abs(numeric))
+    grouped_parts: list[str] = []
+    while digits:
+        grouped_parts.append(digits[-3:])
+        digits = digits[:-3]
+    return sign + ".".join(reversed(grouped_parts or ["0"]))
 

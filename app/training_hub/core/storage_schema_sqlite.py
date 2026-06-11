@@ -7,6 +7,8 @@ from .storage_migrations import (
     _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_content_scrub_rule_tables,
+    _migrate_external_auth_tables,
     _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
@@ -62,6 +64,40 @@ def _init_database_sqlite(database_path: Path | str) -> None:
                 linked_at TEXT,
                 last_seen_at TEXT NOT NULL,
                 FOREIGN KEY (linked_user_id) REFERENCES users(id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_auth_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                state_sha256 TEXT NOT NULL UNIQUE,
+                code_verifier TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                redirect_path TEXT NOT NULL DEFAULT '/dashboard',
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                source_ip TEXT NOT NULL DEFAULT '',
+                user_agent TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                email TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                last_login_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
         )
@@ -290,7 +326,25 @@ def _init_database_sqlite(database_path: Path | str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_scrub_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                match_mode TEXT NOT NULL,
+                pattern_text TEXT NOT NULL,
+                use_regex INTEGER NOT NULL DEFAULT 0,
+                match_count INTEGER NOT NULL DEFAULT 0,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
         _migrate_client_identity_tables(connection)
+        _migrate_external_auth_tables(connection)
+        _migrate_content_scrub_rule_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
         _migrate_audit_log_columns(connection)
@@ -318,6 +372,12 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_user ON auth_flow_tokens(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_expires ON auth_flow_tokens(expires_at)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_auth_flow_tokens_flow_type ON auth_flow_tokens(flow_type)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_external_auth_states_provider ON external_auth_states(provider)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_external_auth_states_expires ON external_auth_states(expires_at)")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_external_identities_provider_subject ON external_identities(provider, issuer, subject)"
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_external_identities_user ON external_identities(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_user_totp_factors_user ON user_totp_factors(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_user_passkeys_user ON user_passkeys(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_user_backup_codes_user ON user_backup_codes(user_id)")
@@ -331,6 +391,15 @@ def _init_database_sqlite(database_path: Path | str) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_user ON data_export_requests(user_id)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_status ON data_export_requests(status)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_data_export_requests_created_at ON data_export_requests(created_at)")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_scrub_rules_signature
+            ON content_scrub_rules(match_mode, pattern_text, use_regex, is_enabled)
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_content_scrub_rules_created_by_user ON content_scrub_rules(created_by_user_id)"
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_rate_limit_updated_at ON rate_limit_hits(updated_at)")
         connection.commit()
 

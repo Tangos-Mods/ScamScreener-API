@@ -17,7 +17,10 @@
 {% set admin_setup_href = '/account/security?notice=Complete+MFA+setup#admin-mfa-setup' %}
 {% set workspace_open = path in ['/dashboard', '/dashboard/uploads'] %}
 {% set account_open = path.startswith('/account') or path == '/dashboard/account' %}
-{% set admin_open = path.startswith('/admin') %}
+{% set admin_open = path.startswith('/admin') and not path.startswith('/admin/analytics') %}
+{% set analytics_open = path.startswith('/admin/analytics') %}
+{% set admin_analytics_statistics_active = path == '/admin/analytics' or path == '/admin/analytics/statistics' %}
+{% set admin_analytics_metrics_active = path == '/admin/analytics/metrics' %}
 {% set reference_open = path in ['/legal-notice', '/privacy'] %}
 <body class="hub-body hub-shell-{{ shell_mode|trim }}">
 <a class="skip-link" href="#main-content">Skip to content</a>
@@ -107,7 +110,7 @@
                                             >Finish MFA setup</a>
                                         </li>
                                         <li class="workspace-nav-help muted">
-                                            Unlock admin pages after adding an Authenticator App or Passkey.
+                                            Unlock admin pages after completing the required account authentication setup.
                                         </li>
                                     {% else %}
                                         <li>
@@ -133,6 +136,13 @@
                                         </li>
                                         <li>
                                             <a
+                                                class="workspace-nav-link workspace-subnav-link{% if path == '/admin/scrub-rules' %} is-active{% endif %}"
+                                                href="/admin/scrub-rules"
+                                                {% if path == '/admin/scrub-rules' %}aria-current="page"{% endif %}
+                                            >Scrubbing</a>
+                                        </li>
+                                        <li>
+                                            <a
                                                 class="workspace-nav-link workspace-subnav-link{% if path == '/admin/runs' %} is-active{% endif %}"
                                                 href="/admin/runs"
                                                 {% if path == '/admin/runs' %}aria-current="page"{% endif %}
@@ -149,6 +159,31 @@
                                 </ul>
                             </details>
                         </li>
+                        {% if not admin_navigation_locked %}
+                            <li class="workspace-nav-item workspace-nav-group">
+                                <details class="workspace-disclosure" {% if analytics_open %}open{% endif %}>
+                                    <summary class="workspace-disclosure-toggle{% if analytics_open %} is-open{% endif %}">
+                                        <span>Analytics</span>
+                                    </summary>
+                                    <ul class="workspace-subnav-list" aria-label="Analytics sections">
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if admin_analytics_statistics_active %} is-active{% endif %}"
+                                                href="/admin/analytics/statistics"
+                                                {% if admin_analytics_statistics_active %}aria-current="page"{% endif %}
+                                            >Statistics</a>
+                                        </li>
+                                        <li>
+                                            <a
+                                                class="workspace-nav-link workspace-subnav-link{% if admin_analytics_metrics_active %} is-active{% endif %}"
+                                                href="/admin/analytics/metrics"
+                                                {% if admin_analytics_metrics_active %}aria-current="page"{% endif %}
+                                            >Metrics</a>
+                                        </li>
+                                    </ul>
+                                </details>
+                            </li>
+                        {% endif %}
                     {% endif %}
                 </ul>
             </nav>
@@ -227,7 +262,7 @@
                 </a>
                 <nav class="public-nav" aria-label="Primary">
                     <a href="/login">Login</a>
-                    <a class="public-nav-cta" href="/register">Register</a>
+                    <a class="public-nav-cta" href="/login">Access Workspace</a>
                 </nav>
             </div>
         </header>

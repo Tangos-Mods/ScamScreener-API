@@ -7,6 +7,8 @@ from .storage_migrations import (
     _migrate_client_identity_tables,
     _migrate_admin_mfa_challenge_columns,
     _migrate_audit_log_columns,
+    _migrate_content_scrub_rule_tables,
+    _migrate_external_auth_tables,
     _migrate_mfa_tables,
     _migrate_password_reset_token_columns,
     _migrate_training_case_identity_columns,
@@ -62,6 +64,44 @@ def _init_database_mariadb(database_path: Path | str) -> None:
                 last_seen_at VARCHAR(40) NOT NULL,
                 FOREIGN KEY (linked_user_id) REFERENCES users(id),
                 KEY idx_client_identities_linked_user (linked_user_id)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_auth_states (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                provider VARCHAR(32) NOT NULL,
+                state_sha256 CHAR(64) NOT NULL UNIQUE,
+                code_verifier VARCHAR(255) NOT NULL,
+                nonce VARCHAR(255) NOT NULL,
+                redirect_path VARCHAR(1024) NOT NULL DEFAULT '/dashboard',
+                expires_at VARCHAR(40) NOT NULL,
+                consumed_at VARCHAR(40),
+                source_ip VARCHAR(80) NOT NULL DEFAULT '',
+                user_agent VARCHAR(300) NOT NULL DEFAULT '',
+                KEY idx_external_auth_states_provider (provider),
+                KEY idx_external_auth_states_expires (expires_at)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS external_identities (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL,
+                user_id BIGINT NOT NULL,
+                provider VARCHAR(32) NOT NULL,
+                issuer VARCHAR(255) NOT NULL,
+                subject VARCHAR(255) NOT NULL,
+                email VARCHAR(254) NOT NULL DEFAULT '',
+                username VARCHAR(64) NOT NULL DEFAULT '',
+                last_login_at VARCHAR(40),
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                UNIQUE KEY idx_external_identities_provider_subject (provider, issuer, subject),
+                KEY idx_external_identities_user (user_id)
             )
             """
         )
@@ -315,7 +355,27 @@ def _init_database_mariadb(database_path: Path | str) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_scrub_rules (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                created_at VARCHAR(40) NOT NULL,
+                updated_at VARCHAR(40) NOT NULL,
+                created_by_user_id BIGINT NOT NULL,
+                match_mode VARCHAR(16) NOT NULL,
+                pattern_text VARCHAR(256) NOT NULL,
+                use_regex TINYINT NOT NULL DEFAULT 0,
+                match_count BIGINT NOT NULL DEFAULT 0,
+                is_enabled TINYINT NOT NULL DEFAULT 1,
+                FOREIGN KEY (created_by_user_id) REFERENCES users(id),
+                UNIQUE KEY idx_content_scrub_rules_signature (match_mode, pattern_text, use_regex, is_enabled),
+                KEY idx_content_scrub_rules_created_by_user (created_by_user_id)
+            )
+            """
+        )
         _migrate_client_identity_tables(connection)
+        _migrate_external_auth_tables(connection)
+        _migrate_content_scrub_rule_tables(connection)
         _migrate_users_security_columns(connection)
         _migrate_uploads_security_columns(connection)
         _migrate_audit_log_columns(connection)
