@@ -72,7 +72,16 @@ def _bootstrap_admin_summary(context: compose_ops.ComposeContext) -> str:
 
 
 def _assert_not_running_legacy_local_auth_stack(context: compose_ops.ComposeContext) -> None:
+    marker_mode = compose_ops.read_deployment_auth_marker(context).strip().lower()
     auth_mode = compose_ops.detect_running_auth_mode(context)
+    if marker_mode == "external":
+        if auth_mode == "local":
+            print(
+                "Warning: deployment marker says OAuth/OIDC is already active, "
+                "but the runtime route probe still looks like legacy local auth. Continuing update.",
+                file=sys.stderr,
+            )
+        return
     if auth_mode == "local":
         raise RuntimeError(
             "The running stack still exposes legacy local sign-in routes. "

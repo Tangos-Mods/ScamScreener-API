@@ -168,7 +168,7 @@ def _bucket_for_path(path: str) -> str | None:
     normalized_path = str(path or "").strip()
     if not normalized_path.startswith("/api/"):
         return None
-    if normalized_path == "/api/internal/live-metrics":
+    if normalized_path in {"/api/internal/live-metrics", "/api/v1/ready"}:
         return None
     if normalized_path.startswith("/api/v1/client/"):
         return "client_api"

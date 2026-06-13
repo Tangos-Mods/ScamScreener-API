@@ -140,6 +140,7 @@ def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path
     assert response.headers["x-data-stale"] == "false"
     assert response.headers["x-api-provider"] == "Pankraz01"
     assert response.json() == {
+        "status": "ok",
         "lastUpdated": 1_700_000_000_000,
         "products": {
             "HYPERION": {
@@ -191,6 +192,7 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
 
     assert response.status_code == 200
     assert response.json() == {
+        "status": "ok",
         "lastUpdated": 1_700_000_000_000,
         "products": {
             "HYPERION": {
@@ -252,11 +254,18 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
     }
 
     schemas = schema["components"]["schemas"]
+    assert schemas["BazaarResponse"]["properties"]["status"]["examples"][0] == "ok"
+    assert schemas["LowestBinV2Response"]["properties"]["status"]["examples"][0] == "ok"
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
     assert schemas["BazaarProductResponse"]["properties"]["item_name"]["examples"][0] == "Corrupted Bait"
     assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
     assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
     assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000
+    ready_get = schema["paths"]["/api/v1/ready"]["get"]
+    assert set(ready_get["responses"]) == {"200", "206", "503"}
+    assert ready_get["responses"]["200"]["description"] == "All MarketGuard datasets are fresh and available."
+    assert ready_get["responses"]["206"]["description"] == "At least one MarketGuard dataset is stale."
+    assert ready_get["responses"]["503"]["description"] == "At least one MarketGuard dataset is unavailable."
 
 
 def test_combined_app_disables_docs_when_api_docs_disabled(tmp_path: Path) -> None:
@@ -323,9 +332,176 @@ def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path)
     assert "/api/v1/metrics" not in schema["paths"]
     assert "/api/v1/client/auth/login" not in schema["paths"]
     assert "/api/v1/client/uploads" not in schema["paths"]
+    assert "/api/v1/ready" in schema["paths"]
     assert "/api/v1/lowestbin" in schema["paths"]
     assert "/api/v2/lowestbin" in schema["paths"]
     assert "/api/v1/bazaar" in schema["paths"]
+
+
+def test_marketguard_ready_returns_200_when_all_datasets_fresh() -> None:
+    settings = _marketguard_settings()
+    store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+    _seed_lowestbin_snapshot(store, snapshot_last_updated=1_700_000_000_000, item_prices={"HYPERION": 98_000_000.0})
+    _seed_bazaar_snapshot(store, snapshot_last_updated=1_700_000_100_000)
+    app = create_marketguard_app(
+        settings=settings,
+        service=_ReadinessLowestBinService(store),
+        bazaar_service=_ReadinessBazaarService(store),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["x-readiness-status"] == "ok"
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["checkedAt"].endswith("Z")
+    assert payload["lowestbinV2"] == {"status": "ok", "lastUpdated": 1_700_000_000_000}
+    assert payload["bazaar"] == {"status": "ok", "lastUpdated": 1_700_000_100_000}
+
+
+def test_marketguard_ready_returns_206_when_any_dataset_is_stale() -> None:
+    stale_age_seconds = 120
+    scenarios = (
+        (
+            stale_age_seconds,
+            0,
+        ),
+        (
+            0,
+            stale_age_seconds,
+        ),
+        (
+            stale_age_seconds,
+            stale_age_seconds,
+        ),
+    )
+
+    for lowestbin_age_seconds, bazaar_age_seconds in scenarios:
+        settings = _marketguard_settings()
+        store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+        _seed_lowestbin_snapshot(
+            store,
+            snapshot_last_updated=1_700_000_000_000,
+            item_prices={"HYPERION": 98_000_000.0},
+            generated_at=_relative_snapshot_time(lowestbin_age_seconds),
+        )
+        _seed_bazaar_snapshot(
+            store,
+            snapshot_last_updated=1_700_000_100_000,
+            generated_at=_relative_snapshot_time(bazaar_age_seconds),
+        )
+        app = create_marketguard_app(
+            settings=settings,
+            service=_ReadinessLowestBinService(store),
+            bazaar_service=_ReadinessBazaarService(store),
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/ready")
+
+        assert response.status_code == 206
+        assert response.headers["x-readiness-status"] == "degraded"
+        payload = response.json()
+        assert payload["status"] == "degraded"
+        assert {payload["lowestbinV2"]["status"], payload["bazaar"]["status"]} <= {"ok", "stale"}
+        assert "down" not in {payload["lowestbinV2"]["status"], payload["bazaar"]["status"]}
+
+
+def test_marketguard_ready_returns_503_when_any_dataset_is_unavailable() -> None:
+    expired_age_seconds = 360
+    scenarios = (
+        (
+            None,
+            0,
+        ),
+        (
+            0,
+            None,
+        ),
+        (
+            120,
+            None,
+        ),
+        (
+            expired_age_seconds,
+            0,
+        ),
+    )
+
+    for lowestbin_age_seconds, bazaar_age_seconds in scenarios:
+        settings = _marketguard_settings()
+        store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+        if lowestbin_age_seconds is not None:
+            _seed_lowestbin_snapshot(
+                store,
+                snapshot_last_updated=1_700_000_000_000,
+                item_prices={"HYPERION": 98_000_000.0},
+                generated_at=_relative_snapshot_time(lowestbin_age_seconds),
+            )
+        if bazaar_age_seconds is not None:
+            _seed_bazaar_snapshot(
+                store,
+                snapshot_last_updated=1_700_000_100_000,
+                generated_at=_relative_snapshot_time(bazaar_age_seconds),
+            )
+        app = create_marketguard_app(
+            settings=settings,
+            service=_ReadinessLowestBinService(store),
+            bazaar_service=_ReadinessBazaarService(store),
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/ready")
+
+        assert response.status_code == 503
+        assert response.headers["x-readiness-status"] == "unavailable"
+        payload = response.json()
+        assert payload["status"] == "unavailable"
+        assert "down" in {payload["lowestbinV2"]["status"], payload["bazaar"]["status"]}
+
+
+def test_marketguard_ready_head_uses_same_status_without_body() -> None:
+    settings = _marketguard_settings()
+    store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+    _seed_lowestbin_snapshot(
+        store,
+        snapshot_last_updated=1_700_000_000_000,
+        item_prices={"HYPERION": 98_000_000.0},
+        generated_at=_relative_snapshot_time(120),
+    )
+    _seed_bazaar_snapshot(store, snapshot_last_updated=1_700_000_100_000)
+    app = create_marketguard_app(
+        settings=settings,
+        service=_ReadinessLowestBinService(store),
+        bazaar_service=_ReadinessBazaarService(store),
+    )
+
+    with TestClient(app) as client:
+        response = client.head("/api/v1/ready")
+
+    assert response.status_code == 206
+    assert response.headers["cache-control"] == "no-store, max-age=0"
+    assert response.headers["x-readiness-status"] == "degraded"
+    assert response.content == b""
+
+
+def test_marketguard_ready_rejects_post() -> None:
+    settings = _marketguard_settings()
+    store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+    app = create_marketguard_app(
+        settings=settings,
+        service=_ReadinessLowestBinService(store),
+        bazaar_service=_ReadinessBazaarService(store),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/ready")
+
+    assert response.status_code == 405
 
 
 def test_combined_app_docs_csp_allows_swagger_assets(tmp_path: Path) -> None:
@@ -451,6 +627,7 @@ def test_bazaar_returns_transformed_quick_status_snapshot(tmp_path: Path) -> Non
     assert response.headers["x-data-stale"] == "false"
     assert response.headers["x-api-provider"] == "Pankraz01"
     assert response.json() == {
+        "status": "ok",
         "lastUpdated": 1_715_478_978_620,
         "products": {
             "CORRUPTED_BAIT": {
@@ -500,6 +677,8 @@ def test_lowestbin_v2_uses_cached_snapshot_between_requests(tmp_path: Path) -> N
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert first.json()["status"] == "ok"
+    assert second.json()["status"] == "ok"
     assert first.json()["products"]["HYPERION"]["price"] == 99_000_000.0
     assert second.json()["products"]["HYPERION"]["price"] == 99_000_000.0
     assert request_count == 1
@@ -544,12 +723,14 @@ def test_bazaar_uses_cached_snapshot_between_requests(tmp_path: Path) -> None:
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert first.json()["status"] == "ok"
+    assert second.json()["status"] == "ok"
     assert first.json() == second.json()
     assert request_count == 1
 
 
 def test_response_cache_chain_supports_local_redis_toggle_matrix() -> None:
-    entry = CachedResponse(payload={"lastUpdated": 1_700_000_000_000, "products": {}}, is_stale=False)
+    entry = CachedResponse(payload={"status": "ok", "lastUpdated": 1_700_000_000_000, "products": {}}, is_stale=False)
 
     local_only = ResponseCacheChain(LocalResponseCache(ttl_seconds=30, max_entries=4))
     asyncio.run(local_only.set("local-only", entry))
@@ -1069,6 +1250,7 @@ def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.headers["x-api-provider"] == "Pankraz01"
     assert response.json() == {
+        "status": "ok",
         "lastUpdated": 1_700_000_000_000,
         "products": {
             "ENCHANTED_GOLD": {
@@ -1116,6 +1298,7 @@ def test_standalone_marketguard_app_exposes_internal_live_metrics() -> None:
     with TestClient(app) as client:
         client.get("/api/v2/lowestbin", headers={"User-Agent": "Mozilla/5.0"})
         client.get("/api/v1/bazaar", headers={"User-Agent": "ScamScreener-MarketGuard/1.0"})
+        client.get("/api/v1/ready", headers={"User-Agent": "UptimeRobot/2.0"})
         response = client.get("/api/internal/live-metrics", headers={"X-Forwarded-For": "127.0.0.1"})
 
     assert response.status_code == 200
@@ -1437,6 +1620,28 @@ class _MemoryMarketGuardStorage:
         return self._bazaar_snapshot
 
 
+class _ReadinessLowestBinService:
+    def __init__(self, storage: _MemoryMarketGuardStorage) -> None:
+        self._storage = storage
+
+    async def get_lowest_bins_v2(self):
+        raise AssertionError("Readiness route must not call get_lowest_bins_v2().")
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _ReadinessBazaarService:
+    def __init__(self, storage: _MemoryMarketGuardStorage) -> None:
+        self._storage = storage
+
+    async def get_bazaar(self) -> BazaarSnapshot:
+        raise AssertionError("Readiness route must not call get_bazaar().")
+
+    async def aclose(self) -> None:
+        return None
+
+
 class _SharedMemoryCacheBackend:
     def __init__(self, shared_entries: dict[str, CachedResponse]) -> None:
         self._shared_entries = shared_entries
@@ -1456,10 +1661,11 @@ def _seed_lowestbin_snapshot(
     *,
     snapshot_last_updated: int,
     item_prices: dict[str, float],
+    generated_at: datetime | None = None,
 ) -> None:
     store.write_lowestbin_snapshot(
         LowestBinSnapshot(
-            generated_at=datetime.fromtimestamp(snapshot_last_updated / 1000, tz=timezone.utc),
+            generated_at=generated_at or datetime.now(timezone.utc),
             snapshot_last_updated=snapshot_last_updated,
             total_pages=1,
             total_auctions=len(item_prices),
@@ -1470,6 +1676,38 @@ def _seed_lowestbin_snapshot(
         auctioneer_uuids={item_key: "cccccccccccccccccccccccccccccccc" for item_key in item_prices},
         item_names={item_key: item_key.replace("_", " ").title() for item_key in item_prices},
     )
+
+
+def _seed_bazaar_snapshot(
+    store: _MemoryMarketGuardStorage,
+    *,
+    snapshot_last_updated: int,
+    generated_at: datetime | None = None,
+) -> None:
+    store.write_bazaar_snapshot(
+        BazaarSnapshot(
+            generated_at=generated_at or datetime.now(timezone.utc),
+            snapshot_last_updated=snapshot_last_updated,
+            products={
+                "ENCHANTED_GOLD": {
+                    "item_name": "Enchanted Gold",
+                    "buy": 123.4,
+                    "sell": 120.1,
+                    "spread": 3.3,
+                    "spreadPercentage": 2.747710241465445,
+                    "buyVolume": 123456,
+                    "sellVolume": 120000,
+                    "buyMovingWeek": 543210,
+                    "sellMovingWeek": 432100,
+                }
+            },
+            is_stale=False,
+        )
+    )
+
+
+def _relative_snapshot_time(age_seconds: int) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(seconds=max(0, int(age_seconds)))
 
 
 def _auction(

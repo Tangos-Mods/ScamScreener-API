@@ -79,6 +79,7 @@ class LowestBinV2Product(BaseModel):
 
 
 class LowestBinV2Response(BaseModel):
+    status: str = Field(..., examples=["ok"])
     lastUpdated: int = Field(..., examples=[1700000000000])
     products: dict[str, LowestBinV2Product] = Field(
         ...,
@@ -116,6 +117,7 @@ class BazaarProductResponse(BaseModel):
 
 
 class BazaarResponse(BaseModel):
+    status: str = Field(..., examples=["ok"])
     lastUpdated: int = Field(..., examples=[1715478978620])
     products: dict[str, BazaarProductResponse] = Field(
         ...,
@@ -135,3 +137,15 @@ class BazaarResponse(BaseModel):
             }
         ],
     )
+
+
+class ReadinessComponentResponse(BaseModel):
+    status: str = Field(..., examples=["ok"])
+    lastUpdated: int | None = Field(None, examples=[1700000000000])
+
+
+class ReadinessResponse(BaseModel):
+    status: str = Field(..., examples=["ok"])
+    checkedAt: str = Field(..., examples=["2026-06-12T09:30:00Z"])
+    lowestbinV2: ReadinessComponentResponse
+    bazaar: ReadinessComponentResponse

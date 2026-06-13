@@ -139,11 +139,62 @@ def test_update_rejects_running_legacy_local_auth_stack(tmp_path: Path, monkeypa
         )
 
 
+def test_update_allows_runtime_probe_mismatch_when_external_marker_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    update_module = _load_script_module("scamscreener_update_marker_override_test", "update.py")
+    compose_ops = update_module.compose_ops
+    context = _compose_context(compose_ops, tmp_path)
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "preflight.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+
+    monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
+    monkeypatch.setattr(compose_ops, "detect_running_auth_mode", lambda _context: "local")
+    monkeypatch.setattr(compose_ops, "read_deployment_auth_marker", lambda _context: "external")
+    monkeypatch.setattr(
+        compose_ops,
+        "run_command",
+        lambda command, *, cwd, capture_output=False: SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "run_compose",
+        lambda _context, args, *, capture_output=False: SimpleNamespace(stdout=""),
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "wait_for_service_health",
+        lambda _context, service_name, timeout_seconds, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "ensure_service_running",
+        lambda _context, service_name: None,
+    )
+    monkeypatch.setattr(
+        compose_ops,
+        "write_deployment_auth_marker",
+        lambda _context, mode="external": None,
+    )
+
+    result = update_module.run_update(
+        context,
+        argparse.Namespace(skip_preflight=False, skip_pull=True, health_timeout=90, log_tail_lines=40),
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "deployment marker says OAuth/OIDC is already active" in captured.err
+
+
 def test_caddyfile_routes_marketguard_hub() -> None:
     caddyfile = (Path(__file__).resolve().parents[1] / "Caddyfile").read_text(encoding="utf-8")
 
     assert "handle_path /market*" in caddyfile
     assert "reverse_proxy marketguard-hub:8082" in caddyfile
+    assert "/api/v1/ready" in caddyfile
 
 
 def test_compose_marketguard_hub_healthcheck_uses_allowed_host_header() -> None:

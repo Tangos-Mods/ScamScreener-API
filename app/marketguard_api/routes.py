@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -10,13 +12,21 @@ from fastapi.responses import JSONResponse
 from .cache import CachedResponse
 from .config import MarketGuardSettings
 from .exceptions import HypixelRateLimitError, HypixelUpstreamError, MarketGuardStorageError
-from .models import ApiErrorResponse, BazaarResponse, LowestBinV2Response
+from .models import (
+    ApiErrorResponse,
+    BazaarResponse,
+    LowestBinV2Response,
+    ReadinessResponse,
+)
 from .service import BazaarService, LowestBinService
 
 _LOWESTBIN_V1_GONE_DETAIL = "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
 _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
 _CACHE_KEY_LOWESTBIN_V2 = "lowestbin:v2"
 _CACHE_KEY_BAZAAR_V1 = "bazaar:v1"
+_READINESS_OK_DETAIL = "All MarketGuard datasets are fresh and available."
+_READINESS_DEGRADED_DETAIL = "At least one MarketGuard dataset is stale."
+_READINESS_UNAVAILABLE_DETAIL = "At least one MarketGuard dataset is unavailable."
 
 
 def _round_lowestbin_average(value: float | None) -> int | None:
@@ -96,7 +106,11 @@ def register_marketguard_routes(
         )
         cached_response = await _read_cached_response(request, _CACHE_KEY_LOWESTBIN_V2)
         if cached_response is not None:
-            return _json_cache_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
+            return _json_cache_response(
+                marketguard_settings,
+                _marketguard_payload_with_status(cached_response.payload, is_stale=cached_response.is_stale),
+                is_stale=cached_response.is_stale,
+            )
         try:
             snapshot = await marketguard_service.get_lowest_bins_v2()
         except HypixelRateLimitError as exc:
@@ -113,6 +127,7 @@ def register_marketguard_routes(
             ) from exc
 
         payload = {
+            "status": _marketguard_top_level_status(snapshot.is_stale),
             "lastUpdated": snapshot.snapshot_last_updated,
             "products": {
                 item_key: {
@@ -145,7 +160,11 @@ def register_marketguard_routes(
         )
         cached_response = await _read_cached_response(request, _CACHE_KEY_BAZAAR_V1)
         if cached_response is not None:
-            return _json_cache_response(marketguard_settings, cached_response.payload, is_stale=cached_response.is_stale)
+            return _json_cache_response(
+                marketguard_settings,
+                _marketguard_payload_with_status(cached_response.payload, is_stale=cached_response.is_stale),
+                is_stale=cached_response.is_stale,
+            )
         try:
             snapshot = await marketguard_bazaar_service.get_bazaar()
         except HypixelRateLimitError as exc:
@@ -162,11 +181,55 @@ def register_marketguard_routes(
             ) from exc
 
         payload = {
+            "status": _marketguard_top_level_status(snapshot.is_stale),
             "lastUpdated": snapshot.snapshot_last_updated,
             "products": snapshot.products,
         }
         await _write_cached_response(request, _CACHE_KEY_BAZAAR_V1, payload, is_stale=snapshot.is_stale)
         return _json_cache_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
+
+    @app.api_route(
+        "/api/v1/ready",
+        methods=["GET", "HEAD"],
+        response_model=ReadinessResponse,
+        responses={
+            200: _readiness_response_docs(_READINESS_OK_DETAIL),
+            206: _readiness_response_docs(_READINESS_DEGRADED_DETAIL),
+            503: _readiness_response_docs(_READINESS_UNAVAILABLE_DETAIL),
+        },
+    )
+    async def readiness(request: Request) -> Response:
+        now_epoch_seconds = datetime.now(timezone.utc).timestamp()
+        lowestbin_component, bazaar_component = await asyncio.gather(
+            _readiness_lowestbin_component(
+                marketguard_service,
+                now_epoch_seconds=now_epoch_seconds,
+                settings=marketguard_settings,
+            ),
+            _readiness_bazaar_component(
+                marketguard_bazaar_service,
+                now_epoch_seconds=now_epoch_seconds,
+                settings=marketguard_settings,
+            ),
+        )
+
+        payload = {
+            "status": "ok",
+            "checkedAt": _now_utc_iso(),
+            "lowestbinV2": lowestbin_component,
+            "bazaar": bazaar_component,
+        }
+        status_code = _readiness_status_code(payload)
+
+        if status_code == 206:
+            payload["status"] = "degraded"
+        elif status_code == 503:
+            payload["status"] = "unavailable"
+
+        headers = _readiness_headers(status_code)
+        if request.method.upper() == "HEAD":
+            return Response(status_code=status_code, headers=headers)
+        return JSONResponse(payload, status_code=status_code, headers=headers)
 
 
 async def _apply_rate_limit(
@@ -241,8 +304,128 @@ def _cache_headers(settings: MarketGuardSettings, *, is_stale: bool) -> dict[str
         "X-API-Provider": "Pankraz01",
     }
 
+
 def _json_cache_response(settings: MarketGuardSettings, payload: dict[str, object], *, is_stale: bool) -> JSONResponse:
     return JSONResponse(payload, headers=_cache_headers(settings, is_stale=is_stale))
+
+
+def _marketguard_top_level_status(is_stale: bool) -> str:
+    return "stale" if is_stale else "ok"
+
+
+def _marketguard_payload_with_status(payload: dict[str, object], *, is_stale: bool) -> dict[str, object]:
+    normalized_payload = dict(payload)
+    normalized_payload["status"] = _marketguard_top_level_status(is_stale)
+    return normalized_payload
+
+
+def _readiness_response_docs(detail: str) -> dict[str, object]:
+    return {
+        "description": detail,
+        "model": ReadinessResponse,
+    }
+
+
+async def _readiness_lowestbin_component(
+    service: LowestBinService,
+    *,
+    now_epoch_seconds: float,
+    settings: MarketGuardSettings,
+) -> dict[str, object]:
+    storage = getattr(service, "_storage", None)
+    if storage is None or not hasattr(storage, "read_lowestbin_snapshot"):
+        return {"status": "down", "lastUpdated": None}
+    try:
+        stored_snapshot = await run_in_threadpool(storage.read_lowestbin_snapshot)
+    except Exception:
+        return {"status": "down", "lastUpdated": None}
+    if stored_snapshot is None:
+        return {"status": "down", "lastUpdated": None}
+    return _readiness_component_payload(
+        getattr(stored_snapshot, "snapshot", None),
+        now_epoch_seconds=now_epoch_seconds,
+        settings=settings,
+    )
+
+
+async def _readiness_bazaar_component(
+    service: BazaarService,
+    *,
+    now_epoch_seconds: float,
+    settings: MarketGuardSettings,
+) -> dict[str, object]:
+    storage = getattr(service, "_storage", None)
+    if storage is None or not hasattr(storage, "read_bazaar_snapshot"):
+        return {"status": "down", "lastUpdated": None}
+    try:
+        snapshot = await run_in_threadpool(storage.read_bazaar_snapshot)
+    except Exception:
+        return {"status": "down", "lastUpdated": None}
+    return _readiness_component_payload(
+        snapshot,
+        now_epoch_seconds=now_epoch_seconds,
+        settings=settings,
+    )
+
+
+def _readiness_component_payload(
+    snapshot: object,
+    *,
+    now_epoch_seconds: float,
+    settings: MarketGuardSettings,
+) -> dict[str, object]:
+    if snapshot is None:
+        return {"status": "down", "lastUpdated": None}
+    snapshot_last_updated = getattr(snapshot, "snapshot_last_updated", None)
+    generated_at = getattr(snapshot, "generated_at", None)
+    try:
+        normalized_last_updated = int(snapshot_last_updated)
+    except (TypeError, ValueError):
+        return {"status": "down", "lastUpdated": None}
+    if not isinstance(generated_at, datetime):
+        return {"status": "down", "lastUpdated": None}
+    snapshot_age_seconds = now_epoch_seconds - generated_at.timestamp()
+    if snapshot_age_seconds < int(settings.cache_ttl_seconds):
+        component_status = "ok"
+    elif snapshot_age_seconds < int(settings.stale_if_error_seconds):
+        component_status = "stale"
+    else:
+        component_status = "down"
+    return {
+        "status": component_status,
+        "lastUpdated": normalized_last_updated,
+    }
+
+
+def _readiness_status_code(payload: dict[str, object]) -> int:
+    components = (
+        payload["lowestbinV2"],
+        payload["bazaar"],
+    )
+    statuses = {str(component.get("status", "")) for component in components if isinstance(component, dict)}
+    if "down" in statuses:
+        return 503
+    if "stale" in statuses:
+        return 206
+    return 200
+
+
+def _readiness_headers(status_code: int) -> dict[str, str]:
+    return {
+        "Cache-Control": "no-store, max-age=0",
+        "Pragma": "no-cache",
+        "X-Readiness-Status": (
+            "ok"
+            if status_code == 200
+            else "degraded"
+            if status_code == 206
+            else "unavailable"
+        ),
+    }
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def _read_cached_response(request: Request, cache_key: str) -> CachedResponse | None:
