@@ -194,6 +194,10 @@ class TrainingHubSettings:
         return self.storage_dir / "bundles"
 
     @property
+    def quarantine_dir(self) -> Path:
+        return self.storage_dir / "quarantine"
+
+    @property
     def backups_dir(self) -> Path:
         return self.storage_dir / "backups"
 

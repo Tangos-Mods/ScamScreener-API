@@ -10,6 +10,7 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-primary">Build Training Bundle</button>
     </form>
+    <a class="btn btn-outline-secondary" href="/admin/quarantine/bundle">Download Quarantine</a>
     <form method="post" action="/admin/retention/run" class="inline-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-outline-secondary">Run Retention Cleanup</button>
@@ -114,8 +115,14 @@
         <article class="summary-panel">
             <p class="summary-panel-label">Scrubbing</p>
             <strong class="summary-metric">{{ content_scrub_rules|length }}</strong>
-            <p>Remove sensitive phrases from future uploads before they are stored.</p>
+            <p>Quarantine whole cases when a configured phrase or regex hits.</p>
             <a class="button-small" href="/admin/scrub-rules">Open Scrubbing</a>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Quarantine</p>
+            <strong class="summary-metric">{{ quarantine_summary.case_count }}</strong>
+            <p>{{ quarantine_summary.file_count }} files are ready for bundled download and mod tuning.</p>
+            <a class="button-small" href="/admin/quarantine/bundle">Download Cases</a>
         </article>
         <article class="summary-panel">
             <p class="summary-panel-label">Runs</p>

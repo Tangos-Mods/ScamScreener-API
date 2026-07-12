@@ -110,6 +110,8 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
 
         upload_id = int(upload_result["upload_id"])
         case_count = int(upload_result["case_count"])
+        accepted_cases = int(upload_result.get("accepted_case_count", 0))
+        quarantined_cases = int(upload_result.get("quarantined_case_count", 0))
         inserted_cases = int(upload_result["inserted_cases"])
         updated_cases = int(upload_result["updated_cases"])
         skipped_rejected_cases = int(upload_result.get("skipped_rejected_cases", 0))
@@ -121,7 +123,16 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             skipped_notice = f" Rejected-case tombstones skipped: {skipped_rejected_cases}."
         scrub_notice = ""
         if scrubbed_fields:
-            scrub_notice = f" Content scrubbing removed {scrubbed_replacements} matches across {scrubbed_fields} fields."
+            scrub_notice = (
+                f" Content scrubbing quarantined {quarantined_cases} cases after "
+                f"{scrubbed_replacements} matches across {scrubbed_fields} fields."
+            )
+        upload_status = str(upload_result.get("status", "accepted"))
+        notice_prefix = (
+            f"Upload #{upload_id} quarantined all {case_count} submitted cases."
+            if upload_status == "quarantined"
+            else f"Upload #{upload_id} accepted with {accepted_cases} of {case_count} submitted cases."
+        )
         return await run_in_threadpool(
             _render_dashboard,
             request=request,
@@ -129,10 +140,10 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             settings=settings,
             user=refreshed_user,
             notice=(
-                f"Upload #{upload_id} accepted with {case_count} cases. "
+                f"{notice_prefix} "
                 f"Cases inserted: {inserted_cases}, updated: {updated_cases}.{scrub_notice}{skipped_notice}"
             ),
-            status_code=201,
+            status_code=201 if upload_status == "accepted" else 202,
             page="uploads",
         )
 
@@ -178,7 +189,7 @@ def register_public_dashboard_upload_routes(app: FastAPI, settings: TrainingHubS
             raise HTTPException(status_code=403, detail="Not allowed.")
 
         file_path = Path(str(upload_row["stored_path"]))
-        if not _is_path_within(settings.uploads_dir, file_path):
+        if not _is_path_within(settings.uploads_dir, file_path) and not _is_path_within(settings.quarantine_dir, file_path):
             raise HTTPException(status_code=403, detail="Upload path is outside allowed storage.")
         file_exists = await run_in_threadpool(file_path.exists)
         if not file_exists:

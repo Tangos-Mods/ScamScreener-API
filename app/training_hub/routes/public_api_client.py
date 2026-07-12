@@ -79,22 +79,27 @@ def register_public_api_client_routes(app: FastAPI, settings: TrainingHubSetting
                     "status": "duplicate",
                     "uploadId": int(upload_result["upload_id"]),
                     "caseCount": int(upload_result["case_count"]),
+                    "acceptedCases": int(upload_result.get("accepted_case_count", 0)),
+                    "quarantinedCases": int(upload_result.get("quarantined_case_count", 0)),
                     "sha256": str(upload_result.get("payload_sha256", "")),
                 },
                 status_code=200,
             )
 
+        response_status = 201 if str(upload_result.get("status", "")) == "accepted" else 202
         return JSONResponse(
             {
-                "status": "accepted",
+                "status": str(upload_result.get("status", "accepted")),
                 "uploadId": int(upload_result["upload_id"]),
                 "caseCount": int(upload_result["case_count"]),
+                "acceptedCases": int(upload_result.get("accepted_case_count", 0)),
+                "quarantinedCases": int(upload_result.get("quarantined_case_count", 0)),
                 "insertedCases": int(upload_result["inserted_cases"]),
                 "updatedCases": int(upload_result["updated_cases"]),
                 "skippedRejectedCases": int(upload_result.get("skipped_rejected_cases", 0)),
                 "sha256": str(upload_result.get("payload_sha256", "")),
             },
-            status_code=201,
+            status_code=response_status,
         )
 
     @app.post("/api/v1/client/uploads/anonymous")
@@ -136,22 +141,27 @@ def register_public_api_client_routes(app: FastAPI, settings: TrainingHubSetting
                     "status": "duplicate",
                     "uploadId": int(upload_result["upload_id"]),
                     "caseCount": int(upload_result["case_count"]),
+                    "acceptedCases": int(upload_result.get("accepted_case_count", 0)),
+                    "quarantinedCases": int(upload_result.get("quarantined_case_count", 0)),
                     "sha256": payload_sha,
                 },
                 status_code=200,
             )
 
+        response_status = 201 if str(upload_result.get("status", "")) == "accepted" else 202
         return JSONResponse(
             {
-                "status": "accepted",
+                "status": str(upload_result.get("status", "accepted")),
                 "uploadId": int(upload_result["upload_id"]),
                 "caseCount": int(upload_result["case_count"]),
+                "acceptedCases": int(upload_result.get("accepted_case_count", 0)),
+                "quarantinedCases": int(upload_result.get("quarantined_case_count", 0)),
                 "insertedCases": int(upload_result["inserted_cases"]),
                 "updatedCases": int(upload_result["updated_cases"]),
                 "skippedRejectedCases": int(upload_result.get("skipped_rejected_cases", 0)),
                 "sha256": payload_sha,
             },
-            status_code=201,
+            status_code=response_status,
         )
 
     @app.post("/api/v1/client/auth/logout")

@@ -4,7 +4,7 @@
 {% block title %}Training Hub Admin Scrubbing{% endblock %}
 {% block page_eyebrow %}Admin Scrubbing{% endblock %}
 {% block page_title %}Content Scrubbing Rules{% endblock %}
-{% block page_intro %}Define phrases that should be removed from future upload content before raw files, case payloads, and exports are stored. Schema fields <code>format</code>, <code>schemaVersion</code>, and <code>caseId</code> are preserved.{% endblock %}
+{% block page_intro %}Define phrases or regexes that should quarantine matching cases from future uploads before they enter normal case storage or training bundles. Quarantined raw cases remain available as a bundled admin download for mod tuning.{% endblock %}
 {% block page_actions %}
     <a class="btn btn-outline-secondary" href="/admin">Back to Overview</a>
 {% endblock %}
@@ -28,7 +28,7 @@
             <h2>Create scrub rule</h2>
         </div>
     </div>
-    <p class="muted">Rules are applied in creation order to future uploads only. Regex runs server-side, so keep patterns specific and short.</p>
+    <p class="muted">Rules are evaluated in creation order against future uploads only. If a rule hits anywhere in a case payload, that entire case is quarantined instead of being ingested.</p>
     <form method="post" action="/admin/scrub-rules" class="surface-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-row">

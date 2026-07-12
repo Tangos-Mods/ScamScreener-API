@@ -15,6 +15,7 @@ from .content_scrubbing import (
     CONTENT_SCRUB_MAX_RULES,
     CONTENT_SCRUB_PATTERN_MAX_LENGTH,
     _admin_content_scrub_rules,
+    _quarantine_storage_summary,
 )
 from .data_exports import _user_data_export_requests
 from .mfa import _mfa_state, _user_requires_admin_mfa_setup
@@ -98,7 +99,7 @@ def _dashboard_context(
     action_error: str = "",
 ) -> dict[str, Any]:
     uploads = [dict(row) for row in _user_uploads(settings.database_path, int(user["id"]))]
-    total_cases = sum(int(row["case_count"]) for row in uploads)
+    total_cases = sum(int(row["case_count"]) for row in uploads if str(row.get("status", "")).lower() == "accepted")
     current_session_id = getattr(request.state, "session_id", None)
     sessions = _user_active_sessions(settings.database_path, int(user["id"]), current_session_id)
     data_export_requests = _user_data_export_requests(settings.database_path, int(user["id"]))
@@ -275,6 +276,7 @@ def _admin_context(
     runs = [dict(row) for row in _admin_runs(settings.database_path)]
     audit_logs = [dict(row) for row in _admin_audit_logs(settings.database_path)]
     content_scrub_rules = _admin_content_scrub_rules(settings.database_path)
+    quarantine_summary = _quarantine_storage_summary(settings.quarantine_dir)
     admin_navigation_locked = bool(
         int(user.get("is_admin", 0)) == 1 and _user_requires_admin_mfa_setup(settings, int(user["id"]))
     )
@@ -311,6 +313,7 @@ def _admin_context(
         "recent_runs": runs[:6],
         "recent_audit_logs": audit_logs[:8],
         "content_scrub_rules": content_scrub_rules,
+        "quarantine_summary": quarantine_summary,
         "content_scrub_match_modes": CONTENT_SCRUB_MATCH_MODES,
         "content_scrub_rule_max_count": CONTENT_SCRUB_MAX_RULES,
         "content_scrub_pattern_max_length": CONTENT_SCRUB_PATTERN_MAX_LENGTH,

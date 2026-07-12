@@ -50,7 +50,7 @@ def _upload_quota_violation(
                     COALESCE(SUM(size_bytes), 0) AS total_bytes,
                     COALESCE(SUM(case_count), 0) AS total_cases
                 FROM uploads
-                WHERE status = 'accepted' AND user_id = ? AND created_at >= ? AND created_at < ?
+                WHERE status IN ('accepted', 'quarantined') AND user_id = ? AND created_at >= ? AND created_at < ?
                 """,
                 (int(user_id), day_start_iso, day_end_iso),
             ).fetchone()
@@ -73,7 +73,7 @@ def _upload_quota_violation(
                     COALESCE(SUM(size_bytes), 0) AS total_bytes,
                     COALESCE(SUM(case_count), 0) AS total_cases
                 FROM uploads
-                WHERE status = 'accepted' AND client_identity_id = ? AND created_at >= ? AND created_at < ?
+                WHERE status IN ('accepted', 'quarantined') AND client_identity_id = ? AND created_at >= ? AND created_at < ?
                 """,
                 (int(client_identity_id), day_start_iso, day_end_iso),
             ).fetchone()
@@ -94,7 +94,7 @@ def _upload_quota_violation(
                 """
                 SELECT COUNT(*)
                 FROM uploads
-                WHERE status = 'accepted' AND source_ip = ? AND created_at >= ? AND created_at < ?
+                WHERE status IN ('accepted', 'quarantined') AND source_ip = ? AND created_at >= ? AND created_at < ?
                 """,
                 (normalized_ip, day_start_iso, day_end_iso),
             ).fetchone()
@@ -103,7 +103,7 @@ def _upload_quota_violation(
                 return "Daily upload count limit reached for your IP."
 
         global_row = connection.execute(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM uploads WHERE status = 'accepted'"
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM uploads WHERE status IN ('accepted', 'quarantined')"
         ).fetchone()
         global_bytes = int(global_row[0] if global_row is not None else 0)
         if global_bytes + int(new_size_bytes) > settings.global_upload_storage_cap_bytes:
@@ -345,6 +345,7 @@ def _user_uploads(database_path: Path, user_id: int) -> list[sqlite3.Row]:
                 up.created_at,
                 up.original_file_name,
                 up.case_count,
+                up.status,
                 up.size_bytes,
                 up.payload_sha256,
                 up.duplicate_of_upload_id,

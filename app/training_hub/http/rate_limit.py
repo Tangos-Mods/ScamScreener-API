@@ -192,6 +192,8 @@ def _rate_limit_rule(
             return "download.upload", settings.max_upload_downloads_per_minute_per_user, 60
         if path.startswith("/admin/runs/") and path.endswith("/bundle"):
             return "download.bundle", settings.max_bundle_downloads_per_minute_per_user, 60
+        if path == "/admin/quarantine/bundle":
+            return "download.quarantine-bundle", settings.max_bundle_downloads_per_minute_per_user, 60
     return None
 
 

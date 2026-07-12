@@ -52,12 +52,17 @@ def _accept_training_upload(
         raise HTTPException(status_code=400, detail="Upload identity is required.")
 
     parsed_cases = _parse_training_upload_payload(payload)
-    parsed_cases, scrub_summary = _apply_content_scrub_rules_to_cases(settings.database_path, parsed_cases)
-    stored_payload = payload
-    if int(scrub_summary.get("fields_scrubbed", 0)) > 0:
-        stored_payload = _serialize_training_upload_payload(parsed_cases)
-    case_count = len(parsed_cases)
-    payload_sha = hashlib.sha256(stored_payload).hexdigest()
+    submitted_case_count = len(parsed_cases)
+    accepted_cases, quarantined_cases, scrub_summary = _apply_content_scrub_rules_to_cases(
+        settings.database_path,
+        parsed_cases,
+    )
+    accepted_case_count = len(accepted_cases)
+    quarantined_case_count = len(quarantined_cases)
+    stored_payload = _serialize_training_upload_payload(accepted_cases) if accepted_cases else b""
+    stored_payload_sha = hashlib.sha256(stored_payload).hexdigest() if stored_payload else ""
+    quarantine_payload = _serialize_training_upload_payload(quarantined_cases) if quarantined_cases else b""
+    quarantine_payload_sha = hashlib.sha256(quarantine_payload).hexdigest() if quarantine_payload else ""
     normalized_name = _safe_file_name(original_name)
 
     with sqlite3.connect(settings.database_path) as connection:
@@ -70,48 +75,97 @@ def _accept_training_upload(
             if client_identity["linked_user_id"] is not None:
                 linked_user_id = int(client_identity["linked_user_id"])
 
-        if user_id is not None:
-            own_existing = connection.execute(
-                "SELECT id FROM uploads WHERE user_id = ? AND payload_sha256 = ?",
-                (int(user_id), payload_sha),
-            ).fetchone()
-        else:
-            own_existing = connection.execute(
-                "SELECT id FROM uploads WHERE client_identity_id = ? AND payload_sha256 = ?",
-                (int(client_identity_id or 0), payload_sha),
-            ).fetchone()
-        if own_existing is not None:
-            return {
-                "status": "duplicate",
-                "upload_id": int(own_existing["id"]),
-                "case_count": case_count,
-                "payload_sha256": payload_sha,
-            }
-
-        duplicate_row = connection.execute(
-            "SELECT id FROM uploads WHERE payload_sha256 = ? ORDER BY id ASC LIMIT 1",
-            (payload_sha,),
-        ).fetchone()
-
         quota_error = _upload_quota_violation(
             settings.database_path,
             settings,
             int(user_id) if user_id is not None else None,
             int(client_identity_id) if client_identity_id is not None else None,
             source_ip,
-            len(stored_payload),
-            case_count,
+            len(payload),
+            submitted_case_count,
         )
         if quota_error:
             return {
                 "status": "quota-exceeded",
                 "error": quota_error,
-                "case_count": case_count,
-                "payload_sha256": payload_sha,
+                "case_count": submitted_case_count,
+                "accepted_case_count": accepted_case_count,
+                "quarantined_case_count": quarantined_case_count,
+                "payload_sha256": stored_payload_sha,
             }
 
-        stored_path = settings.uploads_dir / f"{payload_sha}.jsonl"
-        _write_payload(stored_path, stored_payload)
+        quarantine_path = None
+        if quarantine_payload:
+            quarantine_path = settings.quarantine_dir / f"{quarantine_payload_sha}.jsonl"
+            _write_payload(quarantine_path, quarantine_payload)
+
+        if accepted_case_count > 0 and stored_payload_sha:
+            if user_id is not None:
+                own_existing = connection.execute(
+                    "SELECT id FROM uploads WHERE user_id = ? AND payload_sha256 = ?",
+                    (int(user_id), stored_payload_sha),
+                ).fetchone()
+            else:
+                own_existing = connection.execute(
+                    "SELECT id FROM uploads WHERE client_identity_id = ? AND payload_sha256 = ?",
+                    (int(client_identity_id or 0), stored_payload_sha),
+                ).fetchone()
+            if own_existing is not None:
+                return {
+                    "status": "duplicate",
+                    "upload_id": int(own_existing["id"]),
+                    "case_count": submitted_case_count,
+                    "accepted_case_count": accepted_case_count,
+                    "quarantined_case_count": quarantined_case_count,
+                    "payload_sha256": stored_payload_sha,
+                }
+        elif quarantine_payload_sha:
+            if user_id is not None:
+                own_existing = connection.execute(
+                    "SELECT id FROM uploads WHERE user_id = ? AND payload_sha256 = ?",
+                    (int(user_id), quarantine_payload_sha),
+                ).fetchone()
+            else:
+                own_existing = connection.execute(
+                    "SELECT id FROM uploads WHERE client_identity_id = ? AND payload_sha256 = ?",
+                    (int(client_identity_id or 0), quarantine_payload_sha),
+                ).fetchone()
+            if own_existing is not None:
+                return {
+                    "status": "duplicate",
+                    "upload_id": int(own_existing["id"]),
+                    "case_count": submitted_case_count,
+                    "accepted_case_count": accepted_case_count,
+                    "quarantined_case_count": quarantined_case_count,
+                    "payload_sha256": quarantine_payload_sha,
+                }
+
+        payload_sha_for_upload = stored_payload_sha
+        duplicate_row = None
+        stored_path = None
+        upload_status = "accepted"
+        stored_size_bytes = len(stored_payload)
+        stored_case_count = accepted_case_count
+
+        if accepted_case_count > 0 and stored_payload_sha:
+            duplicate_row = connection.execute(
+                "SELECT id FROM uploads WHERE payload_sha256 = ? ORDER BY id ASC LIMIT 1",
+                (stored_payload_sha,),
+            ).fetchone()
+            stored_path = settings.uploads_dir / f"{stored_payload_sha}.jsonl"
+            _write_payload(stored_path, stored_payload)
+        else:
+            if quarantine_path is None:
+                raise HTTPException(status_code=400, detail="Upload does not contain any accepted or quarantined cases.")
+            payload_sha_for_upload = quarantine_payload_sha
+            duplicate_row = connection.execute(
+                "SELECT id FROM uploads WHERE payload_sha256 = ? ORDER BY id ASC LIMIT 1",
+                (quarantine_payload_sha,),
+            ).fetchone()
+            stored_path = quarantine_path
+            upload_status = "quarantined"
+            stored_size_bytes = len(quarantine_payload)
+            stored_case_count = quarantined_case_count
 
         cursor = connection.execute(
             """
@@ -136,10 +190,10 @@ def _accept_training_upload(
                 int(client_identity_id) if client_identity_id is not None else None,
                 normalized_name,
                 str(stored_path),
-                payload_sha,
-                case_count,
-                len(stored_payload),
-                "accepted",
+                payload_sha_for_upload,
+                stored_case_count,
+                stored_size_bytes,
+                upload_status,
                 int(duplicate_row["id"]) if duplicate_row is not None else None,
                 source_ip,
                 (user_agent or "").strip()[:300],
@@ -148,13 +202,17 @@ def _accept_training_upload(
         connection.commit()
         upload_id = int(cursor.lastrowid)
 
-    inserted_cases, updated_cases, skipped_rejected_cases = _ingest_cases_from_upload(
-        settings.database_path,
-        int(user_id) if user_id is not None else None,
-        int(client_identity_id) if client_identity_id is not None else None,
-        upload_id,
-        parsed_cases,
-    )
+    inserted_cases = 0
+    updated_cases = 0
+    skipped_rejected_cases = 0
+    if accepted_cases:
+        inserted_cases, updated_cases, skipped_rejected_cases = _ingest_cases_from_upload(
+            settings.database_path,
+            int(user_id) if user_id is not None else None,
+            int(client_identity_id) if client_identity_id is not None else None,
+            upload_id,
+            accepted_cases,
+        )
     details_suffix = audit_details_suffix
     if client_identity_id is not None and user_id is None:
         details_suffix = f" for client {_normalize_client_id(client_id or '')}{audit_details_suffix}"
@@ -162,29 +220,37 @@ def _accept_training_upload(
     if skipped_rejected_cases:
         skipped_suffix = f" Skipped {int(skipped_rejected_cases)} tombstoned rejected cases."
     scrub_suffix = ""
-    if int(scrub_summary.get("fields_scrubbed", 0)) > 0:
+    if quarantined_case_count > 0:
         scrub_suffix = (
-            f" Scrubbed {int(scrub_summary['replacements_removed'])} matches across "
+            f" Quarantined {quarantined_case_count} cases after "
+            f"{int(scrub_summary['replacements_removed'])} rule matches across "
             f"{int(scrub_summary['fields_scrubbed'])} fields using {int(scrub_summary['rule_count'])} rules."
         )
+    audit_action = "upload.accepted" if accepted_case_count > 0 else "upload.quarantined"
     _create_audit_log(
         settings.database_path,
         actor_user_id=int(user_id) if user_id is not None else linked_user_id,
-        action="upload.accepted",
+        action=audit_action,
         target_type="upload",
         target_id=upload_id,
-        details=f"Accepted upload {upload_id} ({case_count} cases){details_suffix}.{scrub_suffix}{skipped_suffix}",
+        details=(
+            f"{'Accepted' if accepted_case_count > 0 else 'Quarantined'} upload {upload_id} "
+            f"(submitted={submitted_case_count}, accepted={accepted_case_count}, quarantined={quarantined_case_count})"
+            f"{details_suffix}.{scrub_suffix}{skipped_suffix}"
+        ),
         source_ip=source_ip,
         user_agent=user_agent,
     )
     return {
-        "status": "accepted",
+        "status": "accepted" if accepted_case_count > 0 else "quarantined",
         "upload_id": upload_id,
-        "case_count": case_count,
+        "case_count": submitted_case_count,
+        "accepted_case_count": accepted_case_count,
+        "quarantined_case_count": quarantined_case_count,
         "inserted_cases": inserted_cases,
         "updated_cases": updated_cases,
         "skipped_rejected_cases": skipped_rejected_cases,
-        "payload_sha256": payload_sha,
+        "payload_sha256": payload_sha_for_upload,
         "scrubbed_fields": int(scrub_summary.get("fields_scrubbed", 0)),
         "scrubbed_replacements": int(scrub_summary.get("replacements_removed", 0)),
     }

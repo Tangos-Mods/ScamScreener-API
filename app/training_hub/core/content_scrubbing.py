@@ -280,34 +280,39 @@ def _load_active_content_scrub_rules(database_path: Path | str) -> list[_Compile
 def _apply_content_scrub_rules_to_cases(
     database_path: Path | str,
     parsed_cases: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     rules = _load_active_content_scrub_rules(database_path)
     if not rules:
-        return parsed_cases, {
+        return parsed_cases, [], {
             "rule_count": 0,
             "fields_scrubbed": 0,
             "replacements_removed": 0,
             "cases_scrubbed": 0,
+            "accepted_cases": len(parsed_cases),
+            "quarantined_cases": 0,
         }
 
-    scrubbed_cases: list[dict[str, Any]] = []
+    accepted_cases: list[dict[str, Any]] = []
+    quarantined_cases: list[dict[str, Any]] = []
     fields_scrubbed = 0
     replacements_removed = 0
     cases_scrubbed = 0
     per_rule_matches: dict[int, int] = {}
 
     for payload in parsed_cases:
-        scrubbed_payload, payload_fields_scrubbed, payload_replacements_removed = _scrub_content_value(
+        payload_fields_scrubbed, payload_replacements_removed = _count_content_scrub_matches(
             payload,
             rules,
             (),
             per_rule_matches,
         )
-        scrubbed_cases.append(scrubbed_payload)
         fields_scrubbed += payload_fields_scrubbed
         replacements_removed += payload_replacements_removed
         if payload_fields_scrubbed > 0:
             cases_scrubbed += 1
+            quarantined_cases.append(payload)
+            continue
+        accepted_cases.append(payload)
 
     if per_rule_matches:
         with sqlite3.connect(database_path) as connection:
@@ -318,65 +323,89 @@ def _apply_content_scrub_rules_to_cases(
                 )
             connection.commit()
 
-    return scrubbed_cases, {
+    return accepted_cases, quarantined_cases, {
         "rule_count": len(rules),
         "fields_scrubbed": fields_scrubbed,
         "replacements_removed": replacements_removed,
         "cases_scrubbed": cases_scrubbed,
+        "accepted_cases": len(accepted_cases),
+        "quarantined_cases": len(quarantined_cases),
     }
 
 
-def _scrub_content_value(
+def _count_content_scrub_matches(
     value: Any,
     rules: list[_CompiledContentScrubRule],
     path: tuple[str, ...],
     per_rule_matches: dict[int, int],
-) -> tuple[Any, int, int]:
+) -> tuple[int, int]:
     if isinstance(value, str):
         if len(path) == 1 and path[0] in _CONTENT_SCRUB_PROTECTED_TOP_LEVEL_FIELDS:
-            return value, 0, 0
+            return 0, 0
 
-        scrubbed_value = value
         replacements_removed = 0
         for rule in rules:
-            scrubbed_value, removed_for_rule = rule.scrub(scrubbed_value)
+            _, removed_for_rule = rule.scrub(value)
             replacements_removed += removed_for_rule
             if removed_for_rule > 0:
                 per_rule_matches[rule.id] = int(per_rule_matches.get(rule.id, 0)) + int(removed_for_rule)
         fields_scrubbed = 1 if replacements_removed > 0 else 0
-        return scrubbed_value, fields_scrubbed, replacements_removed
+        return fields_scrubbed, replacements_removed
 
     if isinstance(value, list):
-        scrubbed_items: list[Any] = []
         fields_scrubbed = 0
         replacements_removed = 0
         for item in value:
-            scrubbed_item, item_fields_scrubbed, item_replacements_removed = _scrub_content_value(
+            item_fields_scrubbed, item_replacements_removed = _count_content_scrub_matches(
                 item,
                 rules,
                 path,
                 per_rule_matches,
             )
-            scrubbed_items.append(scrubbed_item)
             fields_scrubbed += item_fields_scrubbed
             replacements_removed += item_replacements_removed
-        return scrubbed_items, fields_scrubbed, replacements_removed
+        return fields_scrubbed, replacements_removed
 
     if isinstance(value, dict):
-        scrubbed_mapping: dict[str, Any] = {}
         fields_scrubbed = 0
         replacements_removed = 0
         for key, item in value.items():
             normalized_key = str(key)
-            scrubbed_item, item_fields_scrubbed, item_replacements_removed = _scrub_content_value(
+            item_fields_scrubbed, item_replacements_removed = _count_content_scrub_matches(
                 item,
                 rules,
                 path + (normalized_key,),
                 per_rule_matches,
             )
-            scrubbed_mapping[normalized_key] = scrubbed_item
             fields_scrubbed += item_fields_scrubbed
             replacements_removed += item_replacements_removed
-        return scrubbed_mapping, fields_scrubbed, replacements_removed
+        return fields_scrubbed, replacements_removed
 
-    return value, 0, 0
+    return 0, 0
+
+
+def _quarantine_storage_summary(quarantine_dir: Path | str) -> dict[str, int]:
+    directory = Path(quarantine_dir)
+    if not directory.exists() or not directory.is_dir():
+        return {"file_count": 0, "case_count": 0, "size_bytes": 0}
+
+    file_count = 0
+    case_count = 0
+    size_bytes = 0
+    for file_path in sorted(directory.glob("*.jsonl")):
+        if not file_path.is_file():
+            continue
+        file_count += 1
+        try:
+            size_bytes += int(file_path.stat().st_size)
+        except OSError:
+            continue
+        try:
+            with file_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        case_count += 1
+        except OSError:
+            continue
+
+    return {"file_count": file_count, "case_count": case_count, "size_bytes": size_bytes}

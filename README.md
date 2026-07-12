@@ -18,7 +18,7 @@ This repository contains two separate applications in one repo:
 - Self-service upload deletion, full contribution purge, and account deletion
 - Self-service account data export workflow delivered by email
 - Admin view over users, basic case list, training runs, and audit log
-- Admin-managed content scrubbing rules for removing sensitive phrases from future uploads before storage
+- Admin-managed content scrubbing rules for quarantining matching cases from future uploads before storage and training
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN v2 endpoint at `/api/v2/lowestbin`
 - Public Bazaar endpoint at `/api/v1/bazaar`
@@ -30,7 +30,7 @@ Data/state:
 
 - the default deployment stores app state under `/app/data`
 - Training Hub stores users, sessions, uploads, cases, and audit metadata in MariaDB for staging/production deployments
-- uploaded payloads (after any configured content scrubbing) and generated bundles are kept in the persistent app data volume
+- accepted upload payloads, quarantined scrub hits, and generated bundles are kept in the persistent app data volume
 
 Frontend files:
 
