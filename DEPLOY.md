@@ -344,7 +344,6 @@ From your workstation:
 curl -I https://scamscreener.example.com/
 curl -I https://scamscreener.example.com/hub
 curl -I https://scamscreener.example.com/market/
-curl -I https://scamscreener.example.com/api/v1/lowestbin
 curl -I https://scamscreener.example.com/api/v2/lowestbin
 curl -I https://scamscreener.example.com/api/v1/health
 curl -I https://scamscreener.example.com/api/v1/metrics

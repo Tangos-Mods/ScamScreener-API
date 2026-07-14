@@ -285,6 +285,7 @@ Supply-chain checks:
 
 - `GET /api/v1/health` (internal only)
 - `GET /api/v2/lowestbin`
+- `QUERY /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
 - `GET /market/`
 - `GET /market/bazaar`
@@ -293,8 +294,17 @@ Supply-chain checks:
 - `POST /api/v1/client/auth/logout`
 
 `/api/v1/health` is an internal-only observability endpoint that returns status, UTC time, user/upload counts, and storage metadata.
-`/api/v1/lowestbin` is disabled and returns `410 Gone` with a pointer to `/api/v2/lowestbin`.
 `/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
+`QUERY /api/v2/lowestbin` accepts a JSON body with a non-empty `products` array and returns the same response shape containing only the requested identifiers. Unknown identifiers are omitted. The QUERY method is additive and does not replace the GET endpoint; because the HTTP QUERY method is currently an IETF Internet-Draft, clients should retain GET as a compatibility fallback.
+
+Example `QUERY /api/v2/lowestbin` request:
+
+```http
+QUERY /api/v2/lowestbin HTTP/1.1
+Content-Type: application/json
+
+{"products":["HYPERION","TRUE_ESSENCE"]}
+```
 
 Example `GET /api/v2/lowestbin` response:
 
@@ -317,14 +327,6 @@ Example `GET /api/v2/lowestbin` response:
       "avg30d": 22120
     }
   }
-}
-```
-
-Example disabled response for `GET /api/v1/lowestbin`:
-
-```json
-{
-  "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
 }
 ```
 

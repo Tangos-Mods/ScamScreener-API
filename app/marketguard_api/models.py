@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, constr
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +101,16 @@ class LowestBinV2Response(BaseModel):
                 },
             }
         ],
+    )
+
+
+class LowestBinQueryRequest(BaseModel):
+    products: list[constr(strip_whitespace=True, min_length=1, max_length=64)] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Exact product identifiers to return.",
+        examples=[["HYPERION", "TRUE_ESSENCE"]],
     )
 
 

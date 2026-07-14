@@ -16,11 +16,11 @@ from .models import (
     ApiErrorResponse,
     BazaarResponse,
     LowestBinV2Response,
+    LowestBinQueryRequest,
     ReadinessResponse,
 )
 from .service import BazaarService, LowestBinService
 
-_LOWESTBIN_V1_GONE_DETAIL = "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
 _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
 _CACHE_KEY_LOWESTBIN_V2 = "lowestbin:v2"
 _CACHE_KEY_BAZAAR_V1 = "bazaar:v1"
@@ -77,39 +77,12 @@ def register_marketguard_routes(
     app.add_event_handler("shutdown", marketguard_service.aclose)
     app.add_event_handler("shutdown", marketguard_bazaar_service.aclose)
 
-    @app.get(
-        "/api/v1/lowestbin",
-        responses={
-            410: _error_response_docs(_LOWESTBIN_V1_GONE_DETAIL),
-        },
-    )
-    async def lowestbin_v1_gone() -> JSONResponse:
-        return JSONResponse(
-            {"detail": _LOWESTBIN_V1_GONE_DETAIL},
-            status_code=410,
-        )
-
-    @app.get(
-        "/api/v2/lowestbin",
-        response_model=LowestBinV2Response,
-        responses={
-            429: _error_response_docs("Too many requests.", retry_after=True),
-            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
-        },
-    )
-    async def lowestbin_v2(request: Request, response: Response) -> JSONResponse:
-        await _apply_rate_limit(
-            request,
-            route_key="lowestbin",
-            max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
-            trusted_proxies=marketguard_settings.trusted_proxies,
-        )
+    async def _load_lowestbin_payload(request: Request) -> tuple[dict[str, object], bool]:
         cached_response = await _read_cached_response(request, _CACHE_KEY_LOWESTBIN_V2)
         if cached_response is not None:
-            return _json_cache_response(
-                marketguard_settings,
+            return (
                 _marketguard_payload_with_status(cached_response.payload, is_stale=cached_response.is_stale),
-                is_stale=cached_response.is_stale,
+                cached_response.is_stale,
             )
         try:
             snapshot = await marketguard_service.get_lowest_bins_v2()
@@ -126,7 +99,7 @@ def register_marketguard_routes(
                 detail="Lowest BIN data is temporarily unavailable.",
             ) from exc
 
-        payload = {
+        payload: dict[str, object] = {
             "status": _marketguard_top_level_status(snapshot.is_stale),
             "lastUpdated": snapshot.snapshot_last_updated,
             "products": {
@@ -141,7 +114,50 @@ def register_marketguard_routes(
             },
         }
         await _write_cached_response(request, _CACHE_KEY_LOWESTBIN_V2, payload, is_stale=snapshot.is_stale)
-        return _json_cache_response(marketguard_settings, payload, is_stale=snapshot.is_stale)
+        return payload, snapshot.is_stale
+
+    @app.get(
+        "/api/v2/lowestbin",
+        response_model=LowestBinV2Response,
+        responses={
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
+        },
+    )
+    async def lowestbin_v2(request: Request, response: Response) -> JSONResponse:
+        await _apply_rate_limit(
+            request,
+            route_key="lowestbin",
+            max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
+            trusted_proxies=marketguard_settings.trusted_proxies,
+        )
+        payload, is_stale = await _load_lowestbin_payload(request)
+        return _json_cache_response(marketguard_settings, payload, is_stale=is_stale)
+
+    @app.api_route(
+        "/api/v2/lowestbin",
+        methods=["QUERY"],
+        response_model=LowestBinV2Response,
+        responses={
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Lowest BIN data is temporarily unavailable.", retry_after=True),
+        },
+    )
+    async def lowestbin_v2_query(request: Request, query: LowestBinQueryRequest) -> JSONResponse:
+        await _apply_rate_limit(
+            request,
+            route_key="lowestbin",
+            max_requests=int(marketguard_settings.lowestbin_rate_limit_per_minute),
+            trusted_proxies=marketguard_settings.trusted_proxies,
+        )
+        payload, is_stale = await _load_lowestbin_payload(request)
+        products = payload.get("products")
+        if not isinstance(products, dict):
+            raise HTTPException(status_code=503, detail="Lowest BIN data is temporarily unavailable.")
+        requested = dict.fromkeys(query.products)
+        filtered_payload = dict(payload)
+        filtered_payload["products"] = {key: products[key] for key in requested if key in products}
+        return _json_cache_response(marketguard_settings, filtered_payload, is_stale=is_stale)
 
     @app.get(
         "/api/v1/bazaar",

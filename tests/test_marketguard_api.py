@@ -26,71 +26,21 @@ from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinS
 from app.training_hub.config.settings import TrainingHubSettings
 
 
-def test_lowestbin_v1_returns_gone_with_upgrade_message(tmp_path: Path) -> None:
-    requests: list[int] = []
-    legendary_enderman = {"petInfo": json.dumps({"type": "ENDERMAN", "tier": "LEGENDARY"})}
-
-    async def _handler(request: httpx.Request) -> httpx.Response:
-        requests.append(int(request.url.params.get("page", "0")))
-        page = int(request.url.params["page"])
-        if page == 0:
-            return httpx.Response(
-                200,
-                json={
-                    "success": True,
-                    "totalPages": 2,
-                    "lastUpdated": 1_700_000_000_000,
-                    "auctions": [
-                        _auction("HYPERION", 100_000_000),
-                        _auction("TRUE_ESSENCE", 1_500_000, count=64),
-                        _auction(
-                            "PET",
-                            12_000_000,
-                            item_name="[Lvl 100] Enderman",
-                            extra_attributes=legendary_enderman,
-                        ),
-                        _auction("HYPERION", 1, bin=False),
-                    ],
-                },
-            )
-
-        return httpx.Response(
-            200,
-            json={
-                "success": True,
-                "totalPages": 2,
-                "lastUpdated": 1_700_000_000_000,
-                "auctions": [
-                    _auction("HYPERION", 98_000_000),
-                    _auction(
-                        "PET",
-                        5_000_000,
-                        item_name="[Lvl 1] Enderman",
-                        extra_attributes=legendary_enderman,
-                    ),
-                    _auction("RUNE", 250_000, extra_attributes={"runes": {"ICE": 3}}),
-                    _auction(
-                        "CRIMSON_BOOTS",
-                        7_000_000,
-                        extra_attributes={"attributes": {"veteran": 2, "mana_pool": 1}},
-                    ),
-                ],
-            },
-        )
-
+def test_lowestbin_v1_returns_not_found(tmp_path: Path) -> None:
     settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
-        marketguard_service=_marketguard_service(settings, _handler),
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
     with TestClient(app) as client:
         response = client.get("/api/v1/lowestbin")
 
-    assert response.status_code == 410
-    assert response.json() == {"detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."}
-    assert requests == []
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
 
 
 def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path) -> None:
@@ -206,7 +156,56 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
     }
 
 
-def test_lowestbin_v1_is_marked_gone_in_openapi(tmp_path: Path) -> None:
+def test_lowestbin_query_returns_only_requested_products(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction("HYPERION", 98_000_000, item_name="Hyperion"),
+                    _auction("TRUE_ESSENCE", 1_500_000, count=64, item_name="True Essence"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v2/lowestbin",
+            json={"products": ["TRUE_ESSENCE", "NOT_PRESENT", "TRUE_ESSENCE"]},
+        )
+
+    assert response.status_code == 200
+    assert set(response.json()["products"]) == {"TRUE_ESSENCE"}
+
+
+def test_lowestbin_query_rejects_empty_product_selection(tmp_path: Path) -> None:
+    settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+    )
+
+    with TestClient(app) as client:
+        response = client.request("QUERY", "/api/v2/lowestbin", json={"products": []})
+
+    assert response.status_code == 422
+
+
+def test_lowestbin_v1_is_removed_from_openapi(tmp_path: Path) -> None:
     settings = _marketguard_settings()
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
@@ -221,11 +220,7 @@ def test_lowestbin_v1_is_marked_gone_in_openapi(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     schema = response.json()
-    assert "deprecated" not in schema["paths"]["/api/v1/lowestbin"]["get"]
-    assert set(schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]) == {"200", "410"}
-    assert schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]["410"]["content"]["application/json"]["example"] == {
-        "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
-    }
+    assert "/api/v1/lowestbin" not in schema["paths"]
     assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
 
 
@@ -333,7 +328,7 @@ def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path)
     assert "/api/v1/client/auth/login" not in schema["paths"]
     assert "/api/v1/client/uploads" not in schema["paths"]
     assert "/api/v1/ready" in schema["paths"]
-    assert "/api/v1/lowestbin" in schema["paths"]
+    assert "/api/v1/lowestbin" not in schema["paths"]
     assert "/api/v2/lowestbin" in schema["paths"]
     assert "/api/v1/bazaar" in schema["paths"]
 
