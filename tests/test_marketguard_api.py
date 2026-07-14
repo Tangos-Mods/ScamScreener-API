@@ -26,21 +26,71 @@ from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinS
 from app.training_hub.config.settings import TrainingHubSettings
 
 
-def test_lowestbin_v1_returns_not_found(tmp_path: Path) -> None:
+def test_lowestbin_v1_returns_gone_with_upgrade_message(tmp_path: Path) -> None:
+    requests: list[int] = []
+    legendary_enderman = {"petInfo": json.dumps({"type": "ENDERMAN", "tier": "LEGENDARY"})}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(int(request.url.params.get("page", "0")))
+        page = int(request.url.params["page"])
+        if page == 0:
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "totalPages": 2,
+                    "lastUpdated": 1_700_000_000_000,
+                    "auctions": [
+                        _auction("HYPERION", 100_000_000),
+                        _auction("TRUE_ESSENCE", 1_500_000, count=64),
+                        _auction(
+                            "PET",
+                            12_000_000,
+                            item_name="[Lvl 100] Enderman",
+                            extra_attributes=legendary_enderman,
+                        ),
+                        _auction("HYPERION", 1, bin=False),
+                    ],
+                },
+            )
+
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 2,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction("HYPERION", 98_000_000),
+                    _auction(
+                        "PET",
+                        5_000_000,
+                        item_name="[Lvl 1] Enderman",
+                        extra_attributes=legendary_enderman,
+                    ),
+                    _auction("RUNE", 250_000, extra_attributes={"runes": {"ICE": 3}}),
+                    _auction(
+                        "CRIMSON_BOOTS",
+                        7_000_000,
+                        extra_attributes={"attributes": {"veteran": 2, "mana_pool": 1}},
+                    ),
+                ],
+            },
+        )
+
     settings = _marketguard_settings()
-    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
-        marketguard_service=marketguard_service,
-        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_service=_marketguard_service(settings, _handler),
     )
 
     with TestClient(app) as client:
         response = client.get("/api/v1/lowestbin")
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Not Found"}
+    assert response.status_code == 410
+    assert response.json() == {"detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."}
+    assert requests == []
 
 
 def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path) -> None:
@@ -111,6 +161,71 @@ def test_lowestbin_v2_returns_price_auctioneer_uuid_and_item_name(tmp_path: Path
     }
 
 
+def test_lowestbin_v2_query_filters_products_and_validates_request_content(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction("HYPERION", 98_000_000, item_name="Hyperion"),
+                    _auction("TRUE_ESSENCE", 1_500_000, count=64, item_name="True Essence"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v2/lowestbin",
+            json={"products": ["TRUE_ESSENCE"]},
+        )
+        missing_content_type = client.request("QUERY", "/api/v2/lowestbin", content=b"{}")
+        unsupported_content_type = client.request(
+            "QUERY",
+            "/api/v2/lowestbin",
+            content="products=TRUE_ESSENCE",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        unknown_product = client.request(
+            "QUERY",
+            "/api/v2/lowestbin",
+            json={"products": ["UNKNOWN_PRODUCT"]},
+        )
+        unexpected_field = client.request(
+            "QUERY",
+            "/api/v2/lowestbin",
+            json={"products": ["HYPERION"], "includeArchived": True},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["accept-query"] == '"application/json"'
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["products"] == {
+        "TRUE_ESSENCE": {
+            "price": 23_437.5,
+            "auctioneerUuid": "11111111111111111111111111111111",
+            "item_name": "True Essence",
+            "avg7d": 23_438,
+            "avg30d": 23_438,
+        }
+    }
+    assert missing_content_type.status_code == 400
+    assert missing_content_type.headers["accept-query"] == '"application/json"'
+    assert unsupported_content_type.status_code == 415
+    assert unknown_product.status_code == 422
+    assert unexpected_field.status_code == 422
+
+
 def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: Path) -> None:
     async def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -156,56 +271,7 @@ def test_lowestbin_v2_falls_back_to_item_key_when_item_name_is_blank(tmp_path: P
     }
 
 
-def test_lowestbin_query_returns_only_requested_products(tmp_path: Path) -> None:
-    async def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "success": True,
-                "totalPages": 1,
-                "lastUpdated": 1_700_000_000_000,
-                "auctions": [
-                    _auction("HYPERION", 98_000_000, item_name="Hyperion"),
-                    _auction("TRUE_ESSENCE", 1_500_000, count=64, item_name="True Essence"),
-                ],
-            },
-        )
-
-    settings = _marketguard_settings()
-    app = create_app(
-        training_hub_settings=_training_hub_settings(tmp_path),
-        marketguard_settings=settings,
-        marketguard_service=_marketguard_service(settings, _handler),
-    )
-
-    with TestClient(app) as client:
-        response = client.request(
-            "QUERY",
-            "/api/v2/lowestbin",
-            json={"products": ["TRUE_ESSENCE", "NOT_PRESENT", "TRUE_ESSENCE"]},
-        )
-
-    assert response.status_code == 200
-    assert set(response.json()["products"]) == {"TRUE_ESSENCE"}
-
-
-def test_lowestbin_query_rejects_empty_product_selection(tmp_path: Path) -> None:
-    settings = _marketguard_settings()
-    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
-    app = create_app(
-        training_hub_settings=_training_hub_settings(tmp_path),
-        marketguard_settings=settings,
-        marketguard_service=marketguard_service,
-        marketguard_bazaar_service=marketguard_bazaar_service,
-    )
-
-    with TestClient(app) as client:
-        response = client.request("QUERY", "/api/v2/lowestbin", json={"products": []})
-
-    assert response.status_code == 422
-
-
-def test_lowestbin_v1_is_removed_from_openapi(tmp_path: Path) -> None:
+def test_lowestbin_v1_is_marked_gone_in_openapi(tmp_path: Path) -> None:
     settings = _marketguard_settings()
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
@@ -220,7 +286,11 @@ def test_lowestbin_v1_is_removed_from_openapi(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     schema = response.json()
-    assert "/api/v1/lowestbin" not in schema["paths"]
+    assert "deprecated" not in schema["paths"]["/api/v1/lowestbin"]["get"]
+    assert set(schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]) == {"200", "410"}
+    assert schema["paths"]["/api/v1/lowestbin"]["get"]["responses"]["410"]["content"]["application/json"]["example"] == {
+        "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
+    }
     assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
 
 
@@ -328,7 +398,7 @@ def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path)
     assert "/api/v1/client/auth/login" not in schema["paths"]
     assert "/api/v1/client/uploads" not in schema["paths"]
     assert "/api/v1/ready" in schema["paths"]
-    assert "/api/v1/lowestbin" not in schema["paths"]
+    assert "/api/v1/lowestbin" in schema["paths"]
     assert "/api/v2/lowestbin" in schema["paths"]
     assert "/api/v1/bazaar" in schema["paths"]
 
@@ -745,6 +815,78 @@ def test_response_cache_chain_supports_local_redis_toggle_matrix() -> None:
     assert asyncio.run(local_backend.get("shared-hit")) == entry
 
 
+def test_lowestbin_v2_coalesces_inflight_refresh_requests() -> None:
+    request_count = 0
+
+    async def _slow_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        await asyncio.sleep(0.2)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction(
+                        "HYPERION",
+                        99_000_000,
+                        item_name="Hyperion",
+                        auctioneer="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ),
+                ],
+            },
+        )
+
+    async def _bazaar_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "lastUpdated": 1_700_000_000_000,
+                "products": {
+                    "ENCHANTED_GOLD": {
+                        "quick_status": {
+                            "buyPrice": 123.4,
+                            "sellPrice": 120.1,
+                            "buyVolume": 123456,
+                            "sellVolume": 120000,
+                            "buyMovingWeek": 543210,
+                            "sellMovingWeek": 432100,
+                        }
+                    }
+                },
+            },
+        )
+
+    settings = _marketguard_settings(trusted_proxies={"testclient"})
+    lowestbin_service = _marketguard_service(settings, _slow_handler)
+    bazaar_service = _marketguard_bazaar_service(settings, _bazaar_handler)
+    response_cache = ResponseCacheChain(
+        LocalResponseCache(ttl_seconds=30, max_entries=8),
+        _SharedMemoryCacheBackend({}),
+    )
+    app = create_marketguard_app(
+        settings=settings,
+        service=lowestbin_service,
+        bazaar_service=bazaar_service,
+        response_cache=response_cache,
+    )
+
+    async def _exercise() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await asyncio.gather(*(client.get("/api/v2/lowestbin") for _ in range(20)))
+
+    responses = asyncio.run(_exercise())
+
+    assert request_count == 1
+    assert {response.status_code for response in responses} == {200}
+    assert len({response.json()["lastUpdated"] for response in responses}) == 1
+    assert len({response.json()["products"]["HYPERION"]["price"] for response in responses}) == 1
+
+
 def test_lowestbin_returns_stale_cache_when_refresh_fails() -> None:
     clock = [0.0]
     request_count = 0
@@ -1128,7 +1270,7 @@ def test_lowestbin_v2_rate_limit_uses_platform_limiter(tmp_path: Path) -> None:
             },
         )
 
-    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1)
+    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1, local_cache_enabled=False)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
@@ -1166,7 +1308,7 @@ def test_bazaar_rate_limit_uses_platform_limiter(tmp_path: Path) -> None:
             },
         )
 
-    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1)
+    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1, local_cache_enabled=False)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
@@ -1196,7 +1338,7 @@ def test_standalone_marketguard_app_enforces_rate_limit_without_training_hub(tmp
             },
         )
 
-    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1)
+    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1, local_cache_enabled=False)
     app = create_marketguard_app(
         settings=settings,
         service=_marketguard_service(settings, _handler),
@@ -1209,6 +1351,34 @@ def test_standalone_marketguard_app_enforces_rate_limit_without_training_hub(tmp
     assert first.status_code == 200
     assert second.status_code == 429
     assert second.headers["retry-after"].isdigit()
+
+
+def test_lowestbin_v2_serves_cached_response_without_rate_limit_penalty(tmp_path: Path) -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": 1_700_000_000_000,
+                "auctions": [
+                    _auction("HYPERION", 99_000_000),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(lowestbin_rate_limit_per_minute=1)
+    app = create_marketguard_app(
+        settings=settings,
+        service=_marketguard_service(settings, _handler),
+    )
+
+    with TestClient(app) as client:
+        first = client.get("/api/v2/lowestbin")
+        second = client.get("/api/v2/lowestbin")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
 
 
 def test_standalone_marketguard_app_serves_bazaar(tmp_path: Path) -> None:

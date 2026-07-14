@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, Field, constr
+from pydantic import BaseModel, ConfigDict, Field, constr
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,8 @@ class LowestBinV2Response(BaseModel):
 
 
 class LowestBinQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     products: list[constr(strip_whitespace=True, min_length=1, max_length=64)] = Field(
         ...,
         min_length=1,

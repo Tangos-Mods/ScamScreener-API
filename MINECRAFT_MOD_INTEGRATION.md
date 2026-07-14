@@ -99,24 +99,7 @@ Accepted:
   "status": "accepted",
   "uploadId": 12,
   "caseCount": 34,
-  "acceptedCases": 34,
-  "quarantinedCases": 0,
   "insertedCases": 34,
-  "updatedCases": 0,
-  "sha256": "..."
-}
-```
-
-Fully quarantined by scrub rules:
-
-```json
-{
-  "status": "quarantined",
-  "uploadId": 13,
-  "caseCount": 34,
-  "acceptedCases": 0,
-  "quarantinedCases": 34,
-  "insertedCases": 0,
   "updatedCases": 0,
   "sha256": "..."
 }
@@ -129,8 +112,6 @@ Duplicate for the same client ID:
   "status": "duplicate",
   "uploadId": 12,
   "caseCount": 34,
-  "acceptedCases": 34,
-  "quarantinedCases": 0,
   "sha256": "..."
 }
 ```
@@ -149,7 +130,6 @@ Quota exceeded:
 Relevant status codes:
 
 - `201`: upload accepted
-- `202`: upload stored only in quarantine because every case hit a scrub rule
 - `200`: duplicate upload for the same client ID
 - `400`: invalid UTF-8, invalid JSON, invalid schema, or missing `caseId`
 - `413`: upload too large
@@ -199,7 +179,7 @@ Optional but safe to include:
 
 - `supervision.fixedStageCalibrations`
 
-The current server stores and exports submitted cases as-is, unless an admin-configured content-scrubbing rule matches somewhere in a case during ingestion. Matching cases are discarded from normal ingestion and written to server-side quarantine so admins can export the false positives as a separate bundle for mod tuning. Several pages derive their visible values from these exact fields. If a field is missing, the upload still succeeds; the page simply cannot render that value.
+The current server stores and exports the submitted payload, unless an admin-configured content-scrubbing rule removes matching text during ingestion. Several pages derive their visible values from these exact fields. If a field is missing, the upload still succeeds; the page simply cannot render that value.
 
 ## Field-by-field contract
 
@@ -475,7 +455,7 @@ Use this when a value is missing in the website or admin UI.
 
 These rules affect how the mod should serialize and resend files.
 
-- Duplicate detection is based on the SHA-256 hash of the accepted upload bytes that remain after any scrub-rule quarantine filtering.
+- Duplicate detection is based on the SHA-256 hash of the stored upload bytes. When no admin scrubbing rule changes the content, this is the exact raw uploaded file bytes.
 - For the same ScamScreener account, uploading byte-identical NDJSON again returns `status=duplicate`.
 - Changing any byte changes the hash. This includes whitespace, field order, number formatting, and line order.
 - If a different client ID uploads the exact same bytes, the upload is still accepted for that client ID. It is only linked internally as a duplicate of the first upload.

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block shell_mode %}public{% endblock %}
+{% block title %}Multi-Factor Verification{% endblock %}
+
+{% block content %}
+<section class="auth-layout auth-layout-single">
+    <div class="auth-context">
+        <p class="section-kicker">Security Step-Up</p>
+        <h1>Verify your login</h1>
+        {% if mfa_state.email_bridge_allowed %}
+            <p class="auth-copy">Enter the 6-digit verification code sent to {{ delivery_hint }} to continue and finish setting up a standard MFA method.</p>
+        {% else %}
+            <p class="auth-copy">Complete this login with your authenticator app, a registered passkey, or one of your backup codes.</p>
+        {% endif %}
+        {% if expires_at %}
+            <p class="muted">Challenge expires at {{ expires_at|datetime_utc }}.</p>
+        {% endif %}
+    </div>
+
+    <div class="auth-surface">
+        {% if notice %}
+            <div class="message ok" role="status">{{ notice }}</div>
+        {% endif %}
+        {% if error %}
+            <div class="message error" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/mfa" class="surface-form surface-form-compact">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="form-row">
+                <label for="code">{% if mfa_state.email_bridge_allowed %}Verification Code{% else %}Authenticator or Backup Code{% endif %}</label>
+                <input
+                    id="code"
+                    class="form-control"
+                    type="text"
+                    name="code"
+                    inputmode="text"
+                    autocomplete="{% if mfa_state.email_bridge_allowed %}one-time-code{% else %}off{% endif %}"
+                    required
+                >
+            </div>
+            <button type="submit" class="btn btn-primary">Verify</button>
+        </form>
+
+        {% if not mfa_state.email_bridge_allowed and mfa_state.passkey_count > 0 %}
+            <div class="surface-actions" style="margin-top: 1rem;">
+                <button id="mfa_passkey_button" type="button" class="btn btn-outline-primary w-100">Use Passkey</button>
+            </div>
+            <p id="mfa_passkey_status" class="muted" aria-live="polite" style="margin-top: 0.75rem;"></p>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+{% if not mfa_state.email_bridge_allowed and mfa_state.passkey_count > 0 %}
+<script src="/js/passkeys.js"></script>
+{% endif %}
+{% endblock %}

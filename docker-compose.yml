@@ -84,6 +84,7 @@ services:
       - ${ENV_FILE:-.env.production}
     environment:
       PORT: "8080"
+      WEB_CONCURRENCY: "1"
       SCAMSCREENER_APP_MODE: hub
       SCAMSCREENER_DB_MANAGED: "true"
       SCAMSCREENER_DB_HOST: scamscreener-db
@@ -128,6 +129,7 @@ services:
       - ${ENV_FILE:-.env.production}
     environment:
       PORT: "8081"
+      WEB_CONCURRENCY: "2"
       SCAMSCREENER_APP_MODE: api
       SCAMSCREENER_DB_MANAGED: "true"
       SCAMSCREENER_DB_HOST: scamscreener-db
@@ -174,6 +176,7 @@ services:
       - ${ENV_FILE:-.env.production}
     environment:
       PORT: "8082"
+      WEB_CONCURRENCY: "1"
       SCAMSCREENER_APP_MODE: market
     restart: unless-stopped
     init: true
@@ -210,9 +213,6 @@ services:
         condition: service_healthy
       marketguard-hub:
         condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -242,6 +242,7 @@ services:
     networks:
       scamscreener_net:
         ipv4_address: 172.31.255.10
+      scamscreener-edge:
 
 volumes:
   scamscreener_data:
@@ -254,3 +255,5 @@ networks:
     ipam:
       config:
         - subnet: 172.31.255.0/24
+  scamscreener-edge:
+    external: true

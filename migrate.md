@@ -381,6 +381,7 @@ From your workstation:
 curl -I https://YOUR_DOMAIN/
 curl -I https://YOUR_DOMAIN/hub
 curl -I https://YOUR_DOMAIN/market/
+curl -I https://YOUR_DOMAIN/api/v1/lowestbin
 curl -I https://YOUR_DOMAIN/api/v2/lowestbin
 curl -I https://YOUR_DOMAIN/api/v1/health
 curl -I https://YOUR_DOMAIN/api/v1/metrics

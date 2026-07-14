@@ -18,7 +18,7 @@ This repository contains two separate applications in one repo:
 - Self-service upload deletion, full contribution purge, and account deletion
 - Self-service account data export workflow delivered by email
 - Admin view over users, basic case list, training runs, and audit log
-- Admin-managed content scrubbing rules for quarantining matching cases from future uploads before storage and training
+- Admin-managed content scrubbing rules for removing sensitive phrases from future uploads before storage
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN v2 endpoint at `/api/v2/lowestbin`
 - Public Bazaar endpoint at `/api/v1/bazaar`
@@ -30,7 +30,7 @@ Data/state:
 
 - the default deployment stores app state under `/app/data`
 - Training Hub stores users, sessions, uploads, cases, and audit metadata in MariaDB for staging/production deployments
-- accepted upload payloads, quarantined scrub hits, and generated bundles are kept in the persistent app data volume
+- uploaded payloads (after any configured content scrubbing) and generated bundles are kept in the persistent app data volume
 
 Frontend files:
 
@@ -285,7 +285,7 @@ Supply-chain checks:
 
 - `GET /api/v1/health` (internal only)
 - `GET /api/v2/lowestbin`
-- `QUERY /api/v2/lowestbin`
+- `QUERY /api/v2/lowestbin` (RFC 10008; JSON body with requested product identifiers)
 - `GET /api/v1/bazaar`
 - `GET /market/`
 - `GET /market/bazaar`
@@ -294,17 +294,10 @@ Supply-chain checks:
 - `POST /api/v1/client/auth/logout`
 
 `/api/v1/health` is an internal-only observability endpoint that returns status, UTC time, user/upload counts, and storage metadata.
+`/api/v1/lowestbin` is disabled and returns `410 Gone` with a pointer to `/api/v2/lowestbin`.
 `/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
-`QUERY /api/v2/lowestbin` accepts a JSON body with a non-empty `products` array and returns the same response shape containing only the requested identifiers. Unknown identifiers are omitted. The QUERY method is additive and does not replace the GET endpoint; because the HTTP QUERY method is currently an IETF Internet-Draft, clients should retain GET as a compatibility fallback.
 
-Example `QUERY /api/v2/lowestbin` request:
-
-```http
-QUERY /api/v2/lowestbin HTTP/1.1
-Content-Type: application/json
-
-{"products":["HYPERION","TRUE_ESSENCE"]}
-```
+`QUERY /api/v2/lowestbin` implements RFC 10008 for a safe, idempotent selection of product records. It requires `Content-Type: application/json` and accepts `{"products":["HYPERION","TRUE_ESSENCE"]}`. The route advertises `Accept-Query: "application/json"`; its responses use `Cache-Control: no-store` until intermediary caches reliably include the request body in their QUERY cache keys.
 
 Example `GET /api/v2/lowestbin` response:
 
@@ -327,6 +320,14 @@ Example `GET /api/v2/lowestbin` response:
       "avg30d": 22120
     }
   }
+}
+```
+
+Example disabled response for `GET /api/v1/lowestbin`:
+
+```json
+{
+  "detail": "Lowest BIN v1 has been removed. Use /api/v2/lowestbin instead."
 }
 ```
 
