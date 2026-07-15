@@ -60,6 +60,42 @@
 <section class="section-shell workspace-section">
     <div class="section-header">
         <div>
+            <p class="section-kicker">MarketGuard players</p>
+            <h2>QUERY route efficiency</h2>
+        </div>
+    </div>
+    <div class="summary-grid">
+        <article class="summary-panel">
+            <p class="summary-panel-label">Cache hit rate (%)</p>
+            <strong id="players-cache-hit-rate" class="summary-metric">{{ "%.2f"|format(live_api_metrics.marketguardPlayers.cacheHitRate * 100) }}</strong>
+            <p>Share of resolved player queries served without another upstream fetch.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Average response (ms)</p>
+            <strong id="players-average-response-ms" class="summary-metric">{{ "%.2f"|format(live_api_metrics.marketguardPlayers.averageResponseMilliseconds) }}</strong>
+            <p>Average time spent answering allowed player queries in this process.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Active upstream loads</p>
+            <strong id="players-active-upstream-loads" class="summary-metric">{{ live_api_metrics.marketguardPlayers.activeUpstreamLoads|int_grouped }}</strong>
+            <p>Current bounded work against Mojang and Hypixel.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Coalesced requests</p>
+            <strong id="players-coalesced-waiters" class="summary-metric">{{ live_api_metrics.marketguardPlayers.coalescedWaiters|int_grouped }}</strong>
+            <p>Duplicate cache misses that reused an in-flight upstream request.</p>
+        </article>
+        <article class="summary-panel">
+            <p class="summary-panel-label">Upstream failures</p>
+            <strong id="players-upstream-failures" class="summary-metric">{{ live_api_metrics.marketguardPlayers.upstreamFailures|int_grouped }}</strong>
+            <p>Hypixel or Mojang failures seen while resolving player data.</p>
+        </article>
+    </div>
+</section>
+
+<section class="section-shell workspace-section">
+    <div class="section-header">
+        <div>
             <p class="section-kicker">Breakdown</p>
             <h2>Requests by API group</h2>
         </div>

@@ -22,6 +22,13 @@ from fastapi.templating import Jinja2Templates
 from ..infra import db as sqlite3
 from ..config.settings import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME, TRAINING_FORMAT, TRAINING_SCHEMA_VERSION, TrainingHubSettings
 
+_INTERNAL_IPV4_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_INTERNAL_IPV6_NETWORK = ipaddress.ip_network("fc00::/7")
+
 
 def _is_request_from_trusted_proxy(request: Request, trusted_proxies: set[str]) -> bool:
     if "*" in trusted_proxies:
@@ -72,7 +79,11 @@ def _is_internal_network_ip(value: str) -> bool:
     address = _parse_ip_address(value)
     if address is None:
         return False
-    return bool(address.is_private or address.is_loopback or address.is_link_local)
+    if address.is_loopback or address.is_link_local:
+        return True
+    if isinstance(address, ipaddress.IPv4Address):
+        return any(address in network for network in _INTERNAL_IPV4_NETWORKS)
+    return address in _INTERNAL_IPV6_NETWORK
 
 
 def _request_originates_from_internal_network(request: Request, trusted_proxies: set[str]) -> bool:

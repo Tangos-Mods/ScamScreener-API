@@ -102,6 +102,7 @@ def _build_redis_url(
 class MarketGuardSettings:
     hypixel_api_base_url: str
     database_url: str
+    hypixel_api_key: str = ""
     request_timeout_seconds: int = 10
     max_parallel_pages: int = 8
     snapshot_retries: int = 3
@@ -109,6 +110,8 @@ class MarketGuardSettings:
     stale_if_error_seconds: int = 300
     history_retention_days: int = 45
     lowestbin_rate_limit_per_minute: int = 30
+    players_rate_limit_per_minute: int = 3
+    players_max_upstream_concurrency: int = 4
     http_user_agent: str = "ScamScreener-MarketGuard/1.0"
     trusted_proxies: set[str] = field(default_factory=set)
     local_cache_enabled: bool = True
@@ -158,6 +161,7 @@ class MarketGuardSettings:
                 "https://api.hypixel.net/v2",
             ),
             database_url=database_url,
+            hypixel_api_key=_env_text("MARKETGUARD_HYPIXEL_API_KEY"),
             request_timeout_seconds=_env_int("MARKETGUARD_REQUEST_TIMEOUT_SECONDS", 10, 1, 60),
             max_parallel_pages=_env_int("MARKETGUARD_MAX_PARALLEL_PAGES", 8, 1, 64),
             snapshot_retries=_env_int("MARKETGUARD_SNAPSHOT_RETRIES", 3, 1, 10),
@@ -165,6 +169,8 @@ class MarketGuardSettings:
             stale_if_error_seconds=_env_int("MARKETGUARD_STALE_IF_ERROR_SECONDS", 300, 5, 3600),
             history_retention_days=_env_int("MARKETGUARD_HISTORY_RETENTION_DAYS", 45, 31, 365),
             lowestbin_rate_limit_per_minute=_env_int("MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE", 30, 0, 600),
+            players_rate_limit_per_minute=_env_int("MARKETGUARD_PLAYERS_RATE_LIMIT_PER_MINUTE", 3, 0, 60),
+            players_max_upstream_concurrency=_env_int("MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY", 4, 1, 10),
             http_user_agent=(os.getenv("MARKETGUARD_HTTP_USER_AGENT", "ScamScreener-MarketGuard/1.0") or "").strip()
             or "ScamScreener-MarketGuard/1.0",
             trusted_proxies=_env_csv_set("MARKETGUARD_TRUSTED_PROXIES", fallback_name="TRAINING_HUB_TRUSTED_PROXIES"),

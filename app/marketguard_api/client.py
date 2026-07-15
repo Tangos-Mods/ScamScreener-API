@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from .config import MarketGuardSettings
-from .exceptions import HypixelRateLimitError, HypixelSnapshotDriftError, HypixelUpstreamError
+from .exceptions import HypixelRateLimitError, HypixelSnapshotDriftError, HypixelUpstreamError, MojangUpstreamError
 from .models import AuctionPage, AuctionSnapshot, BazaarProductSnapshot
 
 logger = logging.getLogger(__name__)
@@ -251,6 +251,176 @@ class HypixelBazaarClient:
         return BazaarProductSnapshot(last_updated=last_updated, products=products)
 
 
+class HypixelPlayerClient:
+    def __init__(
+        self,
+        settings: MarketGuardSettings,
+        client: httpx.AsyncClient | None = None,
+        close_client: bool | None = None,
+    ) -> None:
+        self._settings = settings
+        self._client = client
+        self._close_client = (client is None) if close_client is None else close_client
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._settings.hypixel_api_base_url,
+            follow_redirects=False,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self._settings.http_user_agent,
+            },
+            timeout=httpx.Timeout(self._settings.request_timeout_seconds),
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
+        )
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._close_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def fetch_player(self, player_uuid: str) -> dict[str, Any] | None:
+        payload = await self._fetch_authenticated("/player", params={"uuid": player_uuid})
+        player = payload.get("player")
+        if player is None:
+            return None
+        if not isinstance(player, dict):
+            raise HypixelUpstreamError("Hypixel API returned an invalid player payload.")
+        return player
+
+    async def fetch_profiles(self, player_uuid: str) -> list[dict[str, Any]]:
+        payload = await self._fetch_authenticated("/skyblock/profiles", params={"uuid": player_uuid})
+        profiles = payload.get("profiles")
+        if profiles is None:
+            return []
+        if not isinstance(profiles, list):
+            raise HypixelUpstreamError("Hypixel API returned an invalid SkyBlock profiles payload.")
+        return [profile for profile in profiles if isinstance(profile, dict)]
+
+    async def fetch_skyblock_skills(self) -> dict[str, dict[str, Any]]:
+        client = self._get_client()
+        try:
+            response = await client.get("/resources/skyblock/skills")
+        except httpx.TimeoutException as exc:
+            raise HypixelUpstreamError("Timed out while fetching Hypixel SkyBlock skill definitions.") from exc
+        except httpx.HTTPError as exc:
+            raise HypixelUpstreamError("Failed to fetch Hypixel SkyBlock skill definitions.") from exc
+
+        self._raise_for_upstream_status(response, resource="SkyBlock skill definitions")
+        payload = self._parse_success_payload(response, resource="SkyBlock skill definitions")
+        skills = payload.get("skills")
+        if not isinstance(skills, dict):
+            raise HypixelUpstreamError("Hypixel API returned invalid SkyBlock skill definitions.")
+        return {str(key): value for key, value in skills.items() if isinstance(key, str) and isinstance(value, dict)}
+
+    async def _fetch_authenticated(self, path: str, *, params: dict[str, str]) -> dict[str, Any]:
+        api_key = self._settings.hypixel_api_key.strip()
+        if not api_key:
+            raise HypixelUpstreamError("Hypixel player API is not configured.")
+
+        client = self._get_client()
+        try:
+            response = await client.get(path, params=params, headers={"API-Key": api_key})
+        except httpx.TimeoutException as exc:
+            raise HypixelUpstreamError("Timed out while fetching Hypixel player data.") from exc
+        except httpx.HTTPError as exc:
+            raise HypixelUpstreamError("Failed to fetch Hypixel player data.") from exc
+
+        self._raise_for_upstream_status(response, resource="player data")
+        return self._parse_success_payload(response, resource="player data")
+
+    @staticmethod
+    def _raise_for_upstream_status(response: httpx.Response, *, resource: str) -> None:
+        retry_after_header = str(response.headers.get("Retry-After", "")).strip()
+        retry_after = int(retry_after_header) if retry_after_header.isdigit() else None
+        if response.status_code == 429:
+            raise HypixelRateLimitError("Hypixel API rate limited player data.", retry_after_seconds=retry_after)
+        if response.is_error:
+            raise HypixelUpstreamError(f"Hypixel API returned HTTP {response.status_code} for {resource}.")
+
+    @staticmethod
+    def _parse_success_payload(response: httpx.Response, *, resource: str) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HypixelUpstreamError(f"Hypixel API returned invalid JSON for {resource}.") from exc
+        if not isinstance(payload, dict):
+            raise HypixelUpstreamError(f"Hypixel API returned an invalid {resource} payload.")
+        if payload.get("success") is not True:
+            raise HypixelUpstreamError(f"Hypixel API reported an unsuccessful {resource} response.")
+        return payload
+
+
+class MojangNameClient:
+    _BASE_URL = "https://api.mojang.com"
+
+    def __init__(
+        self,
+        settings: MarketGuardSettings,
+        client: httpx.AsyncClient | None = None,
+        close_client: bool | None = None,
+    ) -> None:
+        self._settings = settings
+        self._client = client
+        self._close_client = (client is None) if close_client is None else close_client
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._BASE_URL,
+            follow_redirects=False,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self._settings.http_user_agent,
+            },
+            timeout=httpx.Timeout(self._settings.request_timeout_seconds),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+        )
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and self._close_client:
+            await self._client.aclose()
+            self._client = None
+
+    async def resolve_name(self, player_name: str) -> tuple[str, str] | None:
+        client = self._get_client()
+        try:
+            response = await client.get(f"/users/profiles/minecraft/{player_name}")
+        except httpx.TimeoutException as exc:
+            raise MojangUpstreamError("Timed out while resolving the Minecraft player name.") from exc
+        except httpx.HTTPError as exc:
+            raise MojangUpstreamError("Failed to resolve the Minecraft player name.") from exc
+
+        if response.status_code in {204, 404}:
+            return None
+        if response.status_code == 429:
+            raise MojangUpstreamError("Minecraft name resolution is temporarily rate limited.")
+        if response.is_error:
+            raise MojangUpstreamError("Minecraft name resolution is temporarily unavailable.")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise MojangUpstreamError("Minecraft name resolution returned invalid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise MojangUpstreamError("Minecraft name resolution returned an invalid payload.")
+
+        player_uuid = _normalize_uuid(payload.get("id"))
+        resolved_name = str(payload.get("name") or "").strip()
+        if player_uuid is None or not resolved_name:
+            raise MojangUpstreamError("Minecraft name resolution returned incomplete data.")
+        return player_uuid, resolved_name
+
+
 def _parse_finite_number(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -269,3 +439,10 @@ def _parse_non_negative_int(value: Any) -> int | None:
     if parsed < 0:
         return None
     return parsed
+
+
+def _normalize_uuid(value: object) -> str | None:
+    normalized = str(value or "").strip().lower().replace("-", "")
+    if len(normalized) != 32 or not all(character in "0123456789abcdef" for character in normalized):
+        return None
+    return normalized

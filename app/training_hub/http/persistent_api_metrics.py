@@ -234,6 +234,7 @@ def combine_live_and_persistent_api_metrics(
         "publicApi": dict(live_snapshot.get("publicApi", {}) or {}),
         "clientApi": dict(live_snapshot.get("clientApi", {}) or {}),
         "internalApi": dict(live_snapshot.get("internalApi", {}) or {}),
+        "marketguardPlayers": dict(live_snapshot.get("marketguardPlayers", {}) or {}),
         "entries": [],
     }
 

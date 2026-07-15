@@ -16,11 +16,13 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.marketguard_api.cache import CachedResponse, LocalResponseCache, ResponseCacheChain
-from app.marketguard_api.client import HypixelAuctionClient, HypixelBazaarClient
+from app.marketguard_api.client import HypixelAuctionClient, HypixelBazaarClient, HypixelPlayerClient, MojangNameClient
 from app.marketguard_api.config import MarketGuardSettings
 from app.marketguard_api.item_keys import resolve_auction_item
 from app.marketguard_api.main import create_marketguard_app
 from app.marketguard_api.models import BazaarSnapshot, LowestBinSnapshot
+from app.marketguard_api.nbt import parse_inventory_nbt
+from app.marketguard_api.player_service import PlayerService
 from app.marketguard_api.service import BazaarService, LowestBinService
 from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinSnapshot, snapshot_day_from_last_updated
 from app.training_hub.config.settings import TrainingHubSettings
@@ -205,6 +207,434 @@ def test_lowestbin_query_rejects_empty_product_selection(tmp_path: Path) -> None
     assert response.status_code == 422
 
 
+def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_skills(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/resources/skyblock/skills":
+            assert "api-key" not in request.headers
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "skills": {
+                        "FARMING": {
+                            "maxLevel": 2,
+                            "levels": [
+                                {"level": 1, "totalExpRequired": 50},
+                                {"level": 2, "totalExpRequired": 175},
+                            ],
+                        }
+                    },
+                },
+            )
+        assert request.headers["api-key"] == "test-hypixel-key"
+        if request.url.path == "/v2/player":
+            assert request.url.params["uuid"] == player_uuid
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "player": {
+                        "displayname": "Pankraz01",
+                        "firstLogin": 1_587_483_921_000,
+                    },
+                },
+            )
+        assert request.url.path == "/v2/skyblock/profiles"
+        assert request.url.params["uuid"] == player_uuid
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profiles": [
+                    {
+                        "profile_id": profile_id,
+                        "cute_name": "Apple",
+                        "selected": True,
+                        "banking": {"balance": 125_000_000},
+                        "members": {
+                            player_uuid: {
+                                "coin_purse": 4_250_000.5,
+                                "equippment_contents": {
+                                    "data": _encode_inventory_bytes(
+                                        [("GAUNTLET_OF_CONTAGION", "Gauntlet of Contagion", 1)]
+                                    )
+                                },
+                                "inv_armor": {
+                                    "data": _encode_inventory_bytes(
+                                        [("NECRON_HELMET", "Necron's Helmet", 1)]
+                                    )
+                                },
+                                "player_data": {"experience": {"SKILL_FARMING": 175}},
+                            }
+                        },
+                    }
+                ],
+            },
+        )
+
+    async def _mojang_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/users/profiles/minecraft/Pankraz01"
+        return httpx.Response(200, json={"id": player_uuid, "name": "Pankraz01"})
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_player_service=_marketguard_player_service(settings, _hypixel_handler, _mojang_handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": "Pankraz01", "profileId": profile_id}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "players": [
+            {
+                "status": "ok",
+                "uuid": player_uuid,
+                "name": "Pankraz01",
+                "firstJoin": 1_587_483_921_000,
+                "profile": {
+                    "id": profile_id,
+                    "name": "Apple",
+                    "selected": True,
+                    "wealth": {
+                        "bank": 125_000_000.0,
+                        "purse": 4_250_000.5,
+                        "equipment": [
+                            {
+                                "slot": 0,
+                                "id": "GAUNTLET_OF_CONTAGION",
+                                "name": "Gauntlet of Contagion",
+                                "count": 1,
+                            }
+                        ],
+                        "armor": [
+                            {
+                                "slot": 0,
+                                "id": "NECRON_HELMET",
+                                "name": "Necron's Helmet",
+                                "count": 1,
+                            }
+                        ],
+                    },
+                    "skills": {"farming": {"level": 2, "xp": 175.0}},
+                },
+                "unavailableFields": [],
+            }
+        ],
+    }
+    assert "input" not in response.json()["players"][0]
+
+
+def test_players_query_returns_status_per_unknown_or_unavailable_profile(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/resources/skyblock/skills":
+            return httpx.Response(503, json={"success": False})
+        if request.url.path == "/v2/player":
+            return httpx.Response(200, json={"success": True, "player": {"displayname": "Known"}})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profiles": [
+                    {
+                        "profile_id": profile_id,
+                        "cute_name": "Hidden",
+                        "selected": False,
+                        "members": {},
+                    }
+                ],
+            },
+        )
+
+    async def _mojang_handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("UUID input must not invoke Mojang name resolution.")
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_player_service=_marketguard_player_service(settings, _hypixel_handler, _mojang_handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": player_uuid, "profileId": profile_id}]},
+        )
+
+    assert response.status_code == 200
+    result = response.json()["players"][0]
+    assert result["status"] == "profile_unavailable"
+    assert result["uuid"] == player_uuid
+    assert result["firstJoin"] is None
+    assert result["profile"]["wealth"] == {
+        "bank": None,
+        "purse": None,
+        "equipment": None,
+        "armor": None,
+    }
+    assert result["profile"]["skills"] is None
+    assert result["unavailableFields"] == ["firstJoin", "bank", "purse", "equipment", "armor", "skills"]
+    assert "input" not in result
+
+
+def test_players_query_rejects_invalid_requests_and_rate_limits_public_access(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/resources/skyblock/skills":
+            return httpx.Response(200, json={"success": True, "skills": {}})
+        if request.url.path == "/v2/player":
+            return httpx.Response(200, json={"success": True, "player": {"displayname": "Known", "firstLogin": 1}})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profiles": [
+                    {
+                        "profile_id": profile_id,
+                        "members": {
+                            player_uuid: {
+                                "coin_purse": 0,
+                                "equippment_contents": {"data": "invalid"},
+                                "inv_armor": {"data": "invalid"},
+                            }
+                        },
+                    }
+                ],
+            },
+        )
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key", players_rate_limit_per_minute=1)
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_player_service=_marketguard_player_service(settings, _hypixel_handler, lambda _request: None),
+    )
+
+    with TestClient(app) as client:
+        invalid = client.request("QUERY", "/api/v1/players", json={"players": []})
+        first = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": player_uuid, "profileId": profile_id}]},
+        )
+        second = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": player_uuid, "profileId": profile_id}]},
+        )
+
+    assert invalid.status_code == 422
+    assert first.status_code == 200
+    first_result = first.json()["players"][0]
+    assert first_result["status"] == "partial"
+    assert first_result["profile"]["wealth"]["equipment"] is None
+    assert first_result["profile"]["wealth"]["armor"] is None
+    assert first_result["unavailableFields"] == ["bank", "equipment", "armor", "skills"]
+    assert second.status_code == 429
+    assert second.headers["retry-after"].isdigit()
+
+
+def test_players_query_marks_players_unavailable_without_server_hypixel_api_key(tmp_path: Path) -> None:
+    settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={
+                "players": [
+                    {
+                        "player": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "players": [
+            {
+                "status": "unavailable",
+                "uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "name": None,
+                "firstJoin": None,
+                "profile": None,
+                "unavailableFields": ["firstJoin", "profile"],
+            }
+        ],
+    }
+
+
+def test_players_query_preserves_unavailable_status_for_upstream_failures(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/resources/skyblock/skills":
+            return httpx.Response(200, json={"success": True, "skills": {}})
+        if request.url.path == "/v2/player":
+            return httpx.Response(503, json={"success": False})
+        assert request.url.path == "/v2/skyblock/profiles"
+        return httpx.Response(200, json={"success": True, "profiles": []})
+
+    async def _mojang_handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("UUID input must not invoke Mojang name resolution.")
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_player_service=_marketguard_player_service(settings, _hypixel_handler, _mojang_handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": player_uuid, "profileId": profile_id}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["players"] == [
+        {
+            "status": "unavailable",
+            "uuid": player_uuid,
+            "name": None,
+            "firstJoin": None,
+            "profile": None,
+            "unavailableFields": ["firstJoin", "profile"],
+        }
+    ]
+    assert app.state.marketguard_player_query_metrics.snapshot()["upstreamFailures"] == 1
+
+
+def test_players_query_coalesces_identical_cache_misses_and_tracks_efficiency() -> None:
+    class _CountingPlayerService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_players(self, queries) -> dict[str, object]:
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return {
+                "status": "ok",
+                "players": [
+                    {
+                        "status": "not_found",
+                        "uuid": None,
+                        "name": None,
+                        "firstJoin": None,
+                        "profile": None,
+                        "unavailableFields": [],
+                    }
+                    for _query in queries
+                ],
+            }
+
+        async def aclose(self) -> None:
+            return None
+
+    settings = _marketguard_settings(players_rate_limit_per_minute=3)
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    counting_player_service = _CountingPlayerService()
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=counting_player_service,
+    )
+    body = {
+        "players": [
+            {
+                "player": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+                "profileId": "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+            }
+        ]
+    }
+    alternate_body = {
+        "players": [
+            {
+                "player": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }
+        ]
+    }
+
+    async def _exercise_route() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first, second = await asyncio.gather(
+                client.request("QUERY", "/api/v1/players", json=body),
+                client.request("QUERY", "/api/v1/players", json=alternate_body),
+            )
+            third = await client.request("QUERY", "/api/v1/players", json=body)
+            await asyncio.sleep(0)
+            return [first, second, third]
+
+    responses = asyncio.run(_exercise_route())
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert counting_player_service.calls == 1
+    metrics = app.state.marketguard_player_query_metrics.snapshot()
+    assert metrics["cacheMisses"] == 1
+    assert metrics["cacheHits"] == 1
+    assert metrics["coalescedWaiters"] == 1
+    assert metrics["completedRequests"] == 3
+    assert metrics["activeUpstreamLoads"] == 0
+
+
+def test_inventory_nbt_rejects_decompression_bombs() -> None:
+    compressed = base64.b64encode(gzip.compress(b"x" * (8_000_001))).decode("ascii")
+
+    assert parse_inventory_nbt(compressed) is None
+
+
+def test_inventory_nbt_rejects_oversized_nbt_collections() -> None:
+    oversized_list = bytes([9]) + _string_payload("i") + bytes([0]) + struct.pack(">i", 100_001)
+    root = bytes([10]) + _string_payload("") + _compound_payload(oversized_list)
+    encoded = base64.b64encode(gzip.compress(root)).decode("ascii")
+
+    assert parse_inventory_nbt(encoded) is None
+
+
 def test_lowestbin_v1_is_removed_from_openapi(tmp_path: Path) -> None:
     settings = _marketguard_settings()
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
@@ -251,11 +681,17 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
     schemas = schema["components"]["schemas"]
     assert schemas["BazaarResponse"]["properties"]["status"]["examples"][0] == "ok"
     assert schemas["LowestBinV2Response"]["properties"]["status"]["examples"][0] == "ok"
+    assert set(schemas["PlayersQueryResponse"]["properties"]["status"]["enum"]) == {"ok", "stale"}
     assert schemas["BazaarResponse"]["properties"]["products"]["examples"][0]["CORRUPTED_BAIT"]["buy"] == 101.950378482847
     assert schemas["BazaarProductResponse"]["properties"]["item_name"]["examples"][0] == "Corrupted Bait"
     assert schemas["LowestBinV2Product"]["properties"]["item_name"]["examples"][0] == "Hyperion"
     assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
     assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000
+    players_query = schema["paths"]["/api/v1/players"]["query"]
+    assert set(players_query["responses"]) == {"200", "422", "429", "503"}
+    assert players_query["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/PlayersQueryResponse"
+    )
     ready_get = schema["paths"]["/api/v1/ready"]["get"]
     assert set(ready_get["responses"]) == {"200", "206", "503"}
     assert ready_get["responses"]["200"]["description"] == "All MarketGuard datasets are fresh and available."
@@ -331,6 +767,7 @@ def test_combined_app_openapi_only_exposes_marketguard_api_paths(tmp_path: Path)
     assert "/api/v1/lowestbin" not in schema["paths"]
     assert "/api/v2/lowestbin" in schema["paths"]
     assert "/api/v1/bazaar" in schema["paths"]
+    assert "/api/v1/players" in schema["paths"]
 
 
 def test_marketguard_ready_returns_200_when_all_datasets_fresh() -> None:
@@ -1326,7 +1763,14 @@ def test_standalone_marketguard_observability_endpoints_block_public_requests() 
 
 def test_combined_app_observability_endpoints_block_public_requests(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, trusted_proxies={"testclient"})
-    app = create_app(training_hub_settings=settings)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+    )
 
     with TestClient(app) as client:
         health_response = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.10"})
@@ -1338,7 +1782,14 @@ def test_combined_app_observability_endpoints_block_public_requests(tmp_path: Pa
 
 def test_combined_app_observability_endpoints_allow_internal_requests(tmp_path: Path) -> None:
     settings = _training_hub_settings(tmp_path, trusted_proxies={"testclient"})
-    app = create_app(training_hub_settings=settings)
+    marketguard_settings = _marketguard_settings()
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(marketguard_settings)
+    app = create_app(
+        training_hub_settings=settings,
+        marketguard_settings=marketguard_settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+    )
 
     with TestClient(app) as client:
         health_response = client.get("/api/v1/health", headers={"X-Forwarded-For": "127.0.0.1"})
@@ -1449,12 +1900,34 @@ def _marketguard_bazaar_service(
     )
 
 
+def _marketguard_player_service(
+    settings: MarketGuardSettings,
+    hypixel_handler,
+    mojang_handler,
+) -> PlayerService:
+    hypixel_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(hypixel_handler),
+        base_url=settings.hypixel_api_base_url,
+    )
+    mojang_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(mojang_handler),
+        base_url="https://api.mojang.com",
+    )
+    return PlayerService(
+        settings,
+        hypixel_client=HypixelPlayerClient(settings, client=hypixel_client, close_client=True),
+        mojang_client=MojangNameClient(settings, client=mojang_client, close_client=True),
+    )
+
+
 def _marketguard_settings(
     *,
     cache_ttl_seconds: int = 60,
     stale_if_error_seconds: int = 300,
     history_retention_days: int = 45,
     lowestbin_rate_limit_per_minute: int = 30,
+    players_rate_limit_per_minute: int = 3,
+    hypixel_api_key: str = "",
     api_docs_enabled: bool = True,
     local_cache_enabled: bool = True,
     local_cache_ttl_seconds: int = 15,
@@ -1466,10 +1939,12 @@ def _marketguard_settings(
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
         database_url="mariadb://scamscreener:test@127.0.0.1:3306/scamscreener_hub",
+        hypixel_api_key=hypixel_api_key,
         cache_ttl_seconds=cache_ttl_seconds,
         stale_if_error_seconds=stale_if_error_seconds,
         history_retention_days=history_retention_days,
         lowestbin_rate_limit_per_minute=lowestbin_rate_limit_per_minute,
+        players_rate_limit_per_minute=players_rate_limit_per_minute,
         local_cache_enabled=local_cache_enabled,
         local_cache_ttl_seconds=local_cache_ttl_seconds,
         local_cache_max_entries=local_cache_max_entries,
@@ -1739,6 +2214,23 @@ def _encode_item_bytes(*, count: int, extra_attributes: dict[str, Any]) -> str:
         ),
     )
     root = bytes([10]) + _string_payload("") + _compound_payload(_tag_list("i", 10, item_compound))
+    return base64.b64encode(gzip.compress(root)).decode("ascii")
+
+
+def _encode_inventory_bytes(items: list[tuple[str, str, int]]) -> str:
+    encoded_items: list[bytes] = []
+    for item_id, display_name, count in items:
+        tag_payload = _compound_payload(
+            _tag_compound("ExtraAttributes", _encode_compound_fields({"id": item_id})),
+            _tag_compound("display", _compound_payload(_named_tag(8, "Name", _string_payload(display_name)))),
+        )
+        encoded_items.append(
+            _compound_payload(
+                _tag_byte("Count", count),
+                _tag_compound("tag", tag_payload),
+            )
+        )
+    root = bytes([10]) + _string_payload("") + _compound_payload(_tag_list("i", 10, *encoded_items))
     return base64.b64encode(gzip.compress(root)).decode("ascii")
 
 

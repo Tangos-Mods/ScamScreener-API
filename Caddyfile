@@ -8,7 +8,7 @@
     respond @observability_blocked "Forbidden" 403
 
     @marketguard_api {
-        path /api/v2/lowestbin /api/v1/bazaar /api/v1/ready
+        path /api/v2/lowestbin /api/v1/bazaar /api/v1/players /api/v1/ready
     }
 
     handle_path /market* {

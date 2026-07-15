@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from .marketguard_api.config import MarketGuardSettings
+from .marketguard_api.player_service import PlayerService
 from .marketguard_api.routes import register_marketguard_routes
 from .marketguard_api.service import BazaarService, LowestBinService
 from .training_hub.config.settings import TrainingHubSettings
@@ -14,6 +15,7 @@ def create_app(
     marketguard_settings: MarketGuardSettings | None = None,
     marketguard_service: LowestBinService | None = None,
     marketguard_bazaar_service: BazaarService | None = None,
+    marketguard_player_service: PlayerService | None = None,
 ) -> FastAPI:
     app = create_training_hub_app(training_hub_settings)
     register_marketguard_routes(
@@ -21,6 +23,7 @@ def create_app(
         settings=marketguard_settings,
         service=marketguard_service,
         bazaar_service=marketguard_bazaar_service,
+        player_service=marketguard_player_service,
     )
     install_filtered_openapi(
         app,

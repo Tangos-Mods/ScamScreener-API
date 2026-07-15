@@ -12,7 +12,7 @@ The current production stack uses Docker Compose with:
 
 - `scamscreener-db` as the internal MariaDB service
 - `scamscreener-hub` as the internal Training Hub service
-- `scamscreener-api` as the internal public Lowest BIN and Bazaar API service
+- `scamscreener-api` as the internal public Lowest BIN, Bazaar, and player/profile API service
 - `marketguard-hub` as the internal public MarketGuard frontend under `/market/`
 - `caddy` as the public HTTPS reverse proxy
 - `scamscreener-redis` as an optional internal Redis cache when `MARKETGUARD_REDIS_ENABLED=true`
@@ -217,6 +217,9 @@ TRAINING_HUB_SITE_CONTACT_CHANNEL=YOUR_PUBLIC_CONTACT
 TRAINING_HUB_SITE_PRIVACY_CONTACT=YOUR_PRIVACY_CONTACT
 TRAINING_HUB_SITE_HOSTING_LOCATION=Ashburn, Virginia, USA
 
+MARKETGUARD_HYPIXEL_API_KEY=SET_A_REAL_HYPIXEL_API_KEY
+MARKETGUARD_PLAYERS_RATE_LIMIT_PER_MINUTE=3
+MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY=4
 MARKETGUARD_API_DOCS_ENABLED=false
 TRAINING_HUB_API_DOCS_ENABLED=false
 ```
@@ -264,6 +267,8 @@ Important notes:
 - leave SMTP blank unless you intentionally enable password reset or admin MFA mail delivery
 - keep `TRAINING_HUB_TRUSTED_PROXIES=127.0.0.1` unless you know you need more
 - `/docs`, `/redoc`, and `/openapi.json` should stay disabled publicly unless you intentionally expose them
+- keep `WEB_CONCURRENCY=1` while `/api/v1/players` uses its process-local per-IP limiter; Redis shares cached responses but not rate-limit state
+- use Admin Analytics > Metrics to inspect Player QUERY cache hit rate, response time, active upstream loads, and upstream failures before raising `MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY`
 
 ## 9) Run Preflight
 

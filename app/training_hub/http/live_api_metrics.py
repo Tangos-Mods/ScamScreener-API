@@ -207,15 +207,17 @@ def _classify_agent(user_agent: str) -> str:
     if lowered.startswith("java/"):
         return "Java client"
 
-    compact = normalized[:120]
-    return compact
+    return "Other"
 
 
 def live_api_metrics_snapshot(app_state: Any) -> dict[str, Any]:
     tracker = getattr(app_state, "live_api_metrics", None)
     if tracker is None:
-        return _empty_snapshot()
-    return tracker.snapshot()
+        snapshot = _empty_snapshot()
+    else:
+        snapshot = tracker.snapshot()
+    snapshot["marketguardPlayers"] = _marketguard_players_snapshot(app_state)
+    return snapshot
 
 
 def _empty_snapshot() -> dict[str, Any]:
@@ -239,7 +241,45 @@ def _empty_snapshot() -> dict[str, Any]:
         "clientApi": _empty_bucket(),
         "internalApi": _empty_bucket(),
         "entries": [],
+        "marketguardPlayers": _empty_marketguard_players_snapshot(),
     }
+
+
+def _empty_marketguard_players_snapshot() -> dict[str, int | float]:
+    return {
+        "completedRequests": 0,
+        "cacheHits": 0,
+        "cacheMisses": 0,
+        "cacheHitRate": 0.0,
+        "coalescedWaiters": 0,
+        "upstreamFailures": 0,
+        "activeUpstreamLoads": 0,
+        "peakActiveUpstreamLoads": 0,
+        "totalResponseMilliseconds": 0.0,
+        "averageResponseMilliseconds": 0.0,
+        "maxResponseMilliseconds": 0.0,
+    }
+
+
+def _marketguard_players_snapshot(app_state: Any) -> dict[str, int | float]:
+    metrics = getattr(app_state, "marketguard_player_query_metrics", None)
+    snapshot = getattr(metrics, "snapshot", None)
+    if not callable(snapshot):
+        return _empty_marketguard_players_snapshot()
+    try:
+        payload = snapshot()
+    except Exception:
+        return _empty_marketguard_players_snapshot()
+    if not isinstance(payload, dict):
+        return _empty_marketguard_players_snapshot()
+    defaults = _empty_marketguard_players_snapshot()
+    for key, value in defaults.items():
+        candidate = payload.get(key, value)
+        try:
+            defaults[key] = float(candidate) if isinstance(value, float) else int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return defaults
 
 
 def merge_live_api_metrics_snapshots(*snapshots: dict[str, Any]) -> dict[str, Any]:
@@ -254,6 +294,35 @@ def merge_live_api_metrics_snapshots(*snapshots: dict[str, Any]) -> dict[str, An
         merged["totalLast10s"] += int(snapshot.get("totalLast10s", 0))
         merged["totalLast60s"] += int(snapshot.get("totalLast60s", 0))
         merged["totalSinceStart"] += int(snapshot.get("totalSinceStart", 0))
+
+        source_player_metrics = snapshot.get("marketguardPlayers", {}) or {}
+        if not isinstance(source_player_metrics, dict):
+            source_player_metrics = {}
+        target_player_metrics = merged["marketguardPlayers"]
+        for metric_key in (
+            "completedRequests",
+            "cacheHits",
+            "cacheMisses",
+            "coalescedWaiters",
+            "upstreamFailures",
+            "activeUpstreamLoads",
+            "peakActiveUpstreamLoads",
+            "totalResponseMilliseconds",
+        ):
+            try:
+                value = source_player_metrics.get(metric_key, 0)
+                normalized = float(value) if isinstance(target_player_metrics[metric_key], float) else int(value)
+            except (TypeError, ValueError):
+                continue
+            target_player_metrics[metric_key] += normalized
+        try:
+            source_maximum = float(source_player_metrics.get("maxResponseMilliseconds", 0))
+        except (TypeError, ValueError):
+            source_maximum = 0.0
+        target_player_metrics["maxResponseMilliseconds"] = max(
+            float(target_player_metrics["maxResponseMilliseconds"]),
+            source_maximum,
+        )
 
         for bucket_key, snapshot_key in (
             ("publicApi", "publicApi"),
@@ -293,6 +362,14 @@ def merge_live_api_metrics_snapshots(*snapshots: dict[str, Any]) -> dict[str, An
     for bucket_key in ("publicApi", "clientApi", "internalApi"):
         bucket = merged[bucket_key]
         bucket["requestsPerSecond10s"] = float(bucket["requestsLast10s"]) / _WINDOW_10_SECONDS
+
+    player_metrics = merged["marketguardPlayers"]
+    cache_total = int(player_metrics["cacheHits"]) + int(player_metrics["cacheMisses"])
+    player_metrics["cacheHitRate"] = float(player_metrics["cacheHits"]) / cache_total if cache_total else 0.0
+    completed_requests = int(player_metrics["completedRequests"])
+    player_metrics["averageResponseMilliseconds"] = (
+        float(player_metrics["totalResponseMilliseconds"]) / completed_requests if completed_requests else 0.0
+    )
 
     entries = list(entry_index.values())
     entries.sort(

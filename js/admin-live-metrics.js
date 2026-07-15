@@ -29,6 +29,11 @@
         internalRps: document.getElementById("live-internal-rps"),
         internal60s: document.getElementById("live-internal-60s"),
         internalTotal: document.getElementById("live-internal-total"),
+        playersCacheHitRate: document.getElementById("players-cache-hit-rate"),
+        playersAverageResponseMs: document.getElementById("players-average-response-ms"),
+        playersActiveUpstreamLoads: document.getElementById("players-active-upstream-loads"),
+        playersCoalescedWaiters: document.getElementById("players-coalesced-waiters"),
+        playersUpstreamFailures: document.getElementById("players-upstream-failures"),
     };
 
     function groupThousands(value) {
@@ -264,6 +269,7 @@
         const publicApi = snapshot.publicApi || {};
         const clientApi = snapshot.clientApi || {};
         const internalApi = snapshot.internalApi || {};
+        const marketguardPlayers = snapshot.marketguardPlayers || {};
         const entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
 
         setAnimatedInteger(fields.totalToday, snapshot.totalToday, animate);
@@ -288,6 +294,12 @@
         setRateField(fields.internalRps, internalApi.requestsPerSecond10s, animate);
         setAnimatedInteger(fields.internal60s, internalApi.requestsLast60s, animate);
         setAnimatedInteger(fields.internalTotal, internalApi.totalSinceStart, animate);
+
+        setRateField(fields.playersCacheHitRate, Number(marketguardPlayers.cacheHitRate || 0) * 100, animate);
+        setRateField(fields.playersAverageResponseMs, marketguardPlayers.averageResponseMilliseconds, animate);
+        setAnimatedInteger(fields.playersActiveUpstreamLoads, marketguardPlayers.activeUpstreamLoads, animate);
+        setAnimatedInteger(fields.playersCoalescedWaiters, marketguardPlayers.coalescedWaiters, animate);
+        setAnimatedInteger(fields.playersUpstreamFailures, marketguardPlayers.upstreamFailures, animate);
 
         applyEndpointRows(entries, animate);
     }

@@ -194,6 +194,22 @@ def test_marketguard_from_env_allows_cache_features_to_be_disabled(monkeypatch) 
     assert settings.redis_url == ""
 
 
+def test_marketguard_from_env_loads_player_query_configuration(monkeypatch) -> None:
+    marketguard_module = _load_marketguard_module()
+    monkeypatch.setattr(marketguard_module, "load_dotenv", lambda *_args, **_kwargs: None)
+    _clear_marketguard_env(monkeypatch)
+    monkeypatch.setenv("MARKETGUARD_DB_PASSWORD", "db-pass")
+    monkeypatch.setenv("MARKETGUARD_HYPIXEL_API_KEY", "test-hypixel-key")
+    monkeypatch.setenv("MARKETGUARD_PLAYERS_RATE_LIMIT_PER_MINUTE", "7")
+    monkeypatch.setenv("MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY", "6")
+
+    settings = marketguard_module.MarketGuardSettings.from_env()
+
+    assert settings.hypixel_api_key == "test-hypixel-key"
+    assert settings.players_rate_limit_per_minute == 7
+    assert settings.players_max_upstream_concurrency == 6
+
+
 def _clear_training_hub_env(monkeypatch) -> None:
     for key in list(os.environ):
         if key.startswith("TRAINING_HUB_") or key == "SCAMSCREENER_DB_MANAGED":

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from .cache import ResponseCacheChain, build_response_cache
 from .config import MarketGuardSettings
+from .player_service import PlayerService
 from .rate_limit import InMemoryRateLimiter
 from .routes import register_marketguard_routes
 from .service import BazaarService, LowestBinService
@@ -21,6 +22,7 @@ def create_marketguard_app(
     settings: MarketGuardSettings | None = None,
     service: LowestBinService | None = None,
     bazaar_service: BazaarService | None = None,
+    player_service: PlayerService | None = None,
     response_cache: ResponseCacheChain | None = None,
 ) -> FastAPI:
     runtime_settings = settings or MarketGuardSettings.from_env()
@@ -39,6 +41,7 @@ def create_marketguard_app(
         storage = storage or MarketGuardStorage(runtime_settings.database_url, runtime_settings.history_retention_days)
     lowestbin_service = service or LowestBinService(runtime_settings, storage=storage)
     runtime_bazaar_service = bazaar_service or BazaarService(runtime_settings, storage=storage)
+    runtime_player_service = player_service or PlayerService(runtime_settings)
     docs_url = "/docs" if runtime_settings.api_docs_enabled else None
     redoc_url = "/redoc" if runtime_settings.api_docs_enabled else None
     openapi_url = "/openapi.json" if runtime_settings.api_docs_enabled else None
@@ -106,6 +109,7 @@ def create_marketguard_app(
         settings=runtime_settings,
         service=lowestbin_service,
         bazaar_service=runtime_bazaar_service,
+        player_service=runtime_player_service,
     )
     return app
 
@@ -114,11 +118,13 @@ def create_app(
     settings: MarketGuardSettings | None = None,
     service: LowestBinService | None = None,
     bazaar_service: BazaarService | None = None,
+    player_service: PlayerService | None = None,
     response_cache: ResponseCacheChain | None = None,
 ) -> FastAPI:
     return create_marketguard_app(
         settings=settings,
         service=service,
         bazaar_service=bazaar_service,
+        player_service=player_service,
         response_cache=response_cache,
     )

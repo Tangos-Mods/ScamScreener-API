@@ -22,6 +22,7 @@ This repository contains two separate applications in one repo:
 - Monitoring metrics endpoint (`/api/v1/metrics`) and auth-spike alerting
 - Public Lowest BIN v2 endpoint at `/api/v2/lowestbin`
 - Public Bazaar endpoint at `/api/v1/bazaar`
+- Public player/profile QUERY endpoint at `/api/v1/players`
 - Admin button to:
   - build one merged training bundle from all accepted uploads
 - Audit log also records upload and bundle downloads
@@ -86,6 +87,7 @@ Open:
 - `http://localhost:8080/hub` (redirects to login/dashboard)
 - `http://localhost:8081/api/v2/lowestbin` (MarketGuard Lowest BIN JSON with `lastUpdated`, `products`, seller UUID, and auction `item_name`)
 - `http://localhost:8081/api/v1/bazaar` (MarketGuard Bazaar summary JSON)
+- `http://localhost:8081/api/v1/players` (MarketGuard player/profile JSON via the QUERY method)
 - `http://localhost:8081/docs` (interactive OpenAPI docs for local validation)
 
 ## 3) Docker Deploy
@@ -148,7 +150,7 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `CADDY_HTTP_PORT` default `80`
 - `CADDY_HTTPS_PORT` default `443`
 - `PORT` optional runtime port override used by the app image
-- `WEB_CONCURRENCY` optional worker count for the app image (default `1`)
+- `WEB_CONCURRENCY` optional worker count for the app image (default `1`; keep this value for the player QUERY route until its per-IP rate limiter is centralized)
 - `TRAINING_HUB_HOST` default `0.0.0.0`
 - `TRAINING_HUB_PORT` default `8080`
 - `TRAINING_HUB_ENV` default `development` (`production` enforces strict startup checks)
@@ -238,6 +240,9 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `MARKETGUARD_STALE_IF_ERROR_SECONDS` default `300`
 - `MARKETGUARD_HISTORY_RETENTION_DAYS` default `45`
 - `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
+- `MARKETGUARD_HYPIXEL_API_KEY` required for `/api/v1/players`; keep it only in the deployment secret environment
+- `MARKETGUARD_PLAYERS_RATE_LIMIT_PER_MINUTE` default `3` per source IP; set `0` only for controlled internal testing
+- `MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY` default `4` per API worker; raise it only after checking the Player QUERY efficiency metrics and Hypixel quota
 - `MARKETGUARD_LOCAL_CACHE_ENABLED` toggles the small per-process response cache
 - `MARKETGUARD_LOCAL_CACHE_TTL_SECONDS` and `MARKETGUARD_LOCAL_CACHE_MAX_ENTRIES` bound local API RAM usage
 - `MARKETGUARD_REDIS_ENABLED` toggles the shared Redis response cache
@@ -287,6 +292,7 @@ Supply-chain checks:
 - `GET /api/v2/lowestbin`
 - `QUERY /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
+- `QUERY /api/v1/players`
 - `GET /market/`
 - `GET /market/bazaar`
 - `POST /api/v1/client/uploads`
@@ -297,6 +303,19 @@ Supply-chain checks:
 `/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
 `QUERY /api/v2/lowestbin` accepts a JSON body with a non-empty `products` array and returns the same response shape containing only the requested identifiers. Unknown identifiers are omitted. The QUERY method is additive and does not replace the GET endpoint; because the HTTP QUERY method is currently an IETF Internet-Draft, clients should retain GET as a compatibility fallback.
 
+`QUERY /api/v1/players` accepts up to ten Minecraft usernames or UUIDs paired with a required SkyBlock profile UUID. It returns each player in request order with the canonical UUID, first join timestamp, requested profile, bank/purse coins, decoded armor and equipment item lists, and SkyBlock skill level plus XP. The endpoint is public but rate-limited and uses `MARKETGUARD_HYPIXEL_API_KEY` only on the server. Profile privacy settings or upstream failures can make individual fields unavailable; the response reports that through `status` and `unavailableFields` without exposing raw upstream data. If that key is not configured, every requested player returns `status: "unavailable"` with no fabricated data. The top-level response status is `ok` or `stale` when served from the shared cache; clients can also inspect `X-Data-Stale`. Cache misses for the same normalized request share one in-flight upstream lookup, the upstream work is bounded per worker, and skill definitions are cached for one hour.
+
+The protected Admin Analytics Metrics page includes the player route's cache-hit rate, average response time, active upstream loads, coalesced requests, and upstream failures. The Compose deployment already supplies its internal API metrics URL. Keep `WEB_CONCURRENCY=1` while this route uses the built-in process-local per-IP limiter; Redis shares cached responses but does not make that limiter distributed.
+
+Example `QUERY /api/v1/players` request:
+
+```http
+QUERY /api/v1/players HTTP/1.1
+Content-Type: application/json
+
+{"players":[{"player":"Pankraz01","profileId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}
+```
+
 Example `QUERY /api/v2/lowestbin` request:
 
 ```http
@@ -304,6 +323,37 @@ QUERY /api/v2/lowestbin HTTP/1.1
 Content-Type: application/json
 
 {"products":["HYPERION","TRUE_ESSENCE"]}
+```
+
+Example successful player result:
+
+```json
+{
+  "status": "ok",
+  "players": [
+    {
+      "status": "ok",
+      "uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "name": "Pankraz01",
+      "firstJoin": 1587483921000,
+      "profile": {
+        "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "Apple",
+        "selected": true,
+        "wealth": {
+          "bank": 125000000.0,
+          "purse": 4250000.5,
+          "equipment": [],
+          "armor": []
+        },
+        "skills": {
+          "farming": {"level": 60, "xp": 111234567.0}
+        }
+      },
+      "unavailableFields": []
+    }
+  ]
+}
 ```
 
 Example `GET /api/v2/lowestbin` response:
