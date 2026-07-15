@@ -89,9 +89,6 @@ def register_marketguard_routes(
     app.state.marketguard_player_service = marketguard_player_service
     app.state.marketguard_player_query_metrics = player_query_metrics
     app.state.marketguard_routes_registered = True
-    app.add_event_handler("shutdown", marketguard_service.aclose)
-    app.add_event_handler("shutdown", marketguard_bazaar_service.aclose)
-    app.add_event_handler("shutdown", marketguard_player_service.aclose)
 
     async def _load_players_query_payload(
         cache_key: str,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +18,8 @@ from .storage import MarketGuardStorage
 from app.training_hub.http.live_api_metrics import LiveApiRequestMetrics, live_api_metrics_snapshot
 from app.training_hub.http.persistent_api_metrics import PersistentApiMetricsRecorder
 from app.training_hub.core.common import _request_originates_from_internal_network
+
+logger = logging.getLogger(__name__)
 
 
 def create_marketguard_app(
@@ -42,20 +46,45 @@ def create_marketguard_app(
     lowestbin_service = service or LowestBinService(runtime_settings, storage=storage)
     runtime_bazaar_service = bazaar_service or BazaarService(runtime_settings, storage=storage)
     runtime_player_service = player_service or PlayerService(runtime_settings)
+    persistent_api_metrics = PersistentApiMetricsRecorder(runtime_settings.database_url)
     docs_url = "/docs" if runtime_settings.api_docs_enabled else None
     redoc_url = "/redoc" if runtime_settings.api_docs_enabled else None
     openapi_url = "/openapi.json" if runtime_settings.api_docs_enabled else None
+
+    @asynccontextmanager
+    async def app_lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            try:
+                await run_in_threadpool(persistent_api_metrics.flush)
+            except Exception:
+                logger.exception("Could not flush persistent MarketGuard API metrics during shutdown.")
+            for resource_name, resource in (
+                ("MarketGuard player service", runtime_player_service),
+                ("MarketGuard Bazaar service", runtime_bazaar_service),
+                ("MarketGuard Lowest BIN service", lowestbin_service),
+                ("MarketGuard response cache", runtime_response_cache),
+            ):
+                if resource is None:
+                    continue
+                try:
+                    await resource.aclose()
+                except Exception:
+                    logger.exception("Could not close %s during shutdown.", resource_name)
+
     app = FastAPI(
         title="MarketGuard API",
         version="1.0.0",
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,
+        lifespan=app_lifespan,
     )
     app.state.rate_limiter = InMemoryRateLimiter()
     app.state.marketguard_response_cache = runtime_response_cache
     app.state.live_api_metrics = LiveApiRequestMetrics()
-    app.state.persistent_api_metrics = PersistentApiMetricsRecorder(runtime_settings.database_url)
+    app.state.persistent_api_metrics = persistent_api_metrics
 
     def _require_internal_observability_access(request: Request) -> None:
         if _request_originates_from_internal_network(request, runtime_settings.trusted_proxies):
@@ -99,10 +128,6 @@ def create_marketguard_app(
         _require_internal_observability_access(request)
         await run_in_threadpool(app.state.persistent_api_metrics.flush)
         return JSONResponse(live_api_metrics_snapshot(app.state))
-
-    if runtime_response_cache is not None:
-        app.add_event_handler("shutdown", runtime_response_cache.aclose)
-    app.add_event_handler("shutdown", app.state.persistent_api_metrics.flush)
 
     register_marketguard_routes(
         app,
