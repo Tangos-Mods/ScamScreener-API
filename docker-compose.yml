@@ -210,9 +210,6 @@ services:
         condition: service_healthy
       marketguard-hub:
         condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -242,6 +239,7 @@ services:
     networks:
       scamscreener_net:
         ipv4_address: 172.31.255.10
+      scamscreener-edge:
 
 volumes:
   scamscreener_data:
@@ -254,3 +252,6 @@ networks:
     ipam:
       config:
         - subnet: 172.31.255.0/24
+  scamscreener-edge:
+    external: true
+    name: scamscreener-edge

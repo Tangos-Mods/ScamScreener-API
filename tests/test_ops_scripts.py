@@ -115,6 +115,7 @@ def test_update_waits_for_optional_redis_when_enabled(tmp_path: Path, monkeypatc
     assert "scamscreener-redis" in waits
     assert "marketguard-hub" in waits
     assert compose_calls == [
+        ["ps", "-q", "scamscreener-hub"],
         ["build"],
         ["up", "-d", "--remove-orphans"],
         ["up", "-d", "--force-recreate", "caddy"],
@@ -131,6 +132,7 @@ def test_update_rejects_running_legacy_local_auth_stack(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(compose_ops, "require_command", lambda _name: None)
     monkeypatch.setattr(compose_ops, "detect_running_auth_mode", lambda _context: "local")
+    monkeypatch.setattr(compose_ops, "read_deployment_auth_marker", lambda _context: "")
 
     with pytest.raises(RuntimeError, match="scripts/migrate.py"):
         update_module.run_update(

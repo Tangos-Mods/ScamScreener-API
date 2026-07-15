@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import MarketGuardHubSettings
 from .mojang import MojangProfileResolver
+
+logger = logging.getLogger(__name__)
 
 
 class PlayerNameLookupRequest(BaseModel):
@@ -38,18 +42,31 @@ def create_marketguard_hub_app(
 ) -> FastAPI:
     base_dir = Path(__file__).resolve().parents[2]
     runtime_settings = settings or MarketGuardHubSettings.from_env()
+    runtime_profile_resolver = profile_resolver or MojangProfileResolver()
+
+    @asynccontextmanager
+    async def app_lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            try:
+                await runtime_profile_resolver.aclose()
+            except Exception:
+                logger.exception("Could not close MarketGuard profile resolver during shutdown.")
+
     app = FastAPI(
         title="MarketGuard Hub",
         version="1.0.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=app_lifespan,
     )
     if runtime_settings.allowed_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(runtime_settings.allowed_hosts))
 
     app.state.settings = runtime_settings
-    app.state.profile_resolver = profile_resolver or MojangProfileResolver()
+    app.state.profile_resolver = runtime_profile_resolver
     app.state.templates = Jinja2Templates(directory=str(base_dir / "sites"))
     app.mount("/assets/css", StaticFiles(directory=str(base_dir / "css")), name="marketguard-hub-css")
     app.mount("/assets/js", StaticFiles(directory=str(base_dir / "js")), name="marketguard-hub-js")
@@ -140,8 +157,6 @@ def create_marketguard_hub_app(
         resolver = app.state.profile_resolver
         names = await resolver.resolve_many(payload.uuids)
         return JSONResponse({"playerNames": names})
-
-    app.add_event_handler("shutdown", app.state.profile_resolver.aclose)
 
     return app
 
