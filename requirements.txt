@@ -5,7 +5,7 @@ python-multipart==0.0.31
 jinja2==3.1.6
 PyMySQL==1.1.2
 cryptography==48.0.1
-webauthn==2.7.1
+webauthn==3.0.0
 qrcode==8.2
 pytest==9.0.3
 httpx==0.28.1
