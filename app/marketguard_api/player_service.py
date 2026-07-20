@@ -9,7 +9,7 @@ from typing import Any
 
 from .client import HypixelPlayerClient, MojangNameClient
 from .config import MarketGuardSettings
-from .exceptions import HypixelUpstreamError, MojangUpstreamError
+from .exceptions import HypixelAuthenticationError, HypixelUpstreamError, MojangUpstreamError
 from .models import PlayerProfileQuery
 from .nbt import parse_inventory_nbt
 
@@ -57,13 +57,16 @@ class PlayerService:
         unique_queries: dict[tuple[str, str], PlayerProfileQuery] = {}
         query_keys: list[tuple[str, str]] = []
         for query in queries:
-            key = (_normalize_player_identifier(query.player), _normalize_uuid(query.profileId) or query.profileId.lower())
+            requested_profile_id = _normalize_uuid(query.profileId)
+            key = (_normalize_player_identifier(query.player), requested_profile_id or "selected")
             unique_queries.setdefault(key, query)
             query_keys.append(key)
 
         async def _lookup(key: tuple[str, str], query: PlayerProfileQuery) -> tuple[tuple[str, str], dict[str, object]]:
             try:
                 return key, await self._lookup_player(query, skills)
+            except HypixelAuthenticationError:
+                raise
             except (HypixelUpstreamError, MojangUpstreamError):
                 logger.warning("Player lookup is temporarily unavailable.")
                 return key, self._unavailable_result(query)
@@ -83,6 +86,8 @@ class PlayerService:
             "uuid": player_uuid,
             "name": None if player_uuid is not None else query.player,
             "firstJoin": None,
+            "fetchedAt": None,
+            "source": None,
             "profile": None,
             "unavailableFields": ["firstJoin", "profile"],
         }
@@ -99,6 +104,8 @@ class PlayerService:
             try:
                 async with self._upstream_semaphore:
                     definitions = await self._hypixel_client.fetch_skyblock_skills()
+            except HypixelAuthenticationError:
+                raise
             except HypixelUpstreamError:
                 logger.warning("Hypixel SkyBlock skill definitions are temporarily unavailable.")
                 return None
@@ -113,28 +120,48 @@ class PlayerService:
     ) -> dict[str, object]:
         identity = await self._resolve_identity(query.player)
         if identity is None:
-            return {"status": "not_found"}
+            return {
+                "status": "not_found",
+                "uuid": None,
+                "name": None,
+                "firstJoin": None,
+                "fetchedAt": _epoch_millis(),
+                "source": "mojang",
+                "profile": None,
+                "unavailableFields": [],
+            }
 
         player, profiles = await asyncio.gather(
             self._fetch_player(identity.uuid),
             self._fetch_profiles(identity.uuid),
         )
+        fetched_at = _epoch_millis()
         if player is None:
-            return _result("not_found", identity=identity)
+            return _result("not_found", identity=identity, fetched_at=fetched_at, source="hypixel")
 
         name = _safe_text(player.get("displayname")) or identity.name
         first_join = _non_negative_int(player.get("firstLogin"))
         requested_profile_id = _normalize_uuid(query.profileId)
-        profile = next(
-            (
-                candidate
-                for candidate in profiles
-                if _normalize_uuid(candidate.get("profile_id")) == requested_profile_id
-            ),
-            None,
-        )
+        if requested_profile_id is None:
+            profile = next((candidate for candidate in profiles if candidate.get("selected") is True), None)
+        else:
+            profile = next(
+                (
+                    candidate
+                    for candidate in profiles
+                    if _normalize_uuid(candidate.get("profile_id")) == requested_profile_id
+                ),
+                None,
+            )
         if profile is None:
-            return _result("profile_not_found", identity=identity, name=name, first_join=first_join)
+            return _result(
+                "profile_not_found",
+                identity=identity,
+                name=name,
+                first_join=first_join,
+                fetched_at=fetched_at,
+                source="hypixel",
+            )
 
         profile_payload = _profile_payload(profile)
         member = _profile_member(profile, identity.uuid)
@@ -146,7 +173,7 @@ class PlayerService:
                 "armor": None,
             }
             profile_payload["skills"] = None
-            unavailable_fields = ["bank", "purse", "equipment", "armor", "skills"]
+            unavailable_fields = ["bank", "purse", "equipment", "armor", "skills", "activePet", "activeWeapon"]
             if first_join is None:
                 unavailable_fields.insert(0, "firstJoin")
             return _result(
@@ -156,6 +183,8 @@ class PlayerService:
                 first_join=first_join,
                 profile=profile_payload,
                 unavailable_fields=unavailable_fields,
+                fetched_at=fetched_at,
+                source="hypixel",
             )
 
         unavailable_fields: list[str] = []
@@ -182,6 +211,14 @@ class PlayerService:
         if skills is None:
             unavailable_fields.append("skills")
 
+        active_pet, active_pet_available = _active_pet(member)
+        if not active_pet_available:
+            unavailable_fields.append("activePet")
+
+        # The public SkyBlock profile API exposes inventories but not the currently held slot.
+        # Do not guess a weapon from a hotbar item.
+        unavailable_fields.append("activeWeapon")
+
         profile_payload["wealth"] = {
             "bank": bank,
             "purse": purse,
@@ -189,6 +226,8 @@ class PlayerService:
             "armor": armor,
         }
         profile_payload["skills"] = skills
+        profile_payload["activePet"] = active_pet
+        profile_payload["activeWeapon"] = None
         status = "partial" if unavailable_fields else "ok"
         return _result(
             status,
@@ -197,6 +236,8 @@ class PlayerService:
             first_join=first_join,
             profile=profile_payload,
             unavailable_fields=unavailable_fields,
+            fetched_at=fetched_at,
+            source="hypixel",
         )
 
     async def _resolve_identity(self, player: str) -> _PlayerIdentity | None:
@@ -228,16 +269,24 @@ def _result(
     first_join: int | None = None,
     profile: dict[str, object] | None = None,
     unavailable_fields: list[str] | None = None,
+    fetched_at: int | None = None,
+    source: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "status": status,
         "uuid": identity.uuid,
         "name": name if name is not None else identity.name,
         "firstJoin": first_join,
+        "fetchedAt": fetched_at,
+        "source": source,
         "profile": profile,
         "unavailableFields": unavailable_fields or [],
     }
     return payload
+
+
+def _epoch_millis() -> int:
+    return int(time.time() * 1_000)
 
 
 def _profile_payload(profile: dict[str, Any]) -> dict[str, object]:
@@ -255,6 +304,8 @@ def _profile_payload(profile: dict[str, Any]) -> dict[str, object]:
             "armor": None,
         },
         "skills": None,
+        "activePet": None,
+        "activeWeapon": None,
     }
 
 
@@ -323,6 +374,30 @@ def _skills(member: dict[str, Any], definitions: dict[str, dict[str, Any]] | Non
             "xp": xp,
         }
     return result
+
+
+def _active_pet(member: dict[str, Any]) -> tuple[dict[str, object] | None, bool]:
+    pets_data = member.get("pets_data")
+    pets = pets_data.get("pets") if isinstance(pets_data, dict) else member.get("pets")
+    if not isinstance(pets, list):
+        return None, False
+
+    active_pets = [pet for pet in pets if isinstance(pet, dict) and pet.get("active") is True]
+    if not active_pets:
+        return None, True
+    if len(active_pets) != 1:
+        return None, False
+
+    pet = active_pets[0]
+    pet_type = _safe_text(pet.get("type")).upper()
+    if not pet_type:
+        return None, False
+    return {
+        "type": pet_type,
+        "tier": _safe_text(pet.get("tier")).upper() or None,
+        "xp": _non_negative_number(pet.get("exp")),
+        "heldItem": _safe_text(pet.get("heldItem")).upper() or None,
+    }, True
 
 
 def _skill_level(xp: float, definition: dict[str, Any]) -> int:

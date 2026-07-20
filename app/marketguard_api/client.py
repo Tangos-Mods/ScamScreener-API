@@ -8,7 +8,13 @@ from typing import Any
 import httpx
 
 from .config import MarketGuardSettings
-from .exceptions import HypixelRateLimitError, HypixelSnapshotDriftError, HypixelUpstreamError, MojangUpstreamError
+from .exceptions import (
+    HypixelAuthenticationError,
+    HypixelRateLimitError,
+    HypixelSnapshotDriftError,
+    HypixelUpstreamError,
+    MojangUpstreamError,
+)
 from .models import AuctionPage, AuctionSnapshot, BazaarProductSnapshot
 
 logger = logging.getLogger(__name__)
@@ -340,6 +346,8 @@ class HypixelPlayerClient:
         retry_after = int(retry_after_header) if retry_after_header.isdigit() else None
         if response.status_code == 429:
             raise HypixelRateLimitError("Hypixel API rate limited player data.", retry_after_seconds=retry_after)
+        if response.status_code in {401, 403}:
+            raise HypixelAuthenticationError("Hypixel API rejected the configured API key.")
         if response.is_error:
             raise HypixelUpstreamError(f"Hypixel API returned HTTP {response.status_code} for {resource}.")
 
@@ -352,6 +360,9 @@ class HypixelPlayerClient:
         if not isinstance(payload, dict):
             raise HypixelUpstreamError(f"Hypixel API returned an invalid {resource} payload.")
         if payload.get("success") is not True:
+            cause = str(payload.get("cause", "")).strip().lower()
+            if "api key" in cause or "apikey" in cause:
+                raise HypixelAuthenticationError("Hypixel API rejected the configured API key.")
             raise HypixelUpstreamError(f"Hypixel API reported an unsuccessful {resource} response.")
         return payload
 

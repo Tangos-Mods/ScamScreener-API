@@ -267,6 +267,17 @@ def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_sk
                                         [("NECRON_HELMET", "Necron's Helmet", 1)]
                                     )
                                 },
+                                "pets_data": {
+                                    "pets": [
+                                        {
+                                            "type": "ENDER_DRAGON",
+                                            "tier": "LEGENDARY",
+                                            "exp": 25_367_890.0,
+                                            "heldItem": "CROCHET_TIGER_PLUSHIE",
+                                            "active": True,
+                                        }
+                                    ]
+                                },
                                 "player_data": {"experience": {"SKILL_FARMING": 175}},
                             }
                         },
@@ -293,15 +304,21 @@ def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_sk
         response = client.request(
             "QUERY",
             "/api/v1/players",
-            json={"players": [{"player": "Pankraz01", "profileId": profile_id}]},
+            json={"players": [{"player": "Pankraz01"}]},
         )
 
     assert response.status_code == 200
-    assert response.json() == {
+    response_payload = response.json()
+    result = response_payload["players"][0]
+    assert result["source"] == "hypixel"
+    assert isinstance(result["fetchedAt"], int)
+    result.pop("source")
+    result.pop("fetchedAt")
+    assert response_payload == {
         "status": "ok",
         "players": [
             {
-                "status": "ok",
+                "status": "partial",
                 "uuid": player_uuid,
                 "name": "Pankraz01",
                 "firstJoin": 1_587_483_921_000,
@@ -330,8 +347,15 @@ def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_sk
                         ],
                     },
                     "skills": {"farming": {"level": 2, "xp": 175.0}},
+                    "activePet": {
+                        "type": "ENDER_DRAGON",
+                        "tier": "LEGENDARY",
+                        "xp": 25_367_890.0,
+                        "heldItem": "CROCHET_TIGER_PLUSHIE",
+                    },
+                    "activeWeapon": None,
                 },
-                "unavailableFields": [],
+                "unavailableFields": ["activeWeapon"],
             }
         ],
     }
@@ -387,6 +411,8 @@ def test_players_query_returns_status_per_unknown_or_unavailable_profile(tmp_pat
     assert result["status"] == "profile_unavailable"
     assert result["uuid"] == player_uuid
     assert result["firstJoin"] is None
+    assert result["source"] == "hypixel"
+    assert isinstance(result["fetchedAt"], int)
     assert result["profile"]["wealth"] == {
         "bank": None,
         "purse": None,
@@ -394,8 +420,46 @@ def test_players_query_returns_status_per_unknown_or_unavailable_profile(tmp_pat
         "armor": None,
     }
     assert result["profile"]["skills"] is None
-    assert result["unavailableFields"] == ["firstJoin", "bank", "purse", "equipment", "armor", "skills"]
+    assert result["unavailableFields"] == [
+        "firstJoin",
+        "bank",
+        "purse",
+        "equipment",
+        "armor",
+        "skills",
+        "activePet",
+        "activeWeapon",
+    ]
     assert "input" not in result
+
+
+def test_players_query_marks_confirmed_unknown_names_as_mojang_data(tmp_path: Path) -> None:
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/resources/skyblock/skills":
+            return httpx.Response(200, json={"success": True, "skills": {}})
+        raise AssertionError("A Mojang-confirmed unknown name must not query Hypixel.")
+
+    async def _mojang_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204)
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
+        marketguard_player_service=_marketguard_player_service(settings, _hypixel_handler, _mojang_handler),
+    )
+
+    with TestClient(app) as client:
+        response = client.request("QUERY", "/api/v1/players", json={"players": [{"player": "UnknownPlayer"}]})
+
+    assert response.status_code == 200
+    result = response.json()["players"][0]
+    assert result["status"] == "not_found"
+    assert result["source"] == "mojang"
+    assert isinstance(result["fetchedAt"], int)
 
 
 def test_players_query_rejects_invalid_requests_and_rate_limits_public_access(tmp_path: Path) -> None:
@@ -455,12 +519,19 @@ def test_players_query_rejects_invalid_requests_and_rate_limits_public_access(tm
     assert first_result["status"] == "partial"
     assert first_result["profile"]["wealth"]["equipment"] is None
     assert first_result["profile"]["wealth"]["armor"] is None
-    assert first_result["unavailableFields"] == ["bank", "equipment", "armor", "skills"]
+    assert first_result["unavailableFields"] == [
+        "bank",
+        "equipment",
+        "armor",
+        "skills",
+        "activePet",
+        "activeWeapon",
+    ]
     assert second.status_code == 429
     assert second.headers["retry-after"].isdigit()
 
 
-def test_players_query_marks_players_unavailable_without_server_hypixel_api_key(tmp_path: Path) -> None:
+def test_players_query_returns_teapot_without_server_hypixel_api_key(tmp_path: Path) -> None:
     settings = _marketguard_settings()
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
@@ -484,20 +555,34 @@ def test_players_query_marks_players_unavailable_without_server_hypixel_api_key(
             },
         )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "players": [
-            {
-                "status": "unavailable",
-                "uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "name": None,
-                "firstJoin": None,
-                "profile": None,
-                "unavailableFields": ["firstJoin", "profile"],
-            }
-        ],
-    }
+    assert response.status_code == 419
+    assert response.json() == {"detail": "Hypixel API key is missing or invalid."}
+
+
+def test_players_query_returns_teapot_for_invalid_server_hypixel_api_key(tmp_path: Path) -> None:
+    async def _hypixel_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"success": False, "cause": "Invalid API key"})
+
+    settings = _marketguard_settings(hypixel_api_key="invalid-hypixel-key")
+    app = create_app(
+        training_hub_settings=_training_hub_settings(tmp_path),
+        marketguard_settings=settings,
+        marketguard_player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            lambda _request: None,
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.request(
+            "QUERY",
+            "/api/v1/players",
+            json={"players": [{"player": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]},
+        )
+
+    assert response.status_code == 419
+    assert response.json() == {"detail": "Hypixel API key is missing or invalid."}
 
 
 def test_players_query_preserves_unavailable_status_for_upstream_failures(tmp_path: Path) -> None:
@@ -539,6 +624,8 @@ def test_players_query_preserves_unavailable_status_for_upstream_failures(tmp_pa
             "uuid": player_uuid,
             "name": None,
             "firstJoin": None,
+            "fetchedAt": None,
+            "source": None,
             "profile": None,
             "unavailableFields": ["firstJoin", "profile"],
         }

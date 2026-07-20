@@ -14,7 +14,13 @@ from fastapi.responses import JSONResponse
 
 from .cache import CachedResponse
 from .config import MarketGuardSettings
-from .exceptions import HypixelRateLimitError, HypixelUpstreamError, MarketGuardStorageError, MojangUpstreamError
+from .exceptions import (
+    HypixelAuthenticationError,
+    HypixelRateLimitError,
+    HypixelUpstreamError,
+    MarketGuardStorageError,
+    MojangUpstreamError,
+)
 from .models import (
     ApiErrorResponse,
     BazaarResponse,
@@ -35,6 +41,7 @@ _CACHE_KEY_PLAYERS_V1_PREFIX = "players:v1:"
 _READINESS_OK_DETAIL = "All MarketGuard datasets are fresh and available."
 _READINESS_DEGRADED_DETAIL = "At least one MarketGuard dataset is stale."
 _READINESS_UNAVAILABLE_DETAIL = "At least one MarketGuard dataset is unavailable."
+_HYPIXEL_KEY_ERROR_DETAIL = "Hypixel API key is missing or invalid."
 
 
 def _round_lowestbin_average(value: float | None) -> int | None:
@@ -255,11 +262,14 @@ def register_marketguard_routes(
         methods=["QUERY"],
         response_model=PlayersQueryResponse,
         responses={
+            419: _error_response_docs(_HYPIXEL_KEY_ERROR_DETAIL),
             429: _error_response_docs("Too many requests.", retry_after=True),
             503: _error_response_docs("Player data is temporarily unavailable.", retry_after=True),
         },
     )
     async def players_query(request: Request, query: PlayersQueryRequest) -> JSONResponse:
+        if not marketguard_settings.hypixel_api_key.strip():
+            raise HTTPException(status_code=419, detail=_HYPIXEL_KEY_ERROR_DETAIL)
         await _apply_rate_limit(
             request,
             route_key="players",
@@ -279,6 +289,9 @@ def register_marketguard_routes(
                 )
             try:
                 payload = await _load_players_query_payload(cache_key, query)
+            except HypixelAuthenticationError as exc:
+                player_query_metrics.record_upstream_failure()
+                raise HTTPException(status_code=419, detail=_HYPIXEL_KEY_ERROR_DETAIL) from exc
             except HypixelRateLimitError as exc:
                 player_query_metrics.record_upstream_failure()
                 headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds else None
@@ -434,7 +447,7 @@ def _players_query_cache_key(query: PlayersQueryRequest) -> str:
             "players": [
                 {
                     "player": _normalize_players_cache_identifier(player_query.player),
-                    "profileId": player_query.profileId.lower().replace("-", ""),
+                    "profileId": (player_query.profileId or "").lower().replace("-", ""),
                 }
                 for player_query in query.players
             ]

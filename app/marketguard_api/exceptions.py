@@ -9,6 +9,10 @@ class HypixelUpstreamError(MarketGuardError):
     pass
 
 
+class HypixelAuthenticationError(HypixelUpstreamError):
+    """The configured Hypixel API key is missing, rejected, or otherwise unusable."""
+
+
 class MarketGuardStorageError(MarketGuardError):
     pass
 

@@ -123,7 +123,7 @@ class LowestBinQueryRequest(BaseModel):
 
 class PlayerProfileQuery(BaseModel):
     player: str = Field(..., examples=["Pankraz01", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
-    profileId: str = Field(..., examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+    profileId: str | None = Field(None, examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
 
     @field_validator("player")
     @classmethod
@@ -137,7 +137,9 @@ class PlayerProfileQuery(BaseModel):
 
     @field_validator("profileId")
     @classmethod
-    def validate_profile_id(cls, value: str) -> str:
+    def validate_profile_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = str(value or "").strip().lower()
         if _COMPACT_UUID_PATTERN.fullmatch(normalized) or _DASHED_UUID_PATTERN.fullmatch(normalized):
             return normalized
@@ -149,12 +151,11 @@ class PlayersQueryRequest(BaseModel):
         ...,
         min_length=1,
         max_length=10,
-        description="Players and the SkyBlock profile to read for each player.",
+        description="Players to read, optionally pinned to a specific SkyBlock profile UUID.",
         examples=[
             [
                 {
                     "player": "Pankraz01",
-                    "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 }
             ]
         ],
@@ -180,12 +181,21 @@ class PlayerSkillResponse(BaseModel):
     xp: float = Field(..., ge=0, examples=[111234567.0])
 
 
+class PlayerActivePetResponse(BaseModel):
+    type: str = Field(..., examples=["ENDER_DRAGON"])
+    tier: str | None = Field(None, examples=["LEGENDARY"])
+    xp: float | None = Field(None, ge=0, examples=[25_367_890.0])
+    heldItem: str | None = Field(None, examples=["CROCHET_TIGER_PLUSHIE"])
+
+
 class SkyBlockProfileResponse(BaseModel):
     id: str = Field(..., examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
     name: str | None = Field(None, examples=["Apple"])
     selected: bool = Field(..., examples=[True])
     wealth: PlayerWealthResponse
     skills: dict[str, PlayerSkillResponse] | None = None
+    activePet: PlayerActivePetResponse | None = None
+    activeWeapon: PlayerInventoryItemResponse | None = None
 
 
 class PlayerQueryResult(BaseModel):
@@ -196,6 +206,8 @@ class PlayerQueryResult(BaseModel):
     uuid: str | None = Field(None, examples=["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
     name: str | None = Field(None, examples=["Pankraz01"])
     firstJoin: int | None = Field(None, examples=[1587483921000])
+    fetchedAt: int | None = Field(None, examples=[1715478978620])
+    source: Literal["hypixel", "mojang"] | None = Field(None, examples=["hypixel"])
     profile: SkyBlockProfileResponse | None = None
     unavailableFields: list[str] = Field(default_factory=list, examples=[[]])
 
