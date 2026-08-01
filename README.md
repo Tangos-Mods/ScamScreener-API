@@ -303,7 +303,7 @@ Supply-chain checks:
 `/api/v2/lowestbin` returns an object with top-level `lastUpdated` plus a `products` object whose keys are item identifiers and whose values contain the current Lowest BIN `price`, seller `auctioneerUuid`, Hypixel auction `item_name`, and snapshot-based `avg7d` / `avg30d` averages over deduplicated Hypixel snapshots.
 `QUERY /api/v2/lowestbin` accepts a JSON body with a non-empty `products` array and returns the same response shape containing only the requested identifiers. Unknown identifiers are omitted. The QUERY method is additive and does not replace the GET endpoint; because the HTTP QUERY method is currently an IETF Internet-Draft, clients should retain GET as a compatibility fallback.
 
-`QUERY /api/v1/players` accepts up to ten Minecraft usernames or UUIDs paired with a required SkyBlock profile UUID. It returns each player in request order with the canonical UUID, first join timestamp, requested profile, bank/purse coins, decoded armor and equipment item lists, and SkyBlock skill level plus XP. The endpoint is public but rate-limited and uses `MARKETGUARD_HYPIXEL_API_KEY` only on the server. Profile privacy settings or upstream failures can make individual fields unavailable; the response reports that through `status` and `unavailableFields` without exposing raw upstream data. If that key is missing or rejected by Hypixel, the route returns HTTP 419 with a generic error detail. The top-level response status is `ok` or `stale` when served from the shared cache; clients can also inspect `X-Data-Stale`. Cache misses for the same normalized request share one in-flight upstream lookup, the upstream work is bounded per worker, and skill definitions are cached for one hour.
+`QUERY /api/v1/players` accepts up to ten Minecraft usernames or UUIDs. Each entry may include a SkyBlock profile UUID; if `profileId` is omitted, the API automatically uses the player's selected SkyBlock profile. It returns each player in request order with the canonical UUID, first join timestamp, resolved profile, bank/purse coins, decoded armor and equipment item lists, and SkyBlock skill level plus XP. The endpoint is public but rate-limited and uses `MARKETGUARD_HYPIXEL_API_KEY` only on the server. Profile privacy settings or upstream failures can make individual fields unavailable; the response reports that through `status` and `unavailableFields` without exposing raw upstream data. If that key is missing or rejected by Hypixel, the route returns HTTP 419 with a generic error detail. The top-level response status is `ok` or `stale` when served from the shared cache; clients can also inspect `X-Data-Stale`. Cache misses for the same normalized request share one in-flight upstream lookup, the upstream work is bounded per worker, and skill definitions are cached for one hour.
 
 The protected Admin Analytics Metrics page includes the player route's cache-hit rate, average response time, active upstream loads, coalesced requests, and upstream failures. The Compose deployment already supplies its internal API metrics URL. Keep `WEB_CONCURRENCY=1` while this route uses the built-in process-local per-IP limiter; Redis shares cached responses but does not make that limiter distributed.
 
@@ -313,7 +313,7 @@ Example `QUERY /api/v1/players` request:
 QUERY /api/v1/players HTTP/1.1
 Content-Type: application/json
 
-{"players":[{"player":"Pankraz01","profileId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}
+{"players":[{"player":"Pankraz01"}]}
 ```
 
 Example `QUERY /api/v2/lowestbin` request:
