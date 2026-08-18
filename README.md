@@ -293,6 +293,7 @@ Supply-chain checks:
 - `QUERY /api/v2/lowestbin`
 - `GET /api/v1/bazaar`
 - `QUERY /api/v1/players`
+- `QUERY /api/v1/player-finance`
 - `GET /market/`
 - `GET /market/bazaar`
 - `POST /api/v1/client/uploads`
@@ -305,6 +306,8 @@ Supply-chain checks:
 
 `QUERY /api/v1/players` accepts up to ten Minecraft usernames or UUIDs paired with a required SkyBlock profile UUID. It returns each player in request order with the canonical UUID, first join timestamp, requested profile, bank/purse coins, decoded armor and equipment item lists, and SkyBlock skill level plus XP. The endpoint is public but rate-limited and uses `MARKETGUARD_HYPIXEL_API_KEY` only on the server. Profile privacy settings or upstream failures can make individual fields unavailable; the response reports that through `status` and `unavailableFields` without exposing raw upstream data. If that key is missing or rejected by Hypixel, the route returns HTTP 419 with a generic error detail. The top-level response status is `ok` or `stale` when served from the shared cache; clients can also inspect `X-Data-Stale`. Cache misses for the same normalized request share one in-flight upstream lookup, the upstream work is bounded per worker, and skill definitions are cached for one hour.
 
+`QUERY /api/v1/player-finance` accepts exactly `{playerUuid, profileId}` with either compact or dashed UUIDs and returns compact lowercase UUIDs. The public route uses the existing player rate limit and shared response cache. It first verifies through Hypixel `/v2/skyblock/profile` that the player belongs to the requested profile, then reads `/v2/skyblock/museum` with the server-side `MARKETGUARD_HYPIXEL_API_KEY`. Only the requested member is normalized. The response contains bank, purse, Hypixel's authoritative museum `value` and `appraisal`, donated position IDs, decoded special exhibit IDs, counts, and `knownTotal` only when bank, purse, and museum value are all available. Raw Coop members and Museum NBT are never returned. Privacy-disabled or temporarily unavailable Museum data produces `status: "partial"` with `unavailableFields` while preserving available bank and purse values. A missing or rejected server key returns HTTP 419. Costs, revenue, profit, and ROI are not available from these upstream fields and are intentionally not estimated or included.
+
 The protected Admin Analytics Metrics page includes the player route's cache-hit rate, average response time, active upstream loads, coalesced requests, and upstream failures. The Compose deployment already supplies its internal API metrics URL. Keep `WEB_CONCURRENCY=1` while this route uses the built-in process-local per-IP limiter; Redis shares cached responses but does not make that limiter distributed.
 
 Example `QUERY /api/v1/players` request:
@@ -314,6 +317,46 @@ QUERY /api/v1/players HTTP/1.1
 Content-Type: application/json
 
 {"players":[{"player":"Pankraz01","profileId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}
+```
+
+Example `QUERY /api/v1/player-finance` request:
+
+```http
+QUERY /api/v1/player-finance HTTP/1.1
+Content-Type: application/json
+
+{"playerUuid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profileId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+```
+
+Example complete player-finance result:
+
+```json
+{
+  "status": "ok",
+  "stale": false,
+  "fetchedAt": 1715478978620,
+  "playerUuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile": {
+    "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "name": "Apple",
+    "selected": true,
+    "finance": {
+      "bank": 125000000.0,
+      "purse": 4250000.5,
+      "museumValue": 85000000.0,
+      "knownTotal": 214250000.5
+    },
+    "museum": {
+      "value": 85000000.0,
+      "appraisal": true,
+      "donatedIds": ["ASPECT_OF_THE_END", "NECRON_HELMET"],
+      "donatedCount": 2,
+      "specialIds": ["DCTR_SPACE_HELM"],
+      "specialCount": 1
+    }
+  },
+  "unavailableFields": []
+}
 ```
 
 Example `QUERY /api/v2/lowestbin` request:

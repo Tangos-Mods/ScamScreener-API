@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gzip
+import hashlib
 import json
 import struct
 from collections.abc import Mapping
@@ -360,6 +361,483 @@ def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_sk
         ],
     }
     assert "input" not in response.json()["players"][0]
+
+
+def test_player_finance_returns_direct_museum_profile_without_raw_nbt(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    special_nbt = _encode_inventory_bytes([("DCTR_SPACE_HELM", "Dctr's Space Helmet", 1)])
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["api-key"] == "test-hypixel-key"
+        assert request.url.params["profile"] == profile_id
+        if request.url.path == "/v2/skyblock/profile":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "profile": {
+                        "profile_id": profile_id,
+                        "cute_name": "Apple",
+                        "selected": True,
+                        "banking": {"balance": 125_000_000},
+                        "members": {player_uuid: {"coin_purse": 4_250_000.5}},
+                    },
+                },
+            )
+        assert request.url.path == "/v2/skyblock/museum"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profile": {
+                    "value": 85_000_000,
+                    "appraisal": True,
+                    "items": {
+                        "NECRON_HELMET": {"items": {"data": "must-not-leak"}},
+                        "ASPECT_OF_THE_END": {},
+                    },
+                    "special": [{"items": {"data": special_nbt}}],
+                },
+            },
+        )
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+    )
+
+    app.state.rate_limiter = None
+    response = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {
+            "playerUuid": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+            "profileId": "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["fetchedAt"], int)
+    payload.pop("fetchedAt")
+    assert payload == {
+        "status": "ok",
+        "stale": False,
+        "playerUuid": player_uuid,
+        "profile": {
+            "id": profile_id,
+            "name": "Apple",
+            "selected": True,
+            "finance": {
+                "bank": 125_000_000.0,
+                "purse": 4_250_000.5,
+                "museumValue": 85_000_000.0,
+                "knownTotal": 214_250_000.5,
+            },
+            "museum": {
+                "value": 85_000_000.0,
+                "appraisal": True,
+                "donatedIds": ["ASPECT_OF_THE_END", "NECRON_HELMET"],
+                "donatedCount": 2,
+                "specialIds": ["DCTR_SPACE_HELM"],
+                "specialCount": 1,
+            },
+        },
+        "unavailableFields": [],
+    }
+    assert special_nbt not in response.text
+    assert "must-not-leak" not in response.text
+
+
+def test_player_finance_selects_only_requested_member_from_museum_map(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    other_uuid = "cccccccccccccccccccccccccccccccc"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/skyblock/profile":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "profile": {
+                        "profile_id": profile_id,
+                        "cute_name": "Apple",
+                        "selected": True,
+                        "banking": {"balance": 10},
+                        "members": {
+                            player_uuid: {"coin_purse": 20},
+                            other_uuid: {"coin_purse": 999_999},
+                        },
+                    },
+                },
+            )
+        assert request.url.path == "/v2/skyblock/museum"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profile": {
+                    player_uuid: {
+                        "value": 30,
+                        "appraisal": False,
+                        "items": {"REQUESTED_ITEM": {}},
+                        "special": [],
+                    },
+                    other_uuid: {
+                        "value": 999_999,
+                        "appraisal": True,
+                        "items": {"OTHER_MEMBER_SECRET_ITEM": {}},
+                        "special": ["OTHER_SPECIAL"],
+                    },
+                },
+            },
+        )
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+    )
+
+    app.state.rate_limiter = None
+    response = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": player_uuid, "profileId": profile_id},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["profile"]["finance"]["knownTotal"] == 60.0
+    assert payload["profile"]["museum"]["donatedIds"] == ["REQUESTED_ITEM"]
+    assert other_uuid not in response.text
+    assert "OTHER_MEMBER_SECRET_ITEM" not in response.text
+    assert "OTHER_SPECIAL" not in response.text
+
+
+def test_player_finance_rejects_non_member_without_fetching_museum(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    other_uuid = "cccccccccccccccccccccccccccccccc"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    museum_requested = False
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal museum_requested
+        if request.url.path == "/v2/skyblock/museum":
+            museum_requested = True
+            raise AssertionError("Museum must not be fetched for a player outside the profile.")
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "profile": {
+                    "profile_id": profile_id,
+                    "cute_name": "Apple",
+                    "selected": False,
+                    "banking": {"balance": 10},
+                    "members": {other_uuid: {"coin_purse": 20}},
+                },
+            },
+        )
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+    )
+
+    app.state.rate_limiter = None
+    response = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": player_uuid, "profileId": profile_id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "member_not_found"
+    assert response.json()["unavailableFields"] == ["profile.member", "finance", "museum"]
+    assert museum_requested is False
+
+
+def test_player_finance_keeps_bank_and_purse_when_museum_is_private_or_unavailable(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _exercise(museum_status: int, museum_payload: dict[str, Any]) -> dict[str, Any]:
+        async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v2/skyblock/profile":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "profile": {
+                            "profile_id": profile_id,
+                            "cute_name": "Apple",
+                            "selected": True,
+                            "banking": {"balance": 10},
+                            "members": {player_uuid: {"coin_purse": 20}},
+                        },
+                    },
+                )
+            return httpx.Response(museum_status, json=museum_payload)
+
+        settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+        marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+        app = create_marketguard_app(
+            settings=settings,
+            service=marketguard_service,
+            bazaar_service=marketguard_bazaar_service,
+            player_service=_marketguard_player_service(
+                settings,
+                _hypixel_handler,
+                _unexpected_mojang_handler,
+            ),
+        )
+        app.state.rate_limiter = None
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            response = await client.request(
+                "QUERY",
+                "/api/v1/player-finance",
+                json={"playerUuid": player_uuid, "profileId": profile_id},
+            )
+        assert response.status_code == 200
+        return response.json()
+
+    private_payload = asyncio.run(_exercise(200, {"success": True, "profile": {}}))
+    unavailable_payload = asyncio.run(_exercise(500, {"success": False, "cause": "temporary"}))
+
+    for payload in (private_payload, unavailable_payload):
+        assert payload["status"] == "partial"
+        assert payload["profile"]["finance"] == {
+            "bank": 10.0,
+            "purse": 20.0,
+            "museumValue": None,
+            "knownTotal": None,
+        }
+        assert payload["profile"]["museum"]["value"] is None
+        assert "museum.value" in payload["unavailableFields"]
+        assert "finance.knownTotal" in payload["unavailableFields"]
+
+
+def test_player_finance_validates_exact_uuid_request_and_preserves_key_auth(tmp_path: Path) -> None:
+    settings = _marketguard_settings(hypixel_api_key="")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+    )
+
+    app.state.rate_limiter = None
+    invalid = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": "not-a-uuid", "profileId": "b" * 32},
+    )
+    extra = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": "a" * 32, "profileId": "b" * 32, "secret": "never"},
+    )
+    missing_key = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": "a" * 32, "profileId": "b" * 32},
+    )
+
+    assert invalid.status_code == 422
+    assert extra.status_code == 422
+    assert missing_key.status_code == 419
+    assert missing_key.json() == {"detail": "Hypixel API key is missing or invalid."}
+
+
+def test_player_finance_returns_teapot_when_museum_rejects_server_key(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/skyblock/profile":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "profile": {
+                        "profile_id": profile_id,
+                        "cute_name": "Apple",
+                        "selected": True,
+                        "members": {player_uuid: {"coin_purse": 20}},
+                    },
+                },
+            )
+        return httpx.Response(403, json={"success": False, "cause": "Invalid API key"})
+
+    settings = _marketguard_settings(hypixel_api_key="rejected-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+    )
+
+    app.state.rate_limiter = None
+    response = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": player_uuid, "profileId": profile_id},
+    )
+
+    assert response.status_code == 419
+    assert response.json() == {"detail": "Hypixel API key is missing or invalid."}
+
+
+def test_player_finance_preserves_museum_rate_limit_retry_after(tmp_path: Path) -> None:
+    player_uuid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    profile_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    async def _hypixel_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/skyblock/profile":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "profile": {
+                        "profile_id": profile_id,
+                        "selected": True,
+                        "members": {player_uuid: {"coin_purse": 20}},
+                    },
+                },
+            )
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "17"},
+            json={"success": False, "cause": "rate limited"},
+        )
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=_marketguard_player_service(
+            settings,
+            _hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+    )
+
+    app.state.rate_limiter = None
+    response = _request_without_lifespan(
+        app,
+        "QUERY",
+        "/api/v1/player-finance",
+        {"playerUuid": player_uuid, "profileId": profile_id},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "17"
+    assert response.json() == {"detail": "Player finance data is temporarily unavailable."}
+
+
+def test_player_finance_coalesces_and_caches_normalized_requests() -> None:
+    class _CountingFinanceService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get_player_finance(self, query) -> dict[str, object]:
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return {
+                "status": "profile_not_found",
+                "stale": False,
+                "fetchedAt": 1_700_000_000_000,
+                "playerUuid": query.playerUuid,
+                "profile": None,
+                "unavailableFields": ["profile"],
+            }
+
+        async def aclose(self) -> None:
+            return None
+
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key", players_rate_limit_per_minute=0)
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
+    counting_service = _CountingFinanceService()
+    app = create_marketguard_app(
+        settings=settings,
+        service=marketguard_service,
+        bazaar_service=marketguard_bazaar_service,
+        player_service=counting_service,
+    )
+
+    dashed = {
+        "playerUuid": "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+        "profileId": "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB",
+    }
+    compact = {
+        "playerUuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }
+
+    async def _exercise_route() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first, second = await asyncio.gather(
+                client.request("QUERY", "/api/v1/player-finance", json=dashed),
+                client.request("QUERY", "/api/v1/player-finance", json=compact),
+            )
+            third = await client.request("QUERY", "/api/v1/player-finance", json=dashed)
+            normalized = f"{'a' * 32}:{'b' * 32}"
+            cache_key = "player-finance:v1:" + hashlib.sha256(normalized.encode("ascii")).hexdigest()
+            await app.state.marketguard_response_cache.set(
+                cache_key,
+                CachedResponse(payload=third.json(), is_stale=True),
+            )
+            fourth = await client.request("QUERY", "/api/v1/player-finance", json=compact)
+            return [first, second, third, fourth]
+
+    responses = asyncio.run(_exercise_route())
+
+    assert [response.status_code for response in responses] == [200, 200, 200, 200]
+    assert counting_service.calls == 1
+    assert all(response.json()["playerUuid"] == "a" * 32 for response in responses)
+    assert responses[-1].json()["stale"] is True
+    assert responses[-1].headers["x-data-stale"] == "true"
 
 
 def test_players_query_returns_status_per_unknown_or_unavailable_profile(tmp_path: Path) -> None:
@@ -732,12 +1210,9 @@ def test_lowestbin_v1_is_removed_from_openapi(tmp_path: Path) -> None:
         marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
-    with TestClient(app) as client:
-        response = client.get("/openapi.json")
-
-    assert response.status_code == 200
-    schema = response.json()
+    schema = app.openapi()
     assert "/api/v1/lowestbin" not in schema["paths"]
+    assert "/api/v1/player-finance" in schema["paths"]
     assert "deprecated" not in schema["paths"]["/api/v2/lowestbin"]["get"]
 
 
@@ -751,11 +1226,7 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
         marketguard_bazaar_service=marketguard_bazaar_service,
     )
 
-    with TestClient(app) as client:
-        response = client.get("/openapi.json")
-
-    assert response.status_code == 200
-    schema = response.json()
+    schema = app.openapi()
 
     bazaar_get = schema["paths"]["/api/v1/bazaar"]["get"]
     assert set(bazaar_get["responses"]) == {"200", "429", "503"}
@@ -775,10 +1246,25 @@ def test_marketguard_openapi_documents_response_codes_and_examples(tmp_path: Pat
     assert schemas["LowestBinV2Product"]["properties"]["avg7d"]["examples"][0] == 97500000
     assert schemas["LowestBinV2Product"]["properties"]["avg30d"]["examples"][0] == 96000000
     players_query = schema["paths"]["/api/v1/players"]["query"]
-    assert set(players_query["responses"]) == {"200", "422", "429", "503"}
+    assert set(players_query["responses"]) == {"200", "419", "422", "429", "503"}
     assert players_query["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/PlayersQueryResponse"
     )
+    player_finance_query = schema["paths"]["/api/v1/player-finance"]["query"]
+    assert set(player_finance_query["responses"]) == {"200", "419", "422", "429", "503"}
+    assert player_finance_query["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/PlayerFinanceResponse"
+    )
+    assert schemas["PlayerFinanceQuery"]["additionalProperties"] is False
+    assert set(schemas["PlayerFinanceResponse"]["properties"]["status"]["enum"]) == {
+        "ok",
+        "partial",
+        "profile_not_found",
+        "member_not_found",
+    }
+    assert "knownTotal" in schemas["PlayerFinanceValuesResponse"]["properties"]
+    assert "roi" not in schemas["PlayerFinanceValuesResponse"]["properties"]
+    assert "specialIds" in schemas["PlayerMuseumResponse"]["properties"]
     ready_get = schema["paths"]["/api/v1/ready"]["get"]
     assert set(ready_get["responses"]) == {"200", "206", "503"}
     assert ready_get["responses"]["200"]["description"] == "All MarketGuard datasets are fresh and available."
@@ -2005,6 +2491,21 @@ def _marketguard_player_service(
         hypixel_client=HypixelPlayerClient(settings, client=hypixel_client, close_client=True),
         mojang_client=MojangNameClient(settings, client=mojang_client, close_client=True),
     )
+
+
+async def _unexpected_mojang_handler(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"Unexpected Mojang request: {request.url}")
+
+
+def _request_without_lifespan(app, method: str, path: str, payload: dict[str, Any]) -> httpx.Response:
+    async def _request() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            return await client.request(method, path, json=payload)
+
+    return asyncio.run(_request())
 
 
 def _marketguard_settings(
