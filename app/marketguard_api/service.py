@@ -33,8 +33,43 @@ class LowestBinIndex:
     total_bin_auctions: int
 
 
-def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
-    """Decode every auction payload and index the lowest BIN price per item key.
+class LowestBinIndexBuilder:
+    """Accumulates the Lowest BIN index one auction page at a time.
+
+    The index itself is tiny - a few hundred kilobytes of item key to price.
+    What used to be expensive was the input: collecting all ~100k auction
+    payloads before indexing them pushed the process past 700 MiB and got it
+    OOM-killed on a 2 GiB host. Folding page by page keeps only the pages
+    currently in flight.
+    """
+
+    __slots__ = ("lowest_bins", "auctioneer_uuids", "item_names", "total_bin_auctions")
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.lowest_bins: dict[str, float] = {}
+        self.auctioneer_uuids: dict[str, str] = {}
+        self.item_names: dict[str, str] = {}
+        self.total_bin_auctions = 0
+
+    def add_page(self, auctions: list[dict[str, Any]]) -> None:
+        fold_auctions_into_index(auctions, self)
+
+    def build(self) -> LowestBinIndex:
+        return LowestBinIndex(
+            lowest_bins=dict(sorted(self.lowest_bins.items(), key=lambda item: item[0].lower())),
+            metadata=LowestBinSnapshotMetadata(
+                auctioneer_uuids=self.auctioneer_uuids,
+                item_names=self.item_names,
+            ),
+            total_bin_auctions=self.total_bin_auctions,
+        )
+
+
+def fold_auctions_into_index(auctions: list[dict[str, Any]], accumulator: LowestBinIndexBuilder) -> None:
+    """Decode one page of auctions and fold it into ``accumulator``.
 
     This is pure CPU work: a full Hypixel auction house is ~100k auctions, and
     each one costs a base64 decode, a gzip inflate and an NBT parse. Measured at
@@ -42,10 +77,10 @@ def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
     doing so stalls every other request, including the health and readiness
     probes. Callers run it through ``asyncio.to_thread``.
     """
-    lowest_bins: dict[str, float] = {}
-    auctioneer_uuids: dict[str, str] = {}
-    item_names: dict[str, str] = {}
-    total_bin_auctions = 0
+    lowest_bins = accumulator.lowest_bins
+    auctioneer_uuids = accumulator.auctioneer_uuids
+    item_names = accumulator.item_names
+    page_bin_auctions = 0
 
     for auction in auctions:
         if auction.get("bin") is not True:
@@ -59,7 +94,7 @@ def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
         if auctioneer_uuid is None:
             continue
 
-        total_bin_auctions += 1
+        page_bin_auctions += 1
         for item_key in resolved_item.keys:
             current_lowest = lowest_bins.get(item_key)
             if current_lowest is None or resolved_item.unit_price < current_lowest:
@@ -67,11 +102,38 @@ def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
                 auctioneer_uuids[item_key] = auctioneer_uuid
                 item_names[item_key] = _parse_item_name(auction.get("item_name"), item_key)
 
-    return LowestBinIndex(
-        lowest_bins=dict(sorted(lowest_bins.items(), key=lambda item: item[0].lower())),
-        metadata=LowestBinSnapshotMetadata(auctioneer_uuids=auctioneer_uuids, item_names=item_names),
-        total_bin_auctions=total_bin_auctions,
-    )
+    accumulator.total_bin_auctions += page_bin_auctions
+
+
+def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
+    """Index a complete auction list in one call.
+
+    Kept for callers that already hold every auction; the refresh path streams
+    instead, via :class:`LowestBinIndexBuilder`.
+    """
+    builder = LowestBinIndexBuilder()
+    builder.add_page(auctions)
+    return builder.build()
+
+
+class _IndexingPageConsumer:
+    """Feeds streamed auction pages into a :class:`LowestBinIndexBuilder`."""
+
+    __slots__ = ("_builder",)
+
+    def __init__(self) -> None:
+        self._builder = LowestBinIndexBuilder()
+
+    def reset(self) -> None:
+        self._builder.reset()
+
+    async def add_page(self, auctions: list[dict[str, Any]]) -> None:
+        # Decoding ~100k NBT item payloads is seconds of CPU; keep it off the
+        # event loop so health, readiness and every other route stay responsive.
+        await asyncio.to_thread(self._builder.add_page, auctions)
+
+    def build(self) -> LowestBinIndex:
+        return self._builder.build()
 
 
 class LowestBinService:
@@ -204,16 +266,18 @@ class LowestBinService:
             return snapshot, metadata
 
     async def _refresh_snapshot(self) -> tuple[LowestBinSnapshot, LowestBinSnapshotMetadata]:
-        auction_snapshot = await self._client.fetch_snapshot()
-        # Decoding ~100k NBT item payloads is seconds of CPU; keep it off the
-        # event loop so health, readiness and every other route stay responsive.
-        index = await asyncio.to_thread(build_lowestbin_index, auction_snapshot.auctions)
+        # Stream the auction house instead of collecting it: the payloads only
+        # matter while they are being decoded, and holding all of them at once
+        # is what made the host OOM-kill this process.
+        consumer = _IndexingPageConsumer()
+        summary = await self._client.stream_snapshot(consumer)
+        index = consumer.build()
 
         snapshot = LowestBinSnapshot(
             generated_at=_clock_datetime(self._clock()),
-            snapshot_last_updated=auction_snapshot.last_updated,
-            total_pages=auction_snapshot.total_pages,
-            total_auctions=len(auction_snapshot.auctions),
+            snapshot_last_updated=summary.last_updated,
+            total_pages=summary.total_pages,
+            total_auctions=summary.total_auctions,
             total_bin_auctions=index.total_bin_auctions,
             items=index.lowest_bins,
             is_stale=False,

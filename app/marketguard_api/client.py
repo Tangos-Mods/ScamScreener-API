@@ -6,7 +6,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -18,7 +18,7 @@ from .exceptions import (
     HypixelUpstreamError,
     MojangUpstreamError,
 )
-from .models import AuctionPage, AuctionSnapshot, BazaarProductSnapshot
+from .models import AuctionPage, AuctionSnapshot, AuctionSnapshotSummary, BazaarProductSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,31 @@ class _HypixelKeyRateLimiter:
 _HYPIXEL_KEY_RATE_LIMITER = _HypixelKeyRateLimiter()
 
 
+class AuctionPageConsumer(Protocol):
+    """Folds auction pages as they arrive so no caller holds the whole house.
+
+    ``reset`` is called before every snapshot attempt, because a drift retry
+    has to discard whatever the previous attempt already folded in.
+    """
+
+    def reset(self) -> None: ...
+
+    async def add_page(self, auctions: list[dict[str, Any]]) -> None: ...
+
+
+class _CollectingConsumer:
+    """Consumer that keeps every auction, for callers that really want them all."""
+
+    def __init__(self) -> None:
+        self.auctions: list[dict[str, Any]] = []
+
+    def reset(self) -> None:
+        self.auctions = []
+
+    async def add_page(self, auctions: list[dict[str, Any]]) -> None:
+        self.auctions.extend(auctions)
+
+
 class HypixelAuctionClient:
     def __init__(
         self,
@@ -98,11 +123,20 @@ class HypixelAuctionClient:
             await self._client.aclose()
             self._client = None
 
-    async def fetch_snapshot(self) -> AuctionSnapshot:
+    async def stream_snapshot(self, consumer: AuctionPageConsumer) -> AuctionSnapshotSummary:
+        """Fetch one consistent snapshot, handing each page to ``consumer``.
+
+        Pages are still fetched concurrently; they are just consumed as they
+        land instead of being collected first. Holding all ~100k auctions at
+        once cost roughly 700 MiB and got the process OOM-killed on a 2 GiB
+        host, so nothing here may keep a page alive past ``add_page``.
+        """
         last_error: Exception | None = None
         for attempt in range(1, self._settings.snapshot_retries + 1):
+            # A retry must not inherit the pages the failed attempt folded in.
+            consumer.reset()
             try:
-                return await self._fetch_consistent_snapshot()
+                return await self._stream_consistent_snapshot(consumer)
             except HypixelSnapshotDriftError as exc:
                 last_error = exc
                 if attempt >= self._settings.snapshot_retries:
@@ -114,32 +148,71 @@ class HypixelAuctionClient:
                 )
         raise HypixelUpstreamError("Unable to obtain a consistent Hypixel auction snapshot.") from last_error
 
-    async def _fetch_consistent_snapshot(self) -> AuctionSnapshot:
-        first_page = await self._fetch_page(0)
-        auctions = list(first_page.auctions)
-
-        if first_page.total_pages > 1:
-            semaphore = asyncio.Semaphore(self._settings.max_parallel_pages)
-
-            async def _fetch_followup(page_number: int) -> AuctionPage:
-                async with semaphore:
-                    page = await self._fetch_page(page_number)
-                if page.last_updated != first_page.last_updated:
-                    raise HypixelSnapshotDriftError(
-                        f"Hypixel snapshot drift detected between page 0 and page {page_number}."
-                    )
-                return page
-
-            pages = await asyncio.gather(
-                *(_fetch_followup(page_number) for page_number in range(1, first_page.total_pages))
-            )
-            for page in pages:
-                auctions.extend(page.auctions)
-
+    async def fetch_snapshot(self) -> AuctionSnapshot:
+        """Fetch a snapshot and keep every auction. Prefer ``stream_snapshot``."""
+        consumer = _CollectingConsumer()
+        summary = await self.stream_snapshot(consumer)
         return AuctionSnapshot(
-            total_pages=first_page.total_pages,
-            last_updated=first_page.last_updated,
-            auctions=auctions,
+            total_pages=summary.total_pages,
+            last_updated=summary.last_updated,
+            auctions=consumer.auctions,
+        )
+
+    async def _stream_consistent_snapshot(self, consumer: AuctionPageConsumer) -> AuctionSnapshotSummary:
+        first_page = await self._fetch_page(0)
+        total_pages = first_page.total_pages
+        last_updated = first_page.last_updated
+        total_auctions = len(first_page.auctions)
+        await consumer.add_page(first_page.auctions)
+        # Drop the first page before fetching the rest; the counts above are
+        # all that is still needed from it.
+        del first_page
+
+        if total_pages > 1:
+            # A fixed pool of workers, each holding at most one page: a worker
+            # only fetches its next page once it has handed the current one
+            # over. Scheduling every page up front instead would bound the
+            # concurrent *requests* but not the pages already fetched - those
+            # pile up while the consumer is busy decoding, which is exactly the
+            # accumulation this streaming path exists to avoid.
+            page_numbers = iter(range(1, total_pages))
+            # Consumption is serialised: the consumer folds into one shared
+            # index, and two folds at once would corrupt it.
+            consume_lock = asyncio.Lock()
+
+            async def _worker() -> None:
+                nonlocal total_auctions
+                # Advancing a plain iterator is safe here: asyncio runs these
+                # workers on one thread and never preempts between the next()
+                # and the await that follows it.
+                for page_number in page_numbers:
+                    page = await self._fetch_page(page_number)
+                    if page.last_updated != last_updated:
+                        raise HypixelSnapshotDriftError(
+                            f"Hypixel snapshot drift detected between page 0 and page {page_number}."
+                        )
+                    async with consume_lock:
+                        total_auctions += len(page.auctions)
+                        await consumer.add_page(page.auctions)
+                    # Drop it before fetching the next one.
+                    del page
+
+            worker_count = min(self._settings.max_parallel_pages, total_pages - 1)
+            workers = [asyncio.ensure_future(_worker()) for _ in range(worker_count)]
+            try:
+                await asyncio.gather(*workers)
+            finally:
+                # On drift (or any failure) the remaining workers would keep
+                # fetching pages nobody wants; stop them right away.
+                for worker in workers:
+                    if not worker.done():
+                        worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+        return AuctionSnapshotSummary(
+            total_pages=total_pages,
+            last_updated=last_updated,
+            total_auctions=total_auctions,
         )
 
     async def _fetch_page(self, page_number: int) -> AuctionPage:
