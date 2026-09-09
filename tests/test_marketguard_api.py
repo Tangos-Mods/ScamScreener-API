@@ -1046,9 +1046,12 @@ def test_players_query_returns_teapot_for_invalid_server_hypixel_api_key(tmp_pat
         return httpx.Response(403, json={"success": False, "cause": "Invalid API key"})
 
     settings = _marketguard_settings(hypixel_api_key="invalid-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
         marketguard_player_service=_marketguard_player_service(
             settings,
             _hypixel_handler,
@@ -1141,7 +1144,7 @@ def test_players_query_coalesces_identical_cache_misses_and_tracks_efficiency() 
         async def aclose(self) -> None:
             return None
 
-    settings = _marketguard_settings(players_rate_limit_per_minute=3)
+    settings = _marketguard_settings(players_rate_limit_per_minute=3, hypixel_api_key="test-key")
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     counting_player_service = _CountingPlayerService()
     app = create_marketguard_app(
