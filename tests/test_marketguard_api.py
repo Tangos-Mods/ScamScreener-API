@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import threading
+
 import httpx
 from fastapi.testclient import TestClient
 
@@ -24,6 +26,8 @@ from app.marketguard_api.main import create_marketguard_app
 from app.marketguard_api.models import BazaarSnapshot, LowestBinSnapshot
 from app.marketguard_api.nbt import parse_inventory_nbt
 from app.marketguard_api.player_service import PlayerService
+from app.marketguard_api.refresher import MarketSnapshotRefresher, build_refresh_supervisor
+from app.marketguard_api import service as service_module
 from app.marketguard_api.service import BazaarService, LowestBinService
 from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinSnapshot, snapshot_day_from_last_updated
 from app.training_hub.config.settings import TrainingHubSettings
@@ -1042,9 +1046,12 @@ def test_players_query_returns_teapot_for_invalid_server_hypixel_api_key(tmp_pat
         return httpx.Response(403, json={"success": False, "cause": "Invalid API key"})
 
     settings = _marketguard_settings(hypixel_api_key="invalid-hypixel-key")
+    marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     app = create_app(
         training_hub_settings=_training_hub_settings(tmp_path),
         marketguard_settings=settings,
+        marketguard_service=marketguard_service,
+        marketguard_bazaar_service=marketguard_bazaar_service,
         marketguard_player_service=_marketguard_player_service(
             settings,
             _hypixel_handler,
@@ -1137,7 +1144,7 @@ def test_players_query_coalesces_identical_cache_misses_and_tracks_efficiency() 
         async def aclose(self) -> None:
             return None
 
-    settings = _marketguard_settings(players_rate_limit_per_minute=3)
+    settings = _marketguard_settings(players_rate_limit_per_minute=3, hypixel_api_key="test-key")
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     counting_player_service = _CountingPlayerService()
     app = create_marketguard_app(
@@ -2523,13 +2530,23 @@ def _marketguard_settings(
     redis_enabled: bool = False,
     redis_url: str = "",
     trusted_proxies: set[str] | None = None,
+    background_refresh_enabled: bool = False,
+    background_refresh_interval_seconds: int = 0,
+    background_refresh_retry_seconds: int = 15,
+    readiness_fresh_grace_seconds: int = 0,
 ) -> MarketGuardSettings:
+    # Background refresh and the readiness grace window default to off here so
+    # tests drive the refresh path explicitly instead of racing a timer.
     return MarketGuardSettings(
         hypixel_api_base_url="https://api.hypixel.net/v2",
         database_url="mariadb://scamscreener:test@127.0.0.1:3306/scamscreener_hub",
         hypixel_api_key=hypixel_api_key,
         cache_ttl_seconds=cache_ttl_seconds,
         stale_if_error_seconds=stale_if_error_seconds,
+        background_refresh_enabled=background_refresh_enabled,
+        background_refresh_interval_seconds=background_refresh_interval_seconds,
+        background_refresh_retry_seconds=background_refresh_retry_seconds,
+        readiness_fresh_grace_seconds=readiness_fresh_grace_seconds,
         history_retention_days=history_retention_days,
         lowestbin_rate_limit_per_minute=lowestbin_rate_limit_per_minute,
         players_rate_limit_per_minute=players_rate_limit_per_minute,
@@ -2868,3 +2885,430 @@ def _compound_payload(*children: bytes) -> bytes:
 def _string_payload(value: str) -> bytes:
     encoded = value.encode("utf-8")
     return struct.pack(">H", len(encoded)) + encoded
+
+
+# --- Background snapshot refresh -------------------------------------------------
+#
+# Regression cover for the availability incident: the Hypixel refresh used to run
+# inside client requests and decoded every auction payload on the event loop, so
+# a single Uvicorn worker went unresponsive for seconds at a time on every cache
+# expiry - which the uptime monitor reported as the API being offline.
+
+
+def test_lowestbin_refresh_decodes_auctions_off_the_event_loop(monkeypatch) -> None:
+    """The auction decode must run on a worker thread, not the event loop.
+
+    Decoding a full auction house is seconds of base64 + gzip + NBT work. Running
+    it on the loop froze every other request, the container health probe and the
+    public readiness probe for the duration - the direct cause of the uptime
+    monitor reporting the API offline. Asserting on thread identity keeps this
+    deterministic instead of timing-dependent.
+    """
+    loop_thread_id = threading.get_ident()
+    observed: dict[str, Any] = {"decode_thread_id": None, "ticks_during_decode": 0}
+    decode_started = threading.Event()
+    decode_may_finish = threading.Event()
+    real_build_index = service_module.build_lowestbin_index
+
+    def _instrumented_build_index(auctions):
+        observed["decode_thread_id"] = threading.get_ident()
+        decode_started.set()
+        # Hold the decode open so the test can prove the loop still runs.
+        decode_may_finish.wait(timeout=5)
+        return real_build_index(auctions)
+
+    monkeypatch.setattr(service_module, "build_lowestbin_index", _instrumented_build_index)
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0),
+                "auctions": [_auction("HYPERION", 100_000_000, item_name="Hyperion")],
+            },
+        )
+
+    settings = _marketguard_settings()
+    service = _marketguard_service(settings, _handler)
+
+    async def _exercise() -> None:
+        refresh_task = asyncio.create_task(service.refresh())
+        # Tick the loop while the decode is blocked in its worker thread.
+        while not decode_started.is_set():
+            await asyncio.sleep(0.001)
+        for _ in range(10):
+            await asyncio.sleep(0.001)
+            observed["ticks_during_decode"] += 1
+        decode_may_finish.set()
+        await refresh_task
+        await service.aclose()
+
+    asyncio.run(_exercise())
+
+    assert observed["decode_thread_id"] is not None
+    assert observed["decode_thread_id"] != loop_thread_id
+    # The loop kept being scheduled the whole time the decode was running.
+    assert observed["ticks_during_decode"] == 10
+
+
+def test_background_refresher_keeps_requests_off_the_upstream_path() -> None:
+    """Once the refresher owns the refresh, a stale snapshot is served, not refetched."""
+    clock = [0.0]
+    request_count = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0) + request_count,
+                "auctions": [_auction("HYPERION", 100_000_000, item_name="Hyperion")],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=300)
+    service = _marketguard_service(settings, _handler, clock=lambda: clock[0])
+
+    async def _exercise() -> tuple[Any, int, int]:
+        refresher = MarketSnapshotRefresher("lowestbin", service, settings, sleep=_single_cycle_sleep())
+        await refresher.start()
+        assert await refresher.wait_for_first_refresh(timeout=5)
+        after_first_refresh = request_count
+
+        # Snapshot is now past its TTL, but the refresher owns refreshing it.
+        clock[0] = 60.0
+        snapshot = await service.get_lowest_bins()
+        served_without_upstream = request_count
+
+        await refresher.stop()
+        await service.aclose()
+        return snapshot, after_first_refresh, served_without_upstream
+
+    snapshot, after_first_refresh, served_without_upstream = asyncio.run(_exercise())
+
+    assert after_first_refresh >= 1
+    assert snapshot.items == {"HYPERION": 100_000_000.0}
+    assert snapshot.is_stale is True
+    # The request served the stored snapshot instead of paying for a fetch.
+    assert served_without_upstream == after_first_refresh
+
+
+def test_background_refresher_restores_inline_refresh_after_stop() -> None:
+    request_count = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0) + request_count,
+                "auctions": [_auction("HYPERION", 100_000_000, item_name="Hyperion")],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=300)
+    service = _marketguard_service(settings, _handler, clock=lambda: 0.0)
+
+    async def _exercise() -> tuple[bool, bool]:
+        refresher = MarketSnapshotRefresher("lowestbin", service, settings, sleep=_single_cycle_sleep())
+        await refresher.start()
+        assert await refresher.wait_for_first_refresh(timeout=5)
+        disabled_while_running = not service.inline_refresh_enabled
+        await refresher.stop()
+        enabled_after_stop = service.inline_refresh_enabled
+        await service.aclose()
+        return disabled_while_running, enabled_after_stop
+
+    disabled_while_running, enabled_after_stop = asyncio.run(_exercise())
+
+    assert disabled_while_running is True
+    # Nothing else refreshes after shutdown, so requests must be able to again.
+    assert enabled_after_stop is True
+
+
+def test_background_refresher_survives_upstream_failure_and_retries_sooner() -> None:
+    attempts = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, json={"success": False, "cause": "maintenance"})
+
+    settings = _marketguard_settings(
+        cache_ttl_seconds=60,
+        stale_if_error_seconds=300,
+        background_refresh_retry_seconds=15,
+    )
+    service = _marketguard_service(settings, _handler, clock=lambda: 0.0)
+
+    async def _exercise() -> tuple[bool, float]:
+        refresher = MarketSnapshotRefresher("lowestbin", service, settings, sleep=_single_cycle_sleep())
+        await refresher.start()
+        assert await refresher.wait_for_first_refresh(timeout=5)
+        # A failed refresh must not hand the request path off to a snapshot that
+        # does not exist yet.
+        inline_still_enabled = service.inline_refresh_enabled
+        retry_delay = refresher._next_delay_seconds(False)
+        await refresher.stop()
+        await service.aclose()
+        return inline_still_enabled, retry_delay
+
+    inline_still_enabled, retry_delay = asyncio.run(_exercise())
+
+    assert attempts >= 1
+    assert inline_still_enabled is True
+    assert retry_delay == 15.0
+
+
+def test_background_refresher_interval_defaults_to_cache_ttl_with_jitter() -> None:
+    settings = _marketguard_settings(cache_ttl_seconds=45)
+    assert settings.effective_background_refresh_interval_seconds == 45
+
+    pinned = _marketguard_settings(cache_ttl_seconds=45, background_refresh_interval_seconds=20)
+    assert pinned.effective_background_refresh_interval_seconds == 20
+
+    service = _NoopRefreshableService()
+    refresher = MarketSnapshotRefresher("lowestbin", service, settings, sleep=_single_cycle_sleep())
+    delay = refresher._next_delay_seconds(True)
+    # Jitter keeps multiple instances from hitting Hypixel in lockstep.
+    assert 45.0 <= delay <= 45.0 * 1.1
+
+
+def test_build_refresh_supervisor_respects_the_disable_switch() -> None:
+    disabled = _marketguard_settings(background_refresh_enabled=False)
+    assert (
+        build_refresh_supervisor(
+            disabled,
+            lowestbin_service=_NoopRefreshableService(),
+            bazaar_service=_NoopRefreshableService(),
+        )
+        is None
+    )
+
+    enabled = _marketguard_settings(background_refresh_enabled=True)
+    supervisor = build_refresh_supervisor(
+        enabled,
+        lowestbin_service=_NoopRefreshableService(),
+        bazaar_service=_NoopRefreshableService(),
+    )
+    assert supervisor is not None
+    assert [refresher.name for refresher in supervisor.refreshers] == ["lowestbin", "bazaar"]
+
+
+def test_bazaar_background_refresh_serves_stale_without_upstream_call() -> None:
+    clock = [0.0]
+    request_count = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0) + request_count,
+                "products": {
+                    "ENCHANTED_DIAMOND": {
+                        "quick_status": {
+                            "buyPrice": 100.0,
+                            "sellPrice": 90.0,
+                            "buyVolume": 10,
+                            "sellVolume": 20,
+                            "buyMovingWeek": 30,
+                            "sellMovingWeek": 40,
+                        }
+                    }
+                },
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=5, stale_if_error_seconds=300)
+    service = _marketguard_bazaar_service(settings, _handler, clock=lambda: clock[0])
+
+    async def _exercise() -> tuple[Any, int, int]:
+        refresher = MarketSnapshotRefresher("bazaar", service, settings, sleep=_single_cycle_sleep())
+        await refresher.start()
+        assert await refresher.wait_for_first_refresh(timeout=5)
+        after_first_refresh = request_count
+
+        clock[0] = 60.0
+        snapshot = await service.get_bazaar()
+        served_without_upstream = request_count
+
+        await refresher.stop()
+        await service.aclose()
+        return snapshot, after_first_refresh, served_without_upstream
+
+    snapshot, after_first_refresh, served_without_upstream = asyncio.run(_exercise())
+
+    assert after_first_refresh >= 1
+    assert snapshot.is_stale is True
+    assert served_without_upstream == after_first_refresh
+
+
+def test_concurrent_lowestbin_requests_trigger_a_single_upstream_refresh() -> None:
+    """A cold cache under load must not fan out into one Hypixel fetch per caller."""
+    request_count = 0
+
+    async def _handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        await asyncio.sleep(0.02)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0),
+                "auctions": [_auction("HYPERION", 100_000_000, item_name="Hyperion")],
+            },
+        )
+
+    settings = _marketguard_settings(cache_ttl_seconds=60)
+    service = _marketguard_service(settings, _handler, clock=lambda: 0.0)
+
+    async def _exercise() -> list[Any]:
+        snapshots = await asyncio.gather(*(service.get_lowest_bins() for _ in range(8)))
+        await service.aclose()
+        return snapshots
+
+    snapshots = asyncio.run(_exercise())
+
+    assert all(snapshot.items == {"HYPERION": 100_000_000.0} for snapshot in snapshots)
+    assert request_count == 1
+
+
+def test_readiness_grace_window_keeps_a_normally_aged_snapshot_ready() -> None:
+    """Hypixel regenerates roughly once a minute, so TTL+15s is healthy, not degraded."""
+    snapshot_age_seconds = 75
+
+    def _build_app(settings: MarketGuardSettings):
+        store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+        _seed_lowestbin_snapshot(
+            store,
+            snapshot_last_updated=1_700_000_000_000,
+            item_prices={"HYPERION": 98_000_000.0},
+            generated_at=_relative_snapshot_time(snapshot_age_seconds),
+        )
+        _seed_bazaar_snapshot(
+            store,
+            snapshot_last_updated=1_700_000_100_000,
+            generated_at=_relative_snapshot_time(snapshot_age_seconds),
+        )
+        return create_marketguard_app(
+            settings=settings,
+            service=_ReadinessLowestBinService(store),
+            bazaar_service=_ReadinessBazaarService(store),
+        )
+
+    graced_app = _build_app(_marketguard_settings(cache_ttl_seconds=60, readiness_fresh_grace_seconds=120))
+    with TestClient(graced_app) as client:
+        graced = client.get("/api/v1/ready")
+
+    strict_app = _build_app(_marketguard_settings(cache_ttl_seconds=60, readiness_fresh_grace_seconds=0))
+    with TestClient(strict_app) as strict_client:
+        strict = strict_client.get("/api/v1/ready")
+
+    assert graced.status_code == 200
+    assert graced.json()["status"] == "ok"
+    assert graced.headers["x-readiness-status"] == "ok"
+    # Without the grace window the same snapshot reads as degraded, which is what
+    # made uptime probes requiring HTTP 200 flap between ready and degraded.
+    assert strict.status_code == 206
+    assert strict.json()["status"] == "degraded"
+
+
+def _single_cycle_sleep():
+    """Sleep stub that lets the refresher run exactly one refresh.
+
+    The initial jitter returns immediately; every later delay parks until the
+    task is cancelled by stop(). Without the park the refresher would spin on a
+    zero-length sleep and race the assertions with extra upstream calls.
+    """
+
+    calls = {"count": 0}
+
+    async def _sleep(_delay: float) -> None:
+        calls["count"] += 1
+        if calls["count"] <= 1:
+            return
+        await asyncio.Event().wait()
+
+    return _sleep
+
+
+class _NoopRefreshableService:
+    def __init__(self) -> None:
+        self.refresh_count = 0
+        self.inline_refresh_enabled = True
+
+    async def refresh(self) -> None:
+        self.refresh_count += 1
+
+    def disable_inline_refresh(self) -> None:
+        self.inline_refresh_enabled = False
+
+    def enable_inline_refresh(self) -> None:
+        self.inline_refresh_enabled = True
+
+
+def test_marketguard_app_starts_and_stops_the_background_refreshers() -> None:
+    """The app lifespan must actually own the refreshers, not just build them."""
+    settings = _marketguard_settings(background_refresh_enabled=True, cache_ttl_seconds=60)
+    store = _MemoryMarketGuardStorage(retention_days=settings.history_retention_days)
+
+    async def _lowestbin_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 1,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0),
+                "auctions": [_auction("HYPERION", 100_000_000, item_name="Hyperion")],
+            },
+        )
+
+    async def _bazaar_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "lastUpdated": _epoch_millis(2025, 3, 1, 12, 0),
+                "products": {},
+            },
+        )
+
+    app = create_marketguard_app(
+        settings=settings,
+        service=_marketguard_service(settings, _lowestbin_handler, storage=store),
+        bazaar_service=_marketguard_bazaar_service(settings, _bazaar_handler, storage=store),
+        player_service=_marketguard_player_service(
+            settings,
+            _unexpected_hypixel_handler,
+            _unexpected_mojang_handler,
+        ),
+        response_cache=None,
+    )
+
+    supervisor = app.state.marketguard_refresh_supervisor
+    assert supervisor is not None
+    assert [refresher.name for refresher in supervisor.refreshers] == ["lowestbin", "bazaar"]
+
+    with TestClient(app):
+        assert all(refresher.is_running for refresher in supervisor.refreshers)
+
+    # Shutdown must stop every refresher; a leaked task would keep hitting
+    # Hypixel after the app is gone.
+    assert not any(refresher.is_running for refresher in supervisor.refreshers)
+
+
+async def _unexpected_hypixel_handler(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"Unexpected Hypixel request: {request.url}")

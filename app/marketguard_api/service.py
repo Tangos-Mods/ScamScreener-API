@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
+from typing import Any
 
 from .client import HypixelAuctionClient, HypixelBazaarClient
 from .config import MarketGuardSettings
@@ -15,6 +16,62 @@ from .models import BazaarSnapshot, LowestBinSnapshot, LowestBinV2Entry, LowestB
 from .storage import MarketGuardStorage, StoredLowestBinSnapshot, snapshot_day_from_last_updated
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LowestBinSnapshotMetadata:
+    """Per-item metadata belonging to exactly one Lowest BIN snapshot."""
+
+    auctioneer_uuids: dict[str, str]
+    item_names: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class LowestBinIndex:
+    lowest_bins: dict[str, float]
+    metadata: LowestBinSnapshotMetadata
+    total_bin_auctions: int
+
+
+def build_lowestbin_index(auctions: list[dict[str, Any]]) -> LowestBinIndex:
+    """Decode every auction payload and index the lowest BIN price per item key.
+
+    This is pure CPU work: a full Hypixel auction house is ~100k auctions, and
+    each one costs a base64 decode, a gzip inflate and an NBT parse. Measured at
+    5-10 seconds for a full house, so it must never run on the event loop -
+    doing so stalls every other request, including the health and readiness
+    probes. Callers run it through ``asyncio.to_thread``.
+    """
+    lowest_bins: dict[str, float] = {}
+    auctioneer_uuids: dict[str, str] = {}
+    item_names: dict[str, str] = {}
+    total_bin_auctions = 0
+
+    for auction in auctions:
+        if auction.get("bin") is not True:
+            continue
+
+        resolved_item = resolve_auction_item(auction)
+        if resolved_item is None:
+            continue
+
+        auctioneer_uuid = _parse_auctioneer_uuid(auction.get("auctioneer"))
+        if auctioneer_uuid is None:
+            continue
+
+        total_bin_auctions += 1
+        for item_key in resolved_item.keys:
+            current_lowest = lowest_bins.get(item_key)
+            if current_lowest is None or resolved_item.unit_price < current_lowest:
+                lowest_bins[item_key] = resolved_item.unit_price
+                auctioneer_uuids[item_key] = auctioneer_uuid
+                item_names[item_key] = _parse_item_name(auction.get("item_name"), item_key)
+
+    return LowestBinIndex(
+        lowest_bins=dict(sorted(lowest_bins.items(), key=lambda item: item[0].lower())),
+        metadata=LowestBinSnapshotMetadata(auctioneer_uuids=auctioneer_uuids, item_names=item_names),
+        total_bin_auctions=total_bin_auctions,
+    )
 
 
 class LowestBinService:
@@ -29,39 +86,32 @@ class LowestBinService:
         self._client = client or HypixelAuctionClient(settings)
         self._clock = clock or _utc_epoch_seconds
         self._storage = storage or MarketGuardStorage(settings.database_url, settings.history_retention_days)
-        self._last_auctioneer_uuids: dict[str, str] = {}
-        self._last_item_names: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # Flipped on by the background refresher. While it owns the upstream
+        # fetch, a request must never trigger one itself: a Hypixel refresh
+        # costs tens of seconds, and paying it inside a request is what turned
+        # a slow refresh into an outage for every other caller.
+        self._inline_refresh_enabled = True
+
+    @property
+    def inline_refresh_enabled(self) -> bool:
+        return self._inline_refresh_enabled
+
+    def disable_inline_refresh(self) -> None:
+        self._inline_refresh_enabled = False
+
+    def enable_inline_refresh(self) -> None:
+        self._inline_refresh_enabled = True
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
     async def get_lowest_bins(self) -> LowestBinSnapshot:
-        async with self._lock:
-            now = self._clock()
-            stored = await asyncio.to_thread(self._storage.read_lowestbin_snapshot)
-            if stored is not None:
-                self._remember_snapshot_metadata(stored)
-                if _is_snapshot_fresh(stored.snapshot, now, self._settings.cache_ttl_seconds):
-                    return stored.snapshot
-
-            try:
-                snapshot = await self._refresh_snapshot()
-            except HypixelUpstreamError:
-                if stored is not None and _can_serve_snapshot_stale(
-                    stored.snapshot,
-                    now,
-                    self._settings.stale_if_error_seconds,
-                ):
-                    logger.warning("Serving stale MarketGuard Lowest BIN data from MariaDB after Hypixel refresh failure.")
-                    return replace(stored.snapshot, is_stale=True)
-                raise
-
-            await self._persist_snapshot(snapshot)
-            return snapshot
+        snapshot, _metadata = await self._load_snapshot()
+        return snapshot
 
     async def get_lowest_bins_v2(self) -> LowestBinV2Snapshot:
-        snapshot = await self.get_lowest_bins()
+        snapshot, metadata = await self._load_snapshot()
         anchor_day = snapshot_day_from_last_updated(snapshot.snapshot_last_updated)
         averages = await asyncio.to_thread(
             self._storage.get_averages,
@@ -71,14 +121,14 @@ class LowestBinService:
         items: dict[str, LowestBinV2Entry] = {}
 
         for item_key, price in snapshot.items.items():
-            auctioneer_uuid = self._find_auctioneer_uuid_for_price(item_key, price)
+            auctioneer_uuid = _lookup_auctioneer_uuid(metadata, item_key, price)
             if auctioneer_uuid is None:
                 continue
             average_window = averages.get(item_key)
             items[item_key] = LowestBinV2Entry(
                 price=price,
                 auctioneer_uuid=auctioneer_uuid,
-                item_name=self._find_item_name_for_key(item_key),
+                item_name=_lookup_item_name(metadata, item_key),
                 avg_7d=None if average_window is None else average_window.avg_7d,
                 avg_30d=None if average_window is None else average_window.avg_30d,
             )
@@ -93,53 +143,94 @@ class LowestBinService:
             is_stale=snapshot.is_stale,
         )
 
-    async def _refresh_snapshot(self) -> LowestBinSnapshot:
+    async def refresh(self) -> LowestBinSnapshot:
+        """Fetch a fresh snapshot from Hypixel and persist it.
+
+        Entry point for the background refresher. Serialized against inline
+        refreshes by the same lock so only one upstream fetch is ever in flight.
+        """
+        async with self._lock:
+            snapshot, metadata = await self._refresh_snapshot()
+            await self._persist_snapshot(snapshot, metadata)
+            return snapshot
+
+    async def _load_snapshot(self) -> tuple[LowestBinSnapshot, LowestBinSnapshotMetadata]:
+        """Serve the current snapshot, refreshing inline only when unavoidable.
+
+        The read path deliberately takes no lock: a stored snapshot is served
+        straight from MariaDB even while a refresh is running, so a slow Hypixel
+        fetch can never queue up client requests behind it.
+        """
+        now = self._clock()
+        stored = await asyncio.to_thread(self._storage.read_lowestbin_snapshot)
+        if stored is not None:
+            metadata = _metadata_from_stored(stored)
+            if _is_snapshot_fresh(stored.snapshot, now, self._settings.cache_ttl_seconds):
+                return stored.snapshot, metadata
+            if not self._inline_refresh_enabled and _can_serve_snapshot_stale(
+                stored.snapshot,
+                now,
+                self._settings.stale_if_error_seconds,
+            ):
+                # The refresher is behind (Hypixel slow or down). Serving the
+                # last good snapshot beats making the caller wait for upstream.
+                return replace(stored.snapshot, is_stale=True), metadata
+
+        async with self._lock:
+            # Another caller may have refreshed while we waited for the lock.
+            recheck_now = self._clock()
+            recheck = await asyncio.to_thread(self._storage.read_lowestbin_snapshot)
+            if recheck is not None and _is_snapshot_fresh(
+                recheck.snapshot,
+                recheck_now,
+                self._settings.cache_ttl_seconds,
+            ):
+                return recheck.snapshot, _metadata_from_stored(recheck)
+
+            fallback = recheck if recheck is not None else stored
+            try:
+                snapshot, metadata = await self._refresh_snapshot()
+            except HypixelUpstreamError:
+                if fallback is not None and _can_serve_snapshot_stale(
+                    fallback.snapshot,
+                    recheck_now,
+                    self._settings.stale_if_error_seconds,
+                ):
+                    logger.warning("Serving stale MarketGuard Lowest BIN data from MariaDB after Hypixel refresh failure.")
+                    return replace(fallback.snapshot, is_stale=True), _metadata_from_stored(fallback)
+                raise
+
+            await self._persist_snapshot(snapshot, metadata)
+            return snapshot, metadata
+
+    async def _refresh_snapshot(self) -> tuple[LowestBinSnapshot, LowestBinSnapshotMetadata]:
         auction_snapshot = await self._client.fetch_snapshot()
-        lowest_bins: dict[str, float] = {}
-        auctioneer_uuids: dict[str, str] = {}
-        item_names: dict[str, str] = {}
-        total_bin_auctions = 0
-
-        for auction in auction_snapshot.auctions:
-            if auction.get("bin") is not True:
-                continue
-
-            resolved_item = resolve_auction_item(auction)
-            if resolved_item is None:
-                continue
-
-            auctioneer_uuid = _parse_auctioneer_uuid(auction.get("auctioneer"))
-            if auctioneer_uuid is None:
-                continue
-
-            total_bin_auctions += 1
-            for item_key in resolved_item.keys:
-                current_lowest = lowest_bins.get(item_key)
-                if current_lowest is None or resolved_item.unit_price < current_lowest:
-                    lowest_bins[item_key] = resolved_item.unit_price
-                    auctioneer_uuids[item_key] = auctioneer_uuid
-                    item_names[item_key] = _parse_item_name(auction.get("item_name"), item_key)
+        # Decoding ~100k NBT item payloads is seconds of CPU; keep it off the
+        # event loop so health, readiness and every other route stay responsive.
+        index = await asyncio.to_thread(build_lowestbin_index, auction_snapshot.auctions)
 
         snapshot = LowestBinSnapshot(
             generated_at=_clock_datetime(self._clock()),
             snapshot_last_updated=auction_snapshot.last_updated,
             total_pages=auction_snapshot.total_pages,
             total_auctions=len(auction_snapshot.auctions),
-            total_bin_auctions=total_bin_auctions,
-            items=dict(sorted(lowest_bins.items(), key=lambda item: item[0].lower())),
+            total_bin_auctions=index.total_bin_auctions,
+            items=index.lowest_bins,
             is_stale=False,
         )
-        self._last_auctioneer_uuids = auctioneer_uuids
-        self._last_item_names = item_names
-        return snapshot
+        return snapshot, index.metadata
 
-    async def _persist_snapshot(self, snapshot: LowestBinSnapshot) -> None:
+    async def _persist_snapshot(
+        self,
+        snapshot: LowestBinSnapshot,
+        metadata: LowestBinSnapshotMetadata,
+    ) -> None:
         try:
             await asyncio.to_thread(
                 self._storage.write_lowestbin_snapshot,
                 snapshot,
-                auctioneer_uuids=self._last_auctioneer_uuids,
-                item_names=self._last_item_names,
+                auctioneer_uuids=metadata.auctioneer_uuids,
+                item_names=metadata.item_names,
             )
         except MarketGuardStorageError:
             logger.exception(
@@ -148,25 +239,28 @@ class LowestBinService:
             )
             raise
 
-    def _remember_snapshot_metadata(self, stored: StoredLowestBinSnapshot) -> None:
-        self._last_auctioneer_uuids = dict(stored.auctioneer_uuids)
-        self._last_item_names = dict(stored.item_names)
 
-    def _find_auctioneer_uuid_for_price(self, item_key: str, price: float) -> str | None:
-        auctioneer_uuids = getattr(self, "_last_auctioneer_uuids", {})
-        auctioneer_uuid = auctioneer_uuids.get(item_key)
-        if not auctioneer_uuid:
-            logger.warning("Missing auctioneer UUID for Lowest BIN key %s at price %s.", item_key, price)
-            return None
-        return auctioneer_uuid
+def _metadata_from_stored(stored: StoredLowestBinSnapshot) -> LowestBinSnapshotMetadata:
+    return LowestBinSnapshotMetadata(
+        auctioneer_uuids=dict(stored.auctioneer_uuids),
+        item_names=dict(stored.item_names),
+    )
 
-    def _find_item_name_for_key(self, item_key: str) -> str:
-        item_names = getattr(self, "_last_item_names", {})
-        item_name = item_names.get(item_key)
-        if item_name:
-            return item_name
-        logger.warning("Missing item_name for Lowest BIN key %s.", item_key)
-        return item_key
+
+def _lookup_auctioneer_uuid(metadata: LowestBinSnapshotMetadata, item_key: str, price: float) -> str | None:
+    auctioneer_uuid = metadata.auctioneer_uuids.get(item_key)
+    if not auctioneer_uuid:
+        logger.warning("Missing auctioneer UUID for Lowest BIN key %s at price %s.", item_key, price)
+        return None
+    return auctioneer_uuid
+
+
+def _lookup_item_name(metadata: LowestBinSnapshotMetadata, item_key: str) -> str:
+    item_name = metadata.item_names.get(item_key)
+    if item_name:
+        return item_name
+    logger.warning("Missing item_name for Lowest BIN key %s.", item_key)
+    return item_key
 
 
 class BazaarService:
@@ -182,31 +276,69 @@ class BazaarService:
         self._clock = clock or _utc_epoch_seconds
         self._storage = storage or MarketGuardStorage(settings.database_url, settings.history_retention_days)
         self._lock = asyncio.Lock()
+        self._inline_refresh_enabled = True
+
+    @property
+    def inline_refresh_enabled(self) -> bool:
+        return self._inline_refresh_enabled
+
+    def disable_inline_refresh(self) -> None:
+        self._inline_refresh_enabled = False
+
+    def enable_inline_refresh(self) -> None:
+        self._inline_refresh_enabled = True
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def get_bazaar(self) -> BazaarSnapshot:
+    async def refresh(self) -> BazaarSnapshot:
+        """Fetch fresh bazaar data from Hypixel and persist it."""
         async with self._lock:
-            now = self._clock()
-            cached = await asyncio.to_thread(self._storage.read_bazaar_snapshot)
-            if cached is not None and _is_snapshot_fresh(cached, now, self._settings.cache_ttl_seconds):
-                return cached
+            snapshot = await self._refresh_snapshot()
+            await self._persist_snapshot(snapshot)
+            return snapshot
 
+    async def get_bazaar(self) -> BazaarSnapshot:
+        now = self._clock()
+        cached = await asyncio.to_thread(self._storage.read_bazaar_snapshot)
+        if cached is not None:
+            if _is_snapshot_fresh(cached, now, self._settings.cache_ttl_seconds):
+                return cached
+            if not self._inline_refresh_enabled and _can_serve_snapshot_stale(
+                cached,
+                now,
+                self._settings.stale_if_error_seconds,
+            ):
+                return replace(cached, is_stale=True)
+
+        async with self._lock:
+            recheck_now = self._clock()
+            recheck = await asyncio.to_thread(self._storage.read_bazaar_snapshot)
+            if recheck is not None and _is_snapshot_fresh(recheck, recheck_now, self._settings.cache_ttl_seconds):
+                return recheck
+
+            fallback = recheck if recheck is not None else cached
             try:
                 snapshot = await self._refresh_snapshot()
             except HypixelUpstreamError:
-                if cached is not None and _can_serve_snapshot_stale(cached, now, self._settings.stale_if_error_seconds):
+                if fallback is not None and _can_serve_snapshot_stale(
+                    fallback,
+                    recheck_now,
+                    self._settings.stale_if_error_seconds,
+                ):
                     logger.warning("Serving stale MarketGuard bazaar data from MariaDB after Hypixel refresh failure.")
-                    return replace(cached, is_stale=True)
+                    return replace(fallback, is_stale=True)
                 raise
 
-            try:
-                await asyncio.to_thread(self._storage.write_bazaar_snapshot, snapshot)
-            except MarketGuardStorageError:
-                logger.exception("Failed to persist MarketGuard bazaar snapshot %s.", snapshot.snapshot_last_updated)
-                raise
+            await self._persist_snapshot(snapshot)
             return snapshot
+
+    async def _persist_snapshot(self, snapshot: BazaarSnapshot) -> None:
+        try:
+            await asyncio.to_thread(self._storage.write_bazaar_snapshot, snapshot)
+        except MarketGuardStorageError:
+            logger.exception("Failed to persist MarketGuard bazaar snapshot %s.", snapshot.snapshot_last_updated)
+            raise
 
     async def _refresh_snapshot(self) -> BazaarSnapshot:
         bazaar_snapshot = await self._client.fetch_snapshot()
