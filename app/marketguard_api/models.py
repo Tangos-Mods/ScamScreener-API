@@ -29,6 +29,19 @@ class AuctionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class AuctionSnapshotSummary:
+    """What is left of an auction snapshot once its pages have been consumed.
+
+    Streaming the auction house means no caller holds the ~100k auction
+    payloads afterwards, so the counts have to be carried out separately.
+    """
+
+    total_pages: int
+    last_updated: int
+    total_auctions: int
+
+
+@dataclass(frozen=True, slots=True)
 class BazaarProductSnapshot:
     last_updated: int
     products: dict[str, dict[str, Any]]

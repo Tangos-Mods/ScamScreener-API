@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import gzip
 import hashlib
 import json
 import struct
+import weakref
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -27,6 +29,7 @@ from app.marketguard_api.client import (
     _HypixelKeyRateLimiter,
 )
 from app.marketguard_api.exceptions import HypixelRateLimitError
+from app.marketguard_api.models import AuctionPage
 from app.marketguard_api.config import MarketGuardSettings
 from app.marketguard_api.item_keys import resolve_auction_item
 from app.marketguard_api.main import create_marketguard_app
@@ -2935,16 +2938,16 @@ def test_lowestbin_refresh_decodes_auctions_off_the_event_loop(monkeypatch) -> N
     observed: dict[str, Any] = {"decode_thread_id": None, "ticks_during_decode": 0}
     decode_started = threading.Event()
     decode_may_finish = threading.Event()
-    real_build_index = service_module.build_lowestbin_index
+    real_fold = service_module.fold_auctions_into_index
 
-    def _instrumented_build_index(auctions):
+    def _instrumented_fold(auctions, accumulator):
         observed["decode_thread_id"] = threading.get_ident()
         decode_started.set()
         # Hold the decode open so the test can prove the loop still runs.
         decode_may_finish.wait(timeout=5)
-        return real_build_index(auctions)
+        return real_fold(auctions, accumulator)
 
-    monkeypatch.setattr(service_module, "build_lowestbin_index", _instrumented_build_index)
+    monkeypatch.setattr(service_module, "fold_auctions_into_index", _instrumented_fold)
 
     async def _handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -3339,3 +3342,223 @@ def test_marketguard_app_starts_and_stops_the_background_refreshers() -> None:
 
 async def _unexpected_hypixel_handler(request: httpx.Request) -> httpx.Response:
     raise AssertionError(f"Unexpected Hypixel request: {request.url}")
+
+
+# --- Streaming auction snapshots -------------------------------------------------
+#
+# Regression cover for the OOM incident: the refresh used to collect every page
+# of the auction house before indexing it. A full house is ~100k auctions whose
+# payloads carry base64 NBT blobs, which put the process around 700 MiB. On a
+# 2 GiB host the kernel OOM-killed uvicorn - PID 1 in the container - roughly
+# every five minutes, which the uptime monitor reported as hours of downtime.
+
+
+class _TrackedAuctions(list):
+    """A weakref-able auction list, so a test can prove a page was released."""
+
+
+class _CountingPageConsumer:
+    """Consumes pages without keeping them, and counts what it saw."""
+
+    def __init__(self) -> None:
+        self.pages = 0
+        self.auctions = 0
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.pages = 0
+        self.auctions = 0
+        self.resets += 1
+
+    async def add_page(self, auctions) -> None:
+        self.pages += 1
+        self.auctions += len(auctions)
+
+
+def test_auction_snapshot_stream_releases_every_page() -> None:
+    """No auction page may outlive the streaming fetch that produced it.
+
+    This is the whole point of streaming: holding all pages at once is what
+    made the host OOM-kill the API. Weak references to the page payloads prove
+    the client kept none of them once the snapshot finished.
+    """
+    last_updated = _epoch_millis(2025, 3, 1, 12, 0)
+    total_pages = 6
+    page_refs: list[weakref.ReferenceType] = []
+
+    async def _fetch_page(page_number: int) -> AuctionPage:
+        auctions = _TrackedAuctions([_auction(f"ITEM_{page_number}", 1_000 + page_number)])
+        page_refs.append(weakref.ref(auctions))
+        return AuctionPage(
+            page_number=page_number,
+            total_pages=total_pages,
+            last_updated=last_updated,
+            auctions=auctions,
+        )
+
+    client = HypixelAuctionClient(_marketguard_settings())
+    client._fetch_page = _fetch_page  # type: ignore[method-assign]
+    consumer = _CountingPageConsumer()
+
+    summary = asyncio.run(client.stream_snapshot(consumer))
+
+    assert summary.total_pages == total_pages
+    assert summary.total_auctions == total_pages
+    assert consumer.pages == total_pages
+    assert len(page_refs) == total_pages
+
+    gc.collect()
+    still_alive = [index for index, ref in enumerate(page_refs) if ref() is not None]
+    assert still_alive == [], f"auction pages {still_alive} were still referenced after streaming"
+
+
+def test_lowestbin_refresh_indexes_every_page() -> None:
+    """Folding page by page must index the same auctions collecting them did."""
+    last_updated = _epoch_millis(2025, 3, 1, 12, 0)
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", 0))
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 3,
+                "lastUpdated": last_updated,
+                "auctions": [
+                    _auction(f"ITEM_{page}", 1_000 * (page + 1), item_name=f"Item {page}"),
+                ],
+            },
+        )
+
+    settings = _marketguard_settings()
+    service = _marketguard_service(settings, _handler)
+
+    async def _exercise():
+        snapshot = await service.refresh()
+        await service.aclose()
+        return snapshot
+
+    snapshot = asyncio.run(_exercise())
+
+    assert snapshot.total_pages == 3
+    assert snapshot.total_auctions == 3
+    assert snapshot.total_bin_auctions == 3
+    assert snapshot.items["ITEM_0"] == 1_000.0
+    assert snapshot.items["ITEM_1"] == 2_000.0
+    assert snapshot.items["ITEM_2"] == 3_000.0
+
+
+def test_auction_snapshot_drift_discards_the_partial_index() -> None:
+    """A drift retry must start from an empty index, not from what it folded.
+
+    Streaming means pages are indexed before the snapshot is known to be
+    consistent. Without the reset, the retry would count the discarded
+    attempt's auctions a second time.
+    """
+    last_updated = _epoch_millis(2025, 3, 1, 12, 0)
+    state = {"page0_requests": 0}
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page", 0))
+        if page == 0:
+            state["page0_requests"] += 1
+        # On the first attempt page 1 reports a newer snapshot, which is drift.
+        drifted = state["page0_requests"] == 1 and page == 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "totalPages": 2,
+                "lastUpdated": last_updated + (1 if drifted else 0),
+                "auctions": [_auction(f"ITEM_{page}", 1_000 * (page + 1))],
+            },
+        )
+
+    settings = _marketguard_settings()
+    service = _marketguard_service(settings, _handler)
+
+    async def _exercise():
+        snapshot = await service.refresh()
+        await service.aclose()
+        return snapshot
+
+    snapshot = asyncio.run(_exercise())
+
+    assert state["page0_requests"] == 2, "the drifted attempt should have been retried"
+    assert snapshot.total_auctions == 2, "the discarded attempt leaked into the retry"
+    assert snapshot.total_bin_auctions == 2
+    assert snapshot.snapshot_last_updated == last_updated
+
+
+def test_stream_snapshot_resets_the_consumer_before_each_attempt() -> None:
+    """The client, not the caller, is responsible for clearing a failed attempt."""
+    last_updated = _epoch_millis(2025, 3, 1, 12, 0)
+    attempts = {"count": 0}
+
+    async def _fetch_page(page_number: int) -> AuctionPage:
+        if page_number == 0:
+            attempts["count"] += 1
+        drifted = attempts["count"] == 1 and page_number == 1
+        return AuctionPage(
+            page_number=page_number,
+            total_pages=2,
+            last_updated=last_updated + (1 if drifted else 0),
+            auctions=[_auction(f"ITEM_{page_number}", 1_000)],
+        )
+
+    client = HypixelAuctionClient(_marketguard_settings())
+    client._fetch_page = _fetch_page  # type: ignore[method-assign]
+    consumer = _CountingPageConsumer()
+
+    summary = asyncio.run(client.stream_snapshot(consumer))
+
+    assert attempts["count"] == 2
+    # One reset per attempt, including the one that drifted.
+    assert consumer.resets == 2
+    assert consumer.auctions == 2
+    assert summary.total_auctions == 2
+
+
+def test_stream_snapshot_keeps_only_the_workers_pages_in_flight() -> None:
+    """Peak memory must follow the worker count, not the size of the house.
+
+    Scheduling every page up front bounds the concurrent requests but not the
+    pages already fetched: those queue up while the consumer decodes, which
+    reproduces the accumulation streaming is meant to remove. The pool must
+    therefore hold at most one page per worker.
+    """
+    settings = _marketguard_settings()
+    total_pages = 40
+    live = {"now": 0, "peak": 0}
+
+    async def _fetch_page(page_number: int) -> AuctionPage:
+        # Yield the way a real HTTP round trip does, so workers interleave.
+        await asyncio.sleep(0)
+        live["now"] += 1
+        live["peak"] = max(live["peak"], live["now"])
+        return AuctionPage(
+            page_number=page_number,
+            total_pages=total_pages,
+            last_updated=_epoch_millis(2025, 3, 1, 12, 0),
+            auctions=[_auction(f"ITEM_{page_number}", 1_000)],
+        )
+
+    class _ReleasingConsumer:
+        def reset(self) -> None:
+            live["now"] = 0
+
+        async def add_page(self, auctions) -> None:
+            # Stand in for the decode, which is where pages used to pile up.
+            await asyncio.sleep(0)
+            live["now"] -= 1
+
+    client = HypixelAuctionClient(settings)
+    client._fetch_page = _fetch_page  # type: ignore[method-assign]
+
+    summary = asyncio.run(client.stream_snapshot(_ReleasingConsumer()))
+
+    assert summary.total_pages == total_pages
+    assert live["peak"] <= settings.max_parallel_pages, (
+        f"{live['peak']} pages were in flight at once, "
+        f"max_parallel_pages is {settings.max_parallel_pages}"
+    )
