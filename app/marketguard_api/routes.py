@@ -26,6 +26,8 @@ from .models import (
     BazaarResponse,
     LowestBinV2Response,
     LowestBinQueryRequest,
+    PlayerFinanceQuery,
+    PlayerFinanceResponse,
     PlayersQueryRequest,
     PlayersQueryResponse,
     ReadinessResponse,
@@ -38,6 +40,7 @@ _RATE_LIMIT_RETRY_AFTER_EXAMPLE = "60"
 _CACHE_KEY_LOWESTBIN_V2 = "lowestbin:v2"
 _CACHE_KEY_BAZAAR_V1 = "bazaar:v1"
 _CACHE_KEY_PLAYERS_V1_PREFIX = "players:v1:"
+_CACHE_KEY_PLAYER_FINANCE_V1_PREFIX = "player-finance:v1:"
 _READINESS_OK_DETAIL = "All MarketGuard datasets are fresh and available."
 _READINESS_DEGRADED_DETAIL = "At least one MarketGuard dataset is stale."
 _READINESS_UNAVAILABLE_DETAIL = "At least one MarketGuard dataset is unavailable."
@@ -89,6 +92,8 @@ def register_marketguard_routes(
     player_query_metrics = PlayerQueryMetrics()
     player_query_inflight: dict[str, asyncio.Task[dict[str, object]]] = {}
     player_query_inflight_lock = asyncio.Lock()
+    player_finance_inflight: dict[str, asyncio.Task[dict[str, object]]] = {}
+    player_finance_inflight_lock = asyncio.Lock()
 
     app.state.marketguard_settings = marketguard_settings
     app.state.marketguard_service = marketguard_service
@@ -124,6 +129,31 @@ def register_marketguard_routes(
                 task.add_done_callback(_schedule_flight_cleanup)
             else:
                 player_query_metrics.record_coalesced_waiter()
+
+        return await asyncio.shield(task)
+
+    async def _load_player_finance_payload(
+        cache_key: str,
+        query: PlayerFinanceQuery,
+    ) -> dict[str, object]:
+        async with player_finance_inflight_lock:
+            task = player_finance_inflight.get(cache_key)
+            if task is None:
+                task = asyncio.create_task(marketguard_player_service.get_player_finance(query))
+                player_finance_inflight[cache_key] = task
+
+                def _schedule_flight_cleanup(completed_task: asyncio.Task[dict[str, object]]) -> None:
+                    if not completed_task.cancelled():
+                        completed_task.exception()
+
+                    async def _clear_completed_flight() -> None:
+                        async with player_finance_inflight_lock:
+                            if player_finance_inflight.get(cache_key) is completed_task:
+                                player_finance_inflight.pop(cache_key, None)
+
+                    asyncio.create_task(_clear_completed_flight())
+
+                task.add_done_callback(_schedule_flight_cleanup)
 
         return await asyncio.shield(task)
 
@@ -313,6 +343,56 @@ def register_marketguard_routes(
         finally:
             player_query_metrics.record_response((time.perf_counter() - started_at) * 1_000)
 
+    @app.api_route(
+        "/api/v1/player-finance",
+        methods=["QUERY"],
+        response_model=PlayerFinanceResponse,
+        responses={
+            419: _error_response_docs(_HYPIXEL_KEY_ERROR_DETAIL),
+            429: _error_response_docs("Too many requests.", retry_after=True),
+            503: _error_response_docs("Player finance data is temporarily unavailable.", retry_after=True),
+        },
+    )
+    async def player_finance_query(request: Request, query: PlayerFinanceQuery) -> JSONResponse:
+        if not marketguard_settings.hypixel_api_key.strip():
+            raise HTTPException(status_code=419, detail=_HYPIXEL_KEY_ERROR_DETAIL)
+        await _apply_rate_limit(
+            request,
+            route_key="player-finance",
+            max_requests=int(marketguard_settings.players_rate_limit_per_minute),
+            trusted_proxies=marketguard_settings.trusted_proxies,
+        )
+
+        cache_key = _player_finance_cache_key(query)
+        cached_response = await _read_cached_response(request, cache_key)
+        if cached_response is not None:
+            return _json_cache_response(
+                marketguard_settings,
+                _player_finance_payload_with_stale(cached_response.payload, stale=cached_response.is_stale),
+                is_stale=cached_response.is_stale,
+            )
+
+        try:
+            payload = await _load_player_finance_payload(cache_key, query)
+        except HypixelAuthenticationError as exc:
+            raise HTTPException(status_code=419, detail=_HYPIXEL_KEY_ERROR_DETAIL) from exc
+        except HypixelRateLimitError as exc:
+            headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds else None
+            raise HTTPException(
+                status_code=503,
+                detail="Player finance data is temporarily unavailable.",
+                headers=headers,
+            ) from exc
+        except HypixelUpstreamError as exc:
+            raise HTTPException(status_code=503, detail="Player finance data is temporarily unavailable.") from exc
+
+        await _write_cached_response(request, cache_key, payload, is_stale=False)
+        return _json_cache_response(
+            marketguard_settings,
+            _player_finance_payload_with_stale(payload, stale=False),
+            is_stale=False,
+        )
+
     async def _readiness_payload() -> tuple[dict[str, object], int, dict[str, str]]:
         now_epoch_seconds = datetime.now(timezone.utc).timestamp()
         lowestbin_component, bazaar_component = await asyncio.gather(
@@ -456,6 +536,12 @@ def _players_query_cache_key(query: PlayersQueryRequest) -> str:
     return f"{_CACHE_KEY_PLAYERS_V1_PREFIX}{digest}"
 
 
+def _player_finance_cache_key(query: PlayerFinanceQuery) -> str:
+    payload = f"{query.playerUuid}:{query.profileId}"
+    digest = hashlib.sha256(payload.encode("ascii")).hexdigest()
+    return f"{_CACHE_KEY_PLAYER_FINANCE_V1_PREFIX}{digest}"
+
+
 def _normalize_players_cache_identifier(value: str) -> str:
     normalized = str(value or "").strip().lower()
     compact_uuid = normalized.replace("-", "")
@@ -471,6 +557,12 @@ def _marketguard_top_level_status(is_stale: bool) -> str:
 def _marketguard_payload_with_status(payload: dict[str, object], *, is_stale: bool) -> dict[str, object]:
     normalized_payload = dict(payload)
     normalized_payload["status"] = _marketguard_top_level_status(is_stale)
+    return normalized_payload
+
+
+def _player_finance_payload_with_stale(payload: dict[str, object], *, stale: bool) -> dict[str, object]:
+    normalized_payload = dict(payload)
+    normalized_payload["stale"] = stale
     return normalized_payload
 
 
@@ -540,7 +632,10 @@ def _readiness_component_payload(
     if not isinstance(generated_at, datetime):
         return {"status": "down", "lastUpdated": None}
     snapshot_age_seconds = now_epoch_seconds - generated_at.timestamp()
-    if snapshot_age_seconds < int(settings.cache_ttl_seconds):
+    # Hypixel only regenerates these datasets about once a minute, so a snapshot
+    # marginally older than the cache TTL is healthy, not degraded. Reporting it
+    # as degraded made uptime probes that require HTTP 200 flap constantly.
+    if snapshot_age_seconds < int(settings.readiness_fresh_seconds):
         component_status = "ok"
     elif snapshot_age_seconds < int(settings.stale_if_error_seconds):
         component_status = "stale"

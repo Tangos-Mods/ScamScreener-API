@@ -5,7 +5,7 @@ from datetime import datetime
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, constr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, constr, field_validator
 
 
 _COMPACT_UUID_PATTERN = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -160,6 +160,54 @@ class PlayersQueryRequest(BaseModel):
             ]
         ],
     )
+
+
+class PlayerFinanceQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    playerUuid: str = Field(..., examples=["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+    profileId: str = Field(..., examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+
+    @field_validator("playerUuid", "profileId")
+    @classmethod
+    def validate_uuid(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if not (_COMPACT_UUID_PATTERN.fullmatch(normalized) or _DASHED_UUID_PATTERN.fullmatch(normalized)):
+            raise ValueError("value must be a UUID.")
+        return normalized.replace("-", "")
+
+
+class PlayerFinanceValuesResponse(BaseModel):
+    bank: float | None = Field(None, ge=0, examples=[125000000.0])
+    purse: float | None = Field(None, ge=0, examples=[4250000.5])
+    museumValue: float | None = Field(None, ge=0, examples=[85000000.0])
+    knownTotal: float | None = Field(None, ge=0, examples=[214250000.5])
+
+
+class PlayerMuseumResponse(BaseModel):
+    value: float | None = Field(None, ge=0, examples=[85000000.0])
+    appraisal: bool | None = Field(None, examples=[True])
+    donatedIds: list[str] | None = Field(None, examples=[["ASPECT_OF_THE_END", "NECRON_HELMET"]])
+    donatedCount: int | None = Field(None, ge=0, examples=[2])
+    specialIds: list[str] | None = Field(None, examples=[["DCTR_SPACE_HELM"]])
+    specialCount: int | None = Field(None, ge=0, examples=[1])
+
+
+class PlayerFinanceProfileResponse(BaseModel):
+    id: str = Field(..., examples=["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+    name: str | None = Field(None, examples=["Apple"])
+    selected: bool = Field(..., examples=[True])
+    finance: PlayerFinanceValuesResponse
+    museum: PlayerMuseumResponse
+
+
+class PlayerFinanceResponse(BaseModel):
+    status: Literal["ok", "partial", "profile_not_found", "member_not_found"] = Field(..., examples=["ok"])
+    stale: bool = Field(..., examples=[False])
+    fetchedAt: int = Field(..., ge=0, examples=[1715478978620])
+    playerUuid: str = Field(..., examples=["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+    profile: PlayerFinanceProfileResponse | None = None
+    unavailableFields: list[str] = Field(default_factory=list, examples=[[]])
 
 
 class PlayerInventoryItemResponse(BaseModel):

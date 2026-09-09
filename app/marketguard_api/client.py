@@ -349,6 +349,18 @@ class HypixelPlayerClient:
             raise HypixelUpstreamError("Hypixel API returned an invalid SkyBlock profiles payload.")
         return [profile for profile in profiles if isinstance(profile, dict)]
 
+    async def fetch_profile(self, profile_id: str) -> dict[str, Any] | None:
+        payload = await self._fetch_authenticated("/skyblock/profile", params={"profile": profile_id})
+        profile = payload.get("profile")
+        if profile is None:
+            return None
+        if not isinstance(profile, dict):
+            raise HypixelUpstreamError("Hypixel API returned an invalid SkyBlock profile payload.")
+        return profile
+
+    async def fetch_museum(self, profile_id: str) -> dict[str, Any]:
+        return await self._fetch_authenticated("/skyblock/museum", params={"profile": profile_id})
+
     async def fetch_skyblock_skills(self) -> dict[str, dict[str, Any]]:
         client = self._get_client()
         try:

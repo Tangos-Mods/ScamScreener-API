@@ -12,6 +12,7 @@ from .cache import ResponseCacheChain, build_response_cache
 from .config import MarketGuardSettings
 from .player_service import PlayerService
 from .rate_limit import InMemoryRateLimiter
+from .refresher import build_refresh_supervisor
 from .routes import register_marketguard_routes
 from .service import BazaarService, LowestBinService
 from .storage import MarketGuardStorage
@@ -47,15 +48,27 @@ def create_marketguard_app(
     runtime_bazaar_service = bazaar_service or BazaarService(runtime_settings, storage=storage)
     runtime_player_service = player_service or PlayerService(runtime_settings)
     persistent_api_metrics = PersistentApiMetricsRecorder(runtime_settings.database_url)
+    refresh_supervisor = build_refresh_supervisor(
+        runtime_settings,
+        lowestbin_service=lowestbin_service,
+        bazaar_service=runtime_bazaar_service,
+    )
     docs_url = "/docs" if runtime_settings.api_docs_enabled else None
     redoc_url = "/redoc" if runtime_settings.api_docs_enabled else None
     openapi_url = "/openapi.json" if runtime_settings.api_docs_enabled else None
 
     @asynccontextmanager
     async def app_lifespan(_: FastAPI):
+        if refresh_supervisor is not None:
+            await refresh_supervisor.start()
         try:
             yield
         finally:
+            if refresh_supervisor is not None:
+                try:
+                    await refresh_supervisor.stop()
+                except Exception:
+                    logger.exception("Could not stop the MarketGuard snapshot refreshers during shutdown.")
             try:
                 await run_in_threadpool(persistent_api_metrics.flush)
             except Exception:
@@ -85,6 +98,7 @@ def create_marketguard_app(
     app.state.marketguard_response_cache = runtime_response_cache
     app.state.live_api_metrics = LiveApiRequestMetrics()
     app.state.persistent_api_metrics = persistent_api_metrics
+    app.state.marketguard_refresh_supervisor = refresh_supervisor
 
     def _require_internal_observability_access(request: Request) -> None:
         if _request_originates_from_internal_network(request, runtime_settings.trusted_proxies):

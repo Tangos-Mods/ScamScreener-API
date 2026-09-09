@@ -9,8 +9,8 @@ from typing import Any
 
 from .client import HypixelPlayerClient, MojangNameClient
 from .config import MarketGuardSettings
-from .exceptions import HypixelAuthenticationError, HypixelUpstreamError, MojangUpstreamError
-from .models import PlayerProfileQuery
+from .exceptions import HypixelAuthenticationError, HypixelRateLimitError, HypixelUpstreamError, MojangUpstreamError
+from .models import PlayerFinanceQuery, PlayerProfileQuery
 from .nbt import parse_inventory_nbt
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,85 @@ class PlayerService:
         return {
             "status": "ok",
             "players": [dict(results_by_key[key]) for key in query_keys],
+        }
+
+    async def get_player_finance(self, query: PlayerFinanceQuery) -> dict[str, object]:
+        player_uuid = _normalize_uuid(query.playerUuid)
+        profile_id = _normalize_uuid(query.profileId)
+        if player_uuid is None or profile_id is None:
+            raise ValueError("Player finance UUIDs must be normalized before service use.")
+
+        async with self._upstream_semaphore:
+            profile = await self._hypixel_client.fetch_profile(profile_id)
+        fetched_at = _epoch_millis()
+        if profile is None:
+            return {
+                "status": "profile_not_found",
+                "stale": False,
+                "fetchedAt": fetched_at,
+                "playerUuid": player_uuid,
+                "profile": None,
+                "unavailableFields": ["profile"],
+            }
+
+        profile_payload = _finance_profile_payload(profile, profile_id)
+        member = _profile_member(profile, player_uuid)
+        if member is None:
+            return {
+                "status": "member_not_found",
+                "stale": False,
+                "fetchedAt": fetched_at,
+                "playerUuid": player_uuid,
+                "profile": profile_payload,
+                "unavailableFields": ["profile.member", "finance", "museum"],
+            }
+
+        unavailable_fields: list[str] = []
+        bank = _bank_balance(profile)
+        if bank is None:
+            unavailable_fields.append("finance.bank")
+        purse = _coin_purse(member)
+        if purse is None:
+            unavailable_fields.append("finance.purse")
+
+        museum_payload: dict[str, object]
+        try:
+            async with self._upstream_semaphore:
+                museum_response = await self._hypixel_client.fetch_museum(profile_id)
+        except HypixelAuthenticationError:
+            raise
+        except HypixelRateLimitError:
+            raise
+        except HypixelUpstreamError:
+            logger.warning("Hypixel Museum data is temporarily unavailable.")
+            museum_payload = _empty_museum_payload()
+            unavailable_fields.extend(_museum_unavailable_fields())
+        else:
+            museum_record = _museum_member(museum_response, player_uuid)
+            museum_payload, museum_unavailable = _museum_payload(museum_record)
+            unavailable_fields.extend(museum_unavailable)
+
+        museum_value = museum_payload["value"]
+        known_total = _known_total(bank, purse, museum_value)
+        if museum_value is None:
+            unavailable_fields.append("finance.museumValue")
+        if known_total is None:
+            unavailable_fields.append("finance.knownTotal")
+
+        profile_payload["finance"] = {
+            "bank": bank,
+            "purse": purse,
+            "museumValue": museum_value,
+            "knownTotal": known_total,
+        }
+        profile_payload["museum"] = museum_payload
+        return {
+            "status": "partial" if unavailable_fields else "ok",
+            "stale": False,
+            "fetchedAt": fetched_at,
+            "playerUuid": player_uuid,
+            "profile": profile_payload,
+            "unavailableFields": list(dict.fromkeys(unavailable_fields)),
         }
 
     @staticmethod
@@ -309,6 +388,24 @@ def _profile_payload(profile: dict[str, Any]) -> dict[str, object]:
     }
 
 
+def _finance_profile_payload(profile: dict[str, Any], expected_profile_id: str) -> dict[str, object]:
+    profile_id = _normalize_uuid(profile.get("profile_id"))
+    if profile_id != expected_profile_id:
+        raise HypixelUpstreamError("Hypixel API returned a mismatched SkyBlock profile ID.")
+    return {
+        "id": profile_id,
+        "name": _safe_text(profile.get("cute_name")) or None,
+        "selected": profile.get("selected") is True,
+        "finance": {
+            "bank": None,
+            "purse": None,
+            "museumValue": None,
+            "knownTotal": None,
+        },
+        "museum": _empty_museum_payload(),
+    }
+
+
 def _profile_member(profile: dict[str, Any], player_uuid: str) -> dict[str, Any] | None:
     members = profile.get("members")
     if not isinstance(members, dict):
@@ -328,6 +425,158 @@ def _bank_balance(profile: dict[str, Any]) -> float | None:
 
 def _coin_purse(member: dict[str, Any]) -> float | None:
     return _non_negative_number(member.get("coin_purse"))
+
+
+def _museum_member(payload: dict[str, Any], player_uuid: str) -> dict[str, Any] | None:
+    profile_payload = payload.get("profile")
+    if _looks_like_museum_record(profile_payload):
+        return profile_payload
+    member = _member_from_map(profile_payload, player_uuid)
+    if member is not None:
+        return member
+    return _member_from_map(payload.get("members"), player_uuid)
+
+
+def _looks_like_museum_record(value: Any) -> bool:
+    return isinstance(value, dict) and any(field in value for field in ("value", "appraisal", "items", "special"))
+
+
+def _member_from_map(value: Any, player_uuid: str) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    for raw_uuid, member in value.items():
+        if _normalize_uuid(raw_uuid) == player_uuid and isinstance(member, dict):
+            return member
+    return None
+
+
+def _museum_payload(record: dict[str, Any] | None) -> tuple[dict[str, object], list[str]]:
+    if record is None:
+        return _empty_museum_payload(), _museum_unavailable_fields()
+
+    unavailable_fields: list[str] = []
+    value = _non_negative_number(record.get("value"))
+    if value is None:
+        unavailable_fields.append("museum.value")
+
+    appraisal_raw = record.get("appraisal")
+    appraisal = appraisal_raw if isinstance(appraisal_raw, bool) else None
+    if appraisal is None:
+        unavailable_fields.append("museum.appraisal")
+
+    donated_ids = _museum_position_ids(record.get("items"))
+    if donated_ids is None:
+        unavailable_fields.extend(["museum.donatedIds", "museum.donatedCount"])
+
+    special_ids = _museum_special_ids(record.get("special"))
+    if special_ids is None:
+        unavailable_fields.extend(["museum.specialIds", "museum.specialCount"])
+
+    return (
+        {
+            "value": value,
+            "appraisal": appraisal,
+            "donatedIds": donated_ids,
+            "donatedCount": len(donated_ids) if donated_ids is not None else None,
+            "specialIds": special_ids,
+            "specialCount": len(special_ids) if special_ids is not None else None,
+        },
+        unavailable_fields,
+    )
+
+
+def _empty_museum_payload() -> dict[str, object]:
+    return {
+        "value": None,
+        "appraisal": None,
+        "donatedIds": None,
+        "donatedCount": None,
+        "specialIds": None,
+        "specialCount": None,
+    }
+
+
+def _museum_unavailable_fields() -> list[str]:
+    return [
+        "museum.value",
+        "museum.appraisal",
+        "museum.donatedIds",
+        "museum.donatedCount",
+        "museum.specialIds",
+        "museum.specialCount",
+    ]
+
+
+def _museum_position_ids(value: Any) -> list[str] | None:
+    if not isinstance(value, dict):
+        return None
+    identifiers: list[str] = []
+    for raw_identifier in value:
+        identifier = _museum_identifier(raw_identifier)
+        if identifier is None:
+            return None
+        identifiers.append(identifier)
+    return sorted(identifiers)
+
+
+def _museum_special_ids(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    identifiers: list[str] = []
+    for entry in value:
+        if isinstance(entry, str):
+            identifier = _museum_identifier(entry)
+            if identifier is None:
+                return None
+            identifiers.append(identifier)
+            continue
+        if not isinstance(entry, dict):
+            return None
+
+        explicit_identifier = next(
+            (
+                _museum_identifier(entry.get(field))
+                for field in ("id", "item_id", "itemId", "donation_id", "donationId")
+                if entry.get(field) is not None
+            ),
+            None,
+        )
+        if explicit_identifier is not None:
+            identifiers.append(explicit_identifier)
+            continue
+
+        encoded_items = entry.get("items")
+        if not isinstance(encoded_items, dict):
+            return None
+        encoded = encoded_items.get("data")
+        if isinstance(encoded, str) and encoded.strip():
+            parsed = parse_inventory_nbt(encoded)
+            if parsed is None or not parsed:
+                return None
+            identifiers.extend(item.item_id for item in parsed)
+            continue
+
+        nested_ids = _museum_position_ids(encoded_items)
+        if nested_ids is None or not nested_ids:
+            return None
+        identifiers.extend(nested_ids)
+    return identifiers
+
+
+def _museum_identifier(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > 128 or not all(character.isalnum() or character in "_:-." for character in normalized):
+        return None
+    return normalized
+
+
+def _known_total(bank: float | None, purse: float | None, museum_value: object) -> float | None:
+    if bank is None or purse is None or not isinstance(museum_value, (int, float)) or isinstance(museum_value, bool):
+        return None
+    total = bank + purse + float(museum_value)
+    return total if math.isfinite(total) and total >= 0.0 else None
 
 
 def _inventory(member: dict[str, Any], *keys: str) -> list[dict[str, object]] | None:
