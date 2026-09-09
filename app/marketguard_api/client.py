@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
+from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -18,6 +21,44 @@ from .exceptions import (
 from .models import AuctionPage, AuctionSnapshot, BazaarProductSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+class _HypixelKeyRateLimiter:
+    """Enforce Hypixel's API-key quota with a rolling, process-wide window."""
+
+    def __init__(
+        self,
+        *,
+        max_requests: int = 300,
+        window_seconds: int = 300,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_requests = max(1, int(max_requests))
+        self._window_seconds = max(1, int(window_seconds))
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._requests: deque[float] = deque()
+
+    async def acquire(self) -> None:
+        now = self._clock()
+        async with self._lock:
+            cutoff = now - self._window_seconds
+            while self._requests and self._requests[0] <= cutoff:
+                self._requests.popleft()
+
+            if len(self._requests) >= self._max_requests:
+                retry_after = max(1, math.ceil(self._requests[0] + self._window_seconds - now))
+                raise HypixelRateLimitError(
+                    "Configured Hypixel API key request limit reached.",
+                    retry_after_seconds=retry_after,
+                )
+
+            # Count attempts, including requests that later time out, because they may still
+            # have reached Hypixel and consumed the key's quota.
+            self._requests.append(now)
+
+
+_HYPIXEL_KEY_RATE_LIMITER = _HypixelKeyRateLimiter()
 
 
 class HypixelAuctionClient:
@@ -329,6 +370,7 @@ class HypixelPlayerClient:
         if not api_key:
             raise HypixelUpstreamError("Hypixel player API is not configured.")
 
+        await _HYPIXEL_KEY_RATE_LIMITER.acquire()
         client = self._get_client()
         try:
             response = await client.get(path, params=params, headers={"API-Key": api_key})
