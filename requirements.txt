@@ -7,6 +7,6 @@ PyMySQL==1.1.2
 cryptography==50.0.0
 webauthn==2.7.1
 qrcode==8.2
-pytest==9.0.3
+pytest==9.1.1
 httpx==0.28.1
 redis==5.2.1
