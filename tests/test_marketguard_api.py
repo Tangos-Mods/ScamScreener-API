@@ -19,7 +19,14 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.marketguard_api.cache import CachedResponse, LocalResponseCache, ResponseCacheChain
-from app.marketguard_api.client import HypixelAuctionClient, HypixelBazaarClient, HypixelPlayerClient, MojangNameClient
+from app.marketguard_api.client import (
+    HypixelAuctionClient,
+    HypixelBazaarClient,
+    HypixelPlayerClient,
+    MojangNameClient,
+    _HypixelKeyRateLimiter,
+)
+from app.marketguard_api.exceptions import HypixelRateLimitError
 from app.marketguard_api.config import MarketGuardSettings
 from app.marketguard_api.item_keys import resolve_auction_item
 from app.marketguard_api.main import create_marketguard_app
@@ -31,6 +38,26 @@ from app.marketguard_api import service as service_module
 from app.marketguard_api.service import BazaarService, LowestBinService
 from app.marketguard_api.storage import LowestBinAverageWindow, StoredLowestBinSnapshot, snapshot_day_from_last_updated
 from app.training_hub.config.settings import TrainingHubSettings
+
+
+def test_hypixel_key_rate_limiter_enforces_rolling_five_minute_window() -> None:
+    now = [0.0]
+    limiter = _HypixelKeyRateLimiter(max_requests=2, window_seconds=300, clock=lambda: now[0])
+
+    async def _exercise() -> None:
+        await limiter.acquire()
+        await limiter.acquire()
+        try:
+            await limiter.acquire()
+        except HypixelRateLimitError as exc:
+            assert exc.retry_after_seconds == 300
+        else:
+            raise AssertionError("third request inside the five-minute window must be rejected")
+
+        now[0] = 300.0
+        await limiter.acquire()
+
+    asyncio.run(_exercise())
 
 
 def test_lowestbin_v1_returns_not_found(tmp_path: Path) -> None:
@@ -1144,7 +1171,7 @@ def test_players_query_coalesces_identical_cache_misses_and_tracks_efficiency() 
         async def aclose(self) -> None:
             return None
 
-    settings = _marketguard_settings(players_rate_limit_per_minute=3, hypixel_api_key="test-key")
+    settings = _marketguard_settings(hypixel_api_key="test-hypixel-key", players_rate_limit_per_minute=3)
     marketguard_service, marketguard_bazaar_service = _noop_marketguard_services(settings)
     counting_player_service = _CountingPlayerService()
     app = create_marketguard_app(

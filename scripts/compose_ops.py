@@ -227,6 +227,28 @@ print("local" if register_status != 404 or forgot_status != 404 else "external")
     return mode if mode in {"local", "external"} else "unknown"
 
 
+def compose_project_name(context: ComposeContext) -> str:
+    """Best-effort name of the Compose project this deployment belongs to.
+
+    Mirrors how Docker Compose itself picks the project name, so volume
+    lookups can be scoped to this stack on hosts that run several projects.
+    """
+    from_env = os.getenv("COMPOSE_PROJECT_NAME", "").strip()
+    if from_env:
+        return from_env
+    if context.env_file.is_file():
+        for line in context.env_file.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "COMPOSE_PROJECT_NAME" and value.strip():
+                return value.strip().strip('"').strip("'")
+    if context.compose_file.is_file():
+        for line in context.compose_file.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^name:\s*(\S+)\s*$", line)
+            if match:
+                return match.group(1).strip('"').strip("'")
+    return re.sub(r"[^a-z0-9_-]", "", context.repo_root.name.lower())
+
+
 def list_docker_volumes(*, cwd: Path) -> list[str]:
     result = run_command(["docker", "volume", "ls", "--format", "{{.Name}}"], cwd=cwd, capture_output=True)
     return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
@@ -234,11 +256,18 @@ def list_docker_volumes(*, cwd: Path) -> list[str]:
 
 def resolve_named_volumes(context: ComposeContext) -> dict[str, str]:
     available = list_docker_volumes(cwd=context.repo_root)
+    project = compose_project_name(context)
     resolved: dict[str, str] = {}
     for logical_name in _LOGICAL_VOLUME_NAMES:
         exact_matches = [name for name in available if name == logical_name]
         suffix_matches = [name for name in available if name.endswith(f"_{logical_name}")]
         candidates = sorted(set(exact_matches or suffix_matches))
+        if len(candidates) > 1 and project:
+            # Other Compose projects on the same host may own a volume with the
+            # same logical suffix (e.g. a second Caddy stack). Prefer our own.
+            scoped = f"{project}_{logical_name}"
+            if scoped in candidates:
+                candidates = [scoped]
         if len(candidates) > 1:
             raise RuntimeError(
                 f"Ambiguous Docker volumes for {logical_name}: {', '.join(candidates)}. "
