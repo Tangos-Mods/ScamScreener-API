@@ -268,6 +268,7 @@ Important notes:
 - keep `TRAINING_HUB_TRUSTED_PROXIES=127.0.0.1` unless you know you need more
 - `/docs`, `/redoc`, and `/openapi.json` should stay disabled publicly unless you intentionally expose them
 - keep `WEB_CONCURRENCY=1` while `/api/v1/players` uses its process-local per-IP limiter; Redis shares cached responses but not rate-limit state
+- keep `MARKETGUARD_BACKGROUND_REFRESH_ENABLED=true`; the single worker relies on snapshots being refreshed off the request path
 - use Admin Analytics > Metrics to inspect Player QUERY cache hit rate, response time, active upstream loads, and upstream failures before raising `MARKETGUARD_PLAYERS_MAX_UPSTREAM_CONCURRENCY`
 
 ## 9) Run Preflight
@@ -491,6 +492,39 @@ bash scripts/preflight.sh
 
 Fix the exact value the script reports before retrying the deploy.
 
+### Uptime monitor reports the API offline or flapping
+
+The public API keeps its Hypixel snapshots warm with a background refresher. If
+uptime checks flap, work through this in order.
+
+1. Point the monitor at `https://<host>/api/v1/ready` and accept `200` and `206`
+   as up. `206` means "serving slightly stale data", not "down"; only `503`
+   means no usable snapshot. Do not monitor `/api/v1/health` - it is
+   intentionally `403` from public networks.
+2. Confirm the refresher started:
+
+   ```bash
+   docker compose logs scamscreener-api | grep "background refresher"
+   ```
+
+   You should see `Started MarketGuard lowestbin background refresher` and the
+   same for `bazaar`. If instead you see `MarketGuard background refresh is
+   disabled`, `MARKETGUARD_BACKGROUND_REFRESH_ENABLED` is set to `false` -
+   with it off, refreshes fall back into client requests and a single Uvicorn
+   worker goes unresponsive on every cache expiry.
+3. Check for repeated `background refresh failed` warnings. Those are upstream
+   Hypixel or storage errors: the last good snapshot is still served (marked
+   stale) and the refresher retries every
+   `MARKETGUARD_BACKGROUND_REFRESH_RETRY_SECONDS`.
+4. If snapshots are consistently just past their TTL, raise
+   `MARKETGUARD_READINESS_FRESH_GRACE_SECONDS` rather than lowering
+   `MARKETGUARD_CACHE_TTL_SECONDS`; Hypixel only regenerates these datasets
+   about once per minute, so fetching more often buys nothing and burns quota.
+
+Behind Cloudflare, also make sure the monitor is not being served a cached
+response: `/api/v1/ready` sends `Cache-Control: no-store`, so a cached `200`
+there means a proxy rule is overriding origin cache headers.
+
 ### Compose starts but the app is unhealthy
 
 Check:
@@ -505,6 +539,9 @@ Typical causes:
 - missing SMTP values while admin MFA or password-reset mail is enabled
 - mismatched domain settings
 - missing external-auth provider credentials when that flow is enabled
+- the API container failing its healthcheck because the event loop is busy; with
+  background refresh enabled this should not happen, so capture
+  `docker compose logs scamscreener-api` before restarting
 
 ## Final Expected State
 

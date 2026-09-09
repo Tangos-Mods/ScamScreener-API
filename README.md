@@ -238,6 +238,10 @@ The production topology is Compose-first. Running a single `docker run` containe
 - `MARKETGUARD_DB_REQUIRE_TLS` and `MARKETGUARD_DB_SSL_CA` enable verified external MariaDB TLS; the managed internal compose database defaults to plain internal transport
 - `MARKETGUARD_CACHE_TTL_SECONDS` default `60`
 - `MARKETGUARD_STALE_IF_ERROR_SECONDS` default `300`
+- `MARKETGUARD_BACKGROUND_REFRESH_ENABLED` default `true`; refreshes the Lowest BIN and Bazaar snapshots on a timer so client requests never pay for a Hypixel fetch
+- `MARKETGUARD_BACKGROUND_REFRESH_INTERVAL_SECONDS` default `0`, meaning "follow `MARKETGUARD_CACHE_TTL_SECONDS`"
+- `MARKETGUARD_BACKGROUND_REFRESH_RETRY_SECONDS` default `15`; retry delay after a failed background refresh
+- `MARKETGUARD_READINESS_FRESH_GRACE_SECONDS` default `120`; extra snapshot age `/api/v1/ready` still reports as `200` instead of `206`
 - `MARKETGUARD_HISTORY_RETENTION_DAYS` default `45`
 - `MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE` default `30`
 - `MARKETGUARD_HYPIXEL_API_KEY` required for `/api/v1/players`; keep it only in the deployment secret environment

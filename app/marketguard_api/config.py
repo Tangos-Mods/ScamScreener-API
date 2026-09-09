@@ -108,6 +108,10 @@ class MarketGuardSettings:
     snapshot_retries: int = 3
     cache_ttl_seconds: int = 60
     stale_if_error_seconds: int = 300
+    background_refresh_enabled: bool = True
+    background_refresh_interval_seconds: int = 0
+    background_refresh_retry_seconds: int = 15
+    readiness_fresh_grace_seconds: int = 120
     history_retention_days: int = 45
     lowestbin_rate_limit_per_minute: int = 30
     players_rate_limit_per_minute: int = 3
@@ -122,6 +126,28 @@ class MarketGuardSettings:
     redis_cache_ttl_seconds: int = 60
     redis_key_prefix: str = "marketguard:response"
     api_docs_enabled: bool = True
+
+    @property
+    def effective_background_refresh_interval_seconds(self) -> int:
+        """Refresh cadence of the background snapshot refresher.
+
+        Defaults to the cache TTL so a snapshot is replaced right about when it
+        would otherwise go stale, which keeps every request on a warm cache.
+        """
+        if self.background_refresh_interval_seconds > 0:
+            return self.background_refresh_interval_seconds
+        return max(5, int(self.cache_ttl_seconds))
+
+    @property
+    def readiness_fresh_seconds(self) -> int:
+        """Snapshot age still reported as fully ready by ``/api/v1/ready``.
+
+        Hypixel only regenerates the auction house roughly once per minute, so a
+        snapshot slightly older than the cache TTL is normal operation, not a
+        degraded service. Without the grace window every uptime probe that
+        requires HTTP 200 flaps between ready and degraded.
+        """
+        return int(self.cache_ttl_seconds) + int(self.readiness_fresh_grace_seconds)
 
     @classmethod
     def from_env(cls) -> "MarketGuardSettings":
@@ -167,6 +193,10 @@ class MarketGuardSettings:
             snapshot_retries=_env_int("MARKETGUARD_SNAPSHOT_RETRIES", 3, 1, 10),
             cache_ttl_seconds=_env_int("MARKETGUARD_CACHE_TTL_SECONDS", 60, 5, 900),
             stale_if_error_seconds=_env_int("MARKETGUARD_STALE_IF_ERROR_SECONDS", 300, 5, 3600),
+            background_refresh_enabled=_env_bool("MARKETGUARD_BACKGROUND_REFRESH_ENABLED", True),
+            background_refresh_interval_seconds=_env_int("MARKETGUARD_BACKGROUND_REFRESH_INTERVAL_SECONDS", 0, 0, 900),
+            background_refresh_retry_seconds=_env_int("MARKETGUARD_BACKGROUND_REFRESH_RETRY_SECONDS", 15, 5, 300),
+            readiness_fresh_grace_seconds=_env_int("MARKETGUARD_READINESS_FRESH_GRACE_SECONDS", 120, 0, 3600),
             history_retention_days=_env_int("MARKETGUARD_HISTORY_RETENTION_DAYS", 45, 31, 365),
             lowestbin_rate_limit_per_minute=_env_int("MARKETGUARD_LOWESTBIN_RATE_LIMIT_PER_MINUTE", 30, 0, 600),
             players_rate_limit_per_minute=_env_int("MARKETGUARD_PLAYERS_RATE_LIMIT_PER_MINUTE", 3, 0, 60),
@@ -185,6 +215,10 @@ class MarketGuardSettings:
         )
         if settings.stale_if_error_seconds < settings.cache_ttl_seconds:
             raise ValueError("MARKETGUARD_STALE_IF_ERROR_SECONDS must be greater than or equal to CACHE_TTL_SECONDS.")
+        if settings.readiness_fresh_grace_seconds > settings.stale_if_error_seconds:
+            raise ValueError(
+                "MARKETGUARD_READINESS_FRESH_GRACE_SECONDS must not exceed MARKETGUARD_STALE_IF_ERROR_SECONDS."
+            )
         if settings.redis_enabled and not settings.redis_url:
             raise ValueError("MARKETGUARD_REDIS_ENABLED requires a usable Redis URL or host/port configuration.")
         return settings

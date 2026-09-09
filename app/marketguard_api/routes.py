@@ -632,7 +632,10 @@ def _readiness_component_payload(
     if not isinstance(generated_at, datetime):
         return {"status": "down", "lastUpdated": None}
     snapshot_age_seconds = now_epoch_seconds - generated_at.timestamp()
-    if snapshot_age_seconds < int(settings.cache_ttl_seconds):
+    # Hypixel only regenerates these datasets about once a minute, so a snapshot
+    # marginally older than the cache TTL is healthy, not degraded. Reporting it
+    # as degraded made uptime probes that require HTTP 200 flap constantly.
+    if snapshot_age_seconds < int(settings.readiness_fresh_seconds):
         component_status = "ok"
     elif snapshot_age_seconds < int(settings.stale_if_error_seconds):
         component_status = "stale"
