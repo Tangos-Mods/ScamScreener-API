@@ -291,16 +291,18 @@ def test_players_query_resolves_name_and_returns_profile_wealth_inventory_and_sk
                         "banking": {"balance": 125_000_000},
                         "members": {
                             player_uuid: {
-                                "coin_purse": 4_250_000.5,
-                                "equippment_contents": {
-                                    "data": _encode_inventory_bytes(
-                                        [("GAUNTLET_OF_CONTAGION", "Gauntlet of Contagion", 1)]
-                                    )
-                                },
-                                "inv_armor": {
-                                    "data": _encode_inventory_bytes(
-                                        [("NECRON_HELMET", "Necron's Helmet", 1)]
-                                    )
+                                "currencies": {"coin_purse": 4_250_000.5},
+                                "inventory": {
+                                    "equipment_contents": {
+                                        "data": _encode_inventory_bytes(
+                                            [("GAUNTLET_OF_CONTAGION", "Gauntlet of Contagion", 1)]
+                                        )
+                                    },
+                                    "inv_armor": {
+                                        "data": _encode_inventory_bytes(
+                                            [("NECRON_HELMET", "Necron's Helmet", 1)]
+                                        )
+                                    },
                                 },
                                 "pets_data": {
                                     "pets": [
@@ -3562,3 +3564,18 @@ def test_stream_snapshot_keeps_only_the_workers_pages_in_flight() -> None:
         f"{live['peak']} pages were in flight at once, "
         f"max_parallel_pages is {settings.max_parallel_pages}"
     )
+
+
+def test_member_purse_and_inventories_accept_v2_and_legacy_layouts() -> None:
+    from app.marketguard_api.player_service import _coin_purse, _inventory
+
+    armor = {"data": _encode_inventory_bytes([("NECRON_HELMET", "Necron's Helmet", 1)])}
+    v2_member = {"currencies": {"coin_purse": 12.5}, "inventory": {"inv_armor": armor}}
+    legacy_member = {"coin_purse": 7.0, "inv_armor": armor}
+
+    assert _coin_purse(v2_member) == 12.5
+    assert _coin_purse(legacy_member) == 7.0
+    assert _coin_purse({"currencies": {}}) is None
+    assert _inventory(v2_member, "inv_armor")[0]["id"] == "NECRON_HELMET"
+    assert _inventory(legacy_member, "inv_armor")[0]["id"] == "NECRON_HELMET"
+    assert _inventory({"inventory": {}}, "inv_armor") is None

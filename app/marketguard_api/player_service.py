@@ -424,6 +424,10 @@ def _bank_balance(profile: dict[str, Any]) -> float | None:
 
 
 def _coin_purse(member: dict[str, Any]) -> float | None:
+    # Hypixel's v2 profile format keeps the purse under "currencies"; older payloads had it at the member root.
+    currencies = member.get("currencies")
+    if isinstance(currencies, dict) and "coin_purse" in currencies:
+        return _non_negative_number(currencies.get("coin_purse"))
     return _non_negative_number(member.get("coin_purse"))
 
 
@@ -580,25 +584,29 @@ def _known_total(bank: float | None, purse: float | None, museum_value: object) 
 
 
 def _inventory(member: dict[str, Any], *keys: str) -> list[dict[str, object]] | None:
-    for key in keys:
-        inventory = member.get(key)
-        if not isinstance(inventory, dict):
+    # Hypixel's v2 profile format nests the inventories under "inventory"; older payloads had them at the member root.
+    for container in (member.get("inventory"), member):
+        if not isinstance(container, dict):
             continue
-        encoded = inventory.get("data")
-        if not isinstance(encoded, str) or not encoded.strip():
-            continue
-        parsed = parse_inventory_nbt(encoded)
-        if parsed is None:
-            return None
-        return [
-            {
-                "slot": item.slot,
-                "id": item.item_id,
-                "name": item.name,
-                "count": item.count,
-            }
-            for item in parsed
-        ]
+        for key in keys:
+            inventory = container.get(key)
+            if not isinstance(inventory, dict):
+                continue
+            encoded = inventory.get("data")
+            if not isinstance(encoded, str) or not encoded.strip():
+                continue
+            parsed = parse_inventory_nbt(encoded)
+            if parsed is None:
+                return None
+            return [
+                {
+                    "slot": item.slot,
+                    "id": item.item_id,
+                    "name": item.name,
+                    "count": item.count,
+                }
+                for item in parsed
+            ]
     return None
 
 
