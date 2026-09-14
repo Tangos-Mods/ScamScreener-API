@@ -379,10 +379,11 @@ If you rely on external sign-in, keep `TRAINING_HUB_ADMIN_USERNAMES` or `TRAININ
 
 ## 14) Regular Updates
 
-Upload the changed release files, keep `.env.production`, then run:
+`update.py` rebuilds and restarts whatever is checked out; it does not fetch new commits (its `--pull` only refreshes Docker base images). Pull the release first, keep `.env.production`, then run:
 
 ```bash
 cd /srv/scamscreener
+git pull --ff-only origin main
 python3 scripts/update.py
 ```
 
